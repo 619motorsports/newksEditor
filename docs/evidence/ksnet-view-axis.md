@@ -84,3 +84,31 @@ GraphicsManager::setDepthMode(this->graphics, eDepthNormal);
 Therefore, the editor menu controls a one-meter, world-origin `+X/+Y/+Z` line
 axis drawn after opaque geometry and before transparent geometry, with depth off
 and the immediate RGB colors scaled to `3`.
+
+## Portable backend mapping
+
+The C++ port stores the six recovered vertices in one immutable buffer. The
+portable line pipeline uses an identity world matrix, the frame view-projection
+matrix, and disabled depth tests and writes.
+
+The backend-neutral batch assigns the view axis to the first transparent scene
+position. The port's single selected-mesh draw at that same position runs
+first. Vulkan and D3D12 then use this order:
+
+```text
+opaque scene
+selected mesh
+world-origin view axis
+transparent scene
+late grid and selected-node axis
+MSAA resolve
+```
+
+The scene-position and resource limits are validated before backend work. The
+Linux SwiftShader fixture checks the ordering at 1x and 4x MSAA. The D3D12 code
+uses the same neutral visitor, but its pixel result still requires Windows WARP
+verification.
+
+The view-axis boundary in this mapping is recovered. The one-draw selected-mesh
+placement is a portable choice because native shadow-mapped transparent-pass
+participation remains unresolved.

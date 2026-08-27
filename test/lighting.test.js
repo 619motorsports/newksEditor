@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, ksEditorGlareBrightPass, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
+import { cspLightDistanceFade, cspLightReceiverVisible, cspLineClosestPoint, cspLineLightSample, cspSecondarySpotAttenuation, cspSecondarySpotPacking, cspSpotConeFactor, cspSpotConePacking, cspSpotEdgeFactors, cspSpotEdgePacking, CSP_SPOT_HALF_ANGLE_MAX, CSP_SPOT_SHARPNESS_MAX, evaluateKsLighting, ksEditorAutoExposure, ksEditorBloomCompositeScale, ksEditorBloomGaussianKernel, ksEditorDitherOffset, ksEditorGlareBrightPass, ksEditorYebisToneMap, KS_EDITOR_DEFAULT_WEATHER, KS_EDITOR_DITHER, KS_EDITOR_GLARE, KS_EDITOR_TONEMAP, parseKsWeatherLighting, STOCK_WEATHER_PRESETS, sunDirectionFromAngles } from "../src/lighting.js";
 import { assettoPath } from "./fixture-paths.js";
 
 test("matches the initialized default Yebis display curve and reciprocal gamma", () => {
@@ -21,6 +21,28 @@ test("clamps full-frame automatic exposure to the installed editor range", () =>
   assert.equal(ksEditorAutoExposure(10), 0.2);
   assert.equal(ksEditorAutoExposure(0.01), 0.5);
   assert.equal(ksEditorAutoExposure(Number.NaN), 0.5);
+});
+
+test("matches the recovered 4x4 Yebis dither texture and tiling", () => {
+  assert.deepEqual(KS_EDITOR_DITHER, {
+    width: 4,
+    height: 4,
+    bayer: [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5],
+    unorm8: [7, 135, 39, 167, 199, 71, 231, 103, 55, 183, 23, 151, 247, 119, 215, 87]
+  });
+  const generated = KS_EDITOR_DITHER.bayer.map((value) => Math.trunc((value * 0.0625 + 0.03125) * 255.999893));
+  assert.deepEqual(generated, KS_EDITOR_DITHER.unorm8);
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+    assert.equal(ksEditorDitherOffset(x, y), ksEditorDitherOffset(x + 4, y + 4));
+  }
+  assert.equal(ksEditorDitherOffset(0, 0, 0), 0);
+});
+
+test("uses the recovered dither table in the production post pass", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /gl_FragCoord\.xy\/4\.0/);
+  assert.match(source, /Uint8Array\.from\(KS_EDITOR_DITHER\.unorm8\)/);
+  assert.doesNotMatch(source, /bayer8/);
 });
 
 test("matches the default Yebis threshold bright pass and bloom scale", () => {

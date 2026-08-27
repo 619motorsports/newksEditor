@@ -1,0 +1,744 @@
+# Native port seed
+
+This directory contains the incremental C++20 port of Apex Editor. The
+JavaScript/WebGL application remains the feature-complete reference while the
+native implementation works through the parity gates in
+[`docs/CPP_PORT.md`](../docs/CPP_PORT.md).
+
+The native port has shared bounded input utilities. It reads KN5 v4/v5/v6,
+DDS, bounded PNG, ACD, VAO, ordered INI/CSP, KSANIM v1/v2, KNH, and
+version-2/version-7 AI splines. The AI-spline reader retains points, driving
+payloads, and the optional spatial grid for version 7. Version 2 retains every
+raw 28-byte record, including its opaque word, and exposes the native retained
+indices `0, 3, 6, ...` without inventing version-7 fields. It bounds every
+nested grid count and aggregate allocation. PNG
+support covers non-interlaced 8-bit grayscale, RGB, indexed,
+grayscale-alpha, and RGBA images. It writes KN5 files
+without byte changes when the model is unchanged. KN5 parsing also has an
+aggregate native-object budget. Counts, strings, texture payloads, and
+encryption records consume this budget before allocation. DDS includes bounded
+BC7 CPU decode. Its upload planner supports DX10 2D arrays, cubemaps, and exact
+RGB24 to RGBA8 conversion. FBX support includes a bounded binary/ASCII DOM and
+a static-geometry conversion subset. The ASCII parser converts declared
+numeric arrays to typed FBX arrays. The converter supports one
+`ByPolygonVertex`/`IndexToDirect` UV layer, expands face-varying seams, and
+matches the production importer by negating V. It also retains bounded raw
+`Video.Content` data from binary and ASCII FBX files. It rejects count mismatches,
+non-finite values, truncated blocks, invalid UV indices, and input or output
+that exceeds the configured budgets.
+The ASCII parser joins quoted `Video.Content` chunks across comma-terminated
+lines. One combined encoded-byte limit applies before Base64 decoding.
+
+The VAO core binds decoded records to non-owning mesh views. It uses the exact
+name, vertex count, and first-position gate from `src/vao-patch.js`. It binds
+primary, secondary, and eligible normal channels. Explicit limits protect all
+validation and value copies. Alternate records and split-AO application remain
+staged and produce diagnostics.
+
+The port supports surfaces, cameras, splines, workspaces, asset folders, skin
+indexes, and skin metadata. It includes staged CSP evaluation and KN5 scene
+conversion. Scene conversion validates the complete source tree before
+snapshot allocation. Aggregate limits cover records, copied strings, child
+links, geometry metadata, and path state. The render model includes material
+profiles, bindings, and validated draw packets. Driver rigs include CPU
+reference skinning. The authoring model includes transactions, bounded
+project/CSP serialization, geometry edits, KN5 baking, car damage data, bottom
+colliders, and initial car validation. Project persistence includes material,
+node, mesh, geometry, collider, damage, and bottom-collider edits. It also
+retains the source identity for each identity-bound secondary asset. Missing or
+mismatched identities do not match when related edits exist. A bounded adapter
+sends KN5 edits to the bake path. The adapter retains diagnostics for CSP-only
+material values. Material number strings use JavaScript number syntax. Empty
+strings and decimal underflow become zero. Overflow and boolean material
+properties are not stored.
+
+Collider geometry keys are stable hierarchy paths. Examples are `root`, `0`,
+and `0/1`. Bottom-collider keys are positions in the parsed collider list.
+Secondary-asset adapters apply collider, damage, and bottom-collider edits from
+immutable baselines. The adapters return no candidate asset after an identity
+or edit error. Export uses the bounded KN5 and INI writers. A bounded
+`colliders.ini` parser retains sparse source section numbers. It records
+rejected sections, and export rejects this incomplete source data.
+The surfaces adapter also uses an immutable baseline. It applies positional
+project edits and retains sparse section numbers and unknown fields.
+
+The application library now owns the native authoring session and its source
+baselines. It accepts caller-owned bytes and returns owned export data. It does
+not open files or give paths to the renderer. The service calculates SHA-256
+identities for the primary asset and each identity-bound secondary asset. It
+accepts a current JavaScript project that omits the primary hash only when the
+caller supplies the matching source. The normalized file name, stored nonzero
+size and KN5 version, and observed bytes must agree. An explicit stored hash
+must also agree.
+Failed loads and exports do not replace the committed session or a bound
+secondary baseline.
+
+The workspace library writes bounded `models.ini` and `lods.ini` manifests.
+The track-data library writes bounded `surfaces.ini` files. These writers use
+deterministic field order and reject unsafe text, duplicate identities,
+non-finite values, and output that exceeds its limit.
+
+The AI-spline authoring adapter derives a version-7 candidate from one selected
+point. The point tag selects the payload record. The adapter edits the six
+fields that the installed editor exposes. It returns owned bytes after full
+writer validation. An error returns no candidate and does not change the input.
+
+The application workspace session accepts caller-granted model and manifest
+bytes, or resolves a manifest and its model references through the bounded
+`AssetSource`. It atomically returns an assembled workspace, a renderer-
+independent scene snapshot, and stable workspace bindings. Missing or
+ambiguous references, truncated models, and aggregate input or scene limits
+fail without returning a partial document. The session has no filesystem or
+Vulkan/D3D12 dependency; those capabilities remain above this boundary.
+The separate `ApexEditor::AppRender` target consumes that document and caller-
+supplied executable shader modules. It prepares the bounded stock-scene path,
+owns single-sample color and D32 targets, and presents only after a successful
+draw through the neutral device API. It uses embedded KN5 textures and applies
+workspace LOD and preview resolution without changing the document. It keeps
+one packet catalog for all car LODs. A frame mask changes the active LOD without
+new graphics resources. Multisample presentation and stock-container shader
+translation remain explicit gaps.
+The render library can extract owned vertex, pixel, and optional geometry
+programs from a complete version-2 stock shader package. This boundary checks
+package limits, DXBC chunk ranges, and each embedded program type before it
+copies bytes. It also reports the shader-model version and chunk count.
+Extraction does not make the stock programs executable on Vulkan or D3D12.
+The shell maps left-drag orbit, middle-drag pan, wheel zoom, and WASD/QE
+camera translation through a backend-neutral application controller.
+The application service can bind immutable track-model or car-LOD manifest
+baselines and apply persisted positional workspace edits to deterministic
+exports. Failed capture or export does not replace the bound baseline or emit
+partial text.
+
+The render library includes DDS upload, recovered lighting math, shadow math,
+reflection math, camera matrices, and frame-pass plans. The camera code uses
+the `perspective`, `lookAt`, and `multiply` formulas from `public/app.js`.
+It defines the Vulkan and D3D12 clip-space conversions separately. Its
+backend-neutral contract supports headless Vulkan and Windows D3D12. Both
+backends implement devices, buffers, 2D textures, samplers, shader modules,
+and bounded color and D32 readback. Portable validation protects the desktop
+boundary. Backend API types stay inside `src/render`. Format and authoring
+libraries do not depend on a graphics API.
+
+The optional SDL3 platform library provides a bounded native window and input
+seam without exposing filesystem or Node.js capabilities to the renderer. A
+Vulkan window supplies only borrowed, type-erased surface callbacks and the
+required instance extensions. Vulkan can create a swapchain for that surface,
+acquire, clear, submit, and present an image. The target owns its image views,
+framebuffers, commands, and synchronization objects. It can also copy a
+completed, same-format color attachment into a swapchain image. Headless
+`VK_EXT_headless_surface` presentation remains available when the driver
+supports it. D3D12 reports its DXGI factory, device, queue, and borrowed Win32
+window prerequisite. The Windows-only path creates a bounded DXGI flip-model swapchain,
+clears and presents synchronously, and copies completed same-format color
+attachments into the swapchain. Resize and device-removal diagnostics remain
+explicit; Linux builds retain the unavailable D3D12 path. A Windows SDK build
+and WARP runtime check remain required before this path is considered verified.
+The application keeps presentation recovery backend-neutral: Vulkan and D3D12
+out-of-date statuses can rebuild a target at most eight times until a frame
+succeeds. Zero-sized pixel surfaces pause rendering, and a failed target
+rebuild reports its own diagnostic.
+
+## Build and test
+
+CMake 3.25 or newer and a C++20 compiler are required. Vulkan is enabled when
+the SDK headers and loader are available. D3D12 is enabled only on Windows.
+
+```sh
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+```
+
+Probe an available backend or inspect a KSANIM file:
+
+```sh
+out/native/dev/native/apex-native --backend vulkan
+out/native/dev/native/apex-native --inspect-kn5 model.kn5
+out/native/dev/native/apex-native --inspect-fbx model.fbx
+out/native/dev/native/apex-native --inspect-fbx model.fbx \
+  --fbx-assets path/to/authorized/assets
+out/native/dev/native/apex-native --inspect-dds texture.dds
+out/native/dev/native/apex-native --inspect-acd car_directory data.acd
+out/native/dev/native/apex-native --inspect-ini ext_config.ini
+out/native/dev/native/apex-native --inspect-vao car.vao-patch
+out/native/dev/native/apex-native --inspect-ksanim animation.ksanim
+out/native/dev/native/apex-native --edit-ai-spline fast_lane.ai edited.ai \
+  --index 42 --set-radius 20 --add-camber-degrees -0.5
+out/native/dev/native/apex-native --invert-ai-spline fast_lane.ai inverted.ai \
+  --index 42 --index 84
+out/native/dev/native/apex-native --save-ai-spline fast_lane.ai fast_lane.ai
+out/native/dev/native/apex-native --window vulkan --frames 300
+out/native/dev/native/apex-native --window vulkan \
+  --fbx model.fbx [--fbx-assets path/to/authorized/assets] \
+  --fbx-animation 0 --animation-position 0.5 \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
+out/native/dev/native/apex-native --window vulkan --model car.kn5 \
+  --analog-instruments data/analog_instruments.ini --rpm 6000 \
+  --animation animations/car_door_l.ksanim --animation-position 0.5 \
+  --ai-spline data/fast_lane.ai --ai-spline-mode interpolated \
+  --ai-spline-interval 0.25 0.75 \
+  --ai-spline-unlock-edit --ai-spline-save-on-exit saved_fast_lane.ai \
+  --node-search door --selected-node 42 --isolate-selected --wireframe --grid \
+  --weather 5_light_clouds --sun-heading 40 --sun-height 55 \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment receiver.frag.spv \
+  --authoring-overlay-vertex overlay.vert.spv \
+  --authoring-overlay-fragment overlay.frag.spv \
+  --directional-shadow-vertex shadow.vert.spv \
+  --directional-shadow-alpha-vertex shadow-at.vert.spv \
+  --directional-shadow-alpha-fragment shadow-at.frag.spv \
+  --directional-shadow-skinned-vertex shadow-skin.vert.spv
+out/native/dev/native/apex-native --window vulkan \
+  --workspace-root content/cars/example --manifest data/lods.ini \
+  --kind carLods --lod-index 1 \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
+out/native/dev/native/apex-native --window vulkan \
+  --workspace-root content/tracks/example --manifest models.ini --kind track \
+  --track-camera-set data/cameras.ini --track-camera-index 0 \
+  --track-camera-position 0.5 --track-camera-play \
+  --track-camera-mode installed-editor \
+  --shader-family ksPerPixel --shader-vertex stock.vert.spv \
+  --shader-fragment stock.frag.spv
+```
+
+The analog RPM options apply the recovered linear needle transform before scene
+conversion. The command rejects LUT instruments because their exact mapping is not ported.
+The animation options apply a fixed-position KSANIM preview to exact-name null
+nodes. Later animated duplicate tracks win. Animation replaces an RPM transform
+when both options target the same node. The recovered editor does not advance
+or loop this value. It clamps the slider position to `[0, 1]` on each frame.
+The original player uses one shared frame count. The adapter rejects animated
+tracks with different frame counts instead of sampling them approximately.
+The adapter also exposes the same bounded sampling operation without changing
+a model. If a matched animation changes a model with skinned geometry, the
+window enables CPU skinning for each color frame. When a skinned shadow
+pipeline is available, both passes use the same prepared pose.
+The track-camera options select one record from a bounded camera file.
+The shell loads a referenced spline relative to that camera file.
+The asset request rejects absolute paths, traversal, and drive or stream syntax.
+`--track-camera-position` selects a normalized spline position from zero to one.
+`--track-camera-play` starts one-shot playback from that position.
+The default `--track-camera-mode webgl` keeps the production WebGL mapping.
+A start position of one restarts playback at zero.
+A zero animation length uses the production WebGL fallback of 15 seconds.
+A negative animation length uses the minimum duration of 0.001 seconds.
+Spline cameras use `MIN_FOV`. Cameras without a spline use the midpoint FOV.
+Both fixed and spline previews retain the saved forward and up basis.
+This mapping matches the production WebGL editor.
+It also does not claim the game behavior that targets a focused car.
+
+The `installed-editor` mode selects the recovered Catmull-Rom preview.
+It uses raw spline points as absolute world positions.
+It does not apply `SPLINE_ROTATION` or add the saved camera position.
+It uses arc-length position mapping and a one-world-unit look-ahead target.
+It infers a closed spline when the endpoints are not more than 75 units apart.
+Its playback uses the recovered speed of `0.5` world units per second.
+Playback stops at the endpoint and resets the position to zero.
+The safe adapter rejects short, oversized, non-finite, and zero-length splines.
+The left or middle pointer button returns control to the orbit camera.
+The wheel and WASD/QE keys also return control to the orbit camera.
+The hierarchy options search, select, isolate, show hidden nodes, and enable
+wireframe through the backend-neutral viewport request. Search uses bounded
+ASCII case-insensitive matching. It retains duplicate node names.
+The authoring-overlay modules use the fixed position-and-color line ABI.
+The module pair requires `--selected-node`, `--grid`, `--view-axis`, or
+`--ai-spline`.
+The AI-spline option loads a bounded version-2 or version-7 file.
+The format library also supplies `serializeAiSpline` for version-7 output.
+This function writes the recovered 20-byte point and 72-byte payload records.
+It writes zero reserved words and preserves a valid optional grid.
+The function rejects version 2. Use the explicit app-layer converter for
+legacy input. The converter uses retained points, native payload defaults,
+legacy gas and brake derivation, and sampled Catmull-Rom lengths. It rebuilds
+the recovered grid and produces owned version-7 bytes. It rejects inconsistent
+retained data, non-finite values, and output that exceeds configured limits.
+`--convert-ai-spline-v2 <input.ai> <output.ai>` exposes this boundary. It does
+not replace an existing output. Normal version-2 loading remains read-only.
+`--edit-ai-spline` edits one version-7 point and writes a new file.
+The command does not replace an existing output file.
+The point tag selects the payload, as in the installed editor.
+The command supports radius, side distances, camber, length, and grade.
+Use a `--set-*` option for the recovered replacement object.
+Use an `--add-*` option for the recovered additive object.
+Camber option values use degrees. The file stores camber in radians.
+A zero `--set-*` value means unchanged. This native sentinel cannot set a
+field to zero. An additive value can make the result zero.
+The command preserves the spatial grid because payload edits do not move points.
+`--invert-ai-spline` negates camber for each unique selected point.
+The payload lookup uses each point tag. The command keeps selection order.
+The authoring library also provides an AI-spline payload session.
+The session keeps an immutable backup from load time and bounded undo history.
+It can undo, redo, restore selected records, or restore the complete backup.
+The history byte limit counts canonical serialized bytes. Writer limits bound
+the additional parsed models. A separate limit bounds raw selection entries.
+Point-position edits rebuild the recovered grid in the same session revision.
+The default `raw` mode draws the recovered raw magenta spline.
+`--ai-spline-mode interpolated` draws the recovered Catmull-Rom curve.
+This mode recomputes the native arc-length table and ignores stored point
+lengths. It samples 5,001 points with the recovered float increment.
+Both modes use an identity world matrix.
+The spline uses normal depth and the recovered scene-finished phase.
+`--ai-spline-interval <in> <out>` adds the recovered blue interval.
+The values must be finite, ordered, and from zero to one.
+The interval always uses interpolation and disables depth tests and writes.
+`--ai-spline-show-left` shows the recovered left side spline.
+`--ai-spline-show-right` shows the recovered right side spline.
+The side options are independent and off by default. They require version-7
+payloads and use cyan with normal depth.
+During live editing, `Control+L` and `Control+R` toggle these passes without
+recreating the viewport. These shortcuts are a portable native policy. The
+recovered original controls are two independent checkboxes.
+Each change replaces all spline passes atomically. It preserves the model,
+history, selection, temporary points, and edit mode.
+`--ai-spline-index <index>` draws a recovered selected-point marker.
+Repeat this option to select more points. The CLI keeps insertion order and
+ignores duplicate indices. The CLI records the last unique index. Native UI
+code uses that index to calculate its normalized return value.
+Each zero-based index refers to the retained point array. Each center line is
+yellow and 40 units high. If the left width is nonzero, the marker also has
+two cyan width lines. This option uses normal depth and requires version-7
+payloads.
+`--ai-spline-show-camber` shows one vertical camber line at each point.
+Positive camber is green. Zero and negative camber are red. The line height is
+the absolute camber value times 1,000. This option uses normal depth and
+requires version-7 payloads.
+The Vulkan and D3D12 line list is a labeled translation of the OpenGL line
+strip. The translation keeps all segments at portable chunk boundaries.
+The marker option does not start a mutable edit. Use `--edit-ai-spline` for the
+recovered single-selection payload edit.
+The live controller exposes the recovered start, finish, and cancel lifecycle.
+Start clears the selected indices. Finish preserves them. Cancel clears them.
+These operations do not change spline bytes, history, revision, or dirty state.
+A generation identity combines one controller owner, model revision, and
+publication number.
+This identity rejects a foreign controller at the same numeric revision.
+It also rejects stale publications, owner changes, revision rollback, and
+skipped revisions.
+A controller viewport retains the validated selection pipeline while no marker
+geometry exists. This permits atomic marker removal without viewport recreation.
+The controller can apply one validated point index at runtime.
+View mode replaces the selection unless Control is active.
+Control appends the recovered shorter cyclic range from the final stored index.
+Equal distances use the clicked-to-anchor route. Edit mode always appends.
+The request carries one snapshot with the generation, input epoch, and mode.
+Each selection or lifecycle change advances the input epoch.
+This rejects queued input after an ABA change in the selection or mode.
+Manual movement requires the snapshot that captured its selected points.
+Each result returns the current snapshot for the next queued command.
+Each overlay swap advances the publication number.
+This rejects stale viewports that have the same model revision.
+Stale input and stale viewport bindings have different status values.
+Invalid, foreign, and stale inputs fail before viewport publication.
+Successful selection keeps spline bytes, history, revision, and dirty state.
+The result contains the final stored index and its normalized point position.
+The native window resolves a right-button release through the recovered picker.
+It uses logical integer mouse coordinates and the backend-neutral camera frame.
+The ray traverses active static KN5 meshes in depth-first source order.
+It skips skinned meshes, as the installed `RayPicker` does.
+The first triangle hit in each mesh competes by strict ray distance.
+The installed picker forwards its mesh-local hit point without a world transform.
+The C++ resolver preserves this quirk before its grid-aware 3D point scan.
+Control on release extends the recovered cyclic selection.
+The picker validates direct geometry and grid ranges before traversal.
+Enter starts or finishes spline editing. Escape cancels active editing.
+This keyboard mapping is a portable control for the native button actions.
+Shift plus right mouse adds a temporary point after two endpoints exist.
+The point uses the picked X/Z, raw spline Y, and cached forward direction.
+Five temporary points enable the recovered green interpolation pass.
+Numpad movement changes only the temporary point selected within one meter.
+Finish writes the half-open endpoint range as one model revision.
+Cancel clears selection and temporary state without model writes.
+The native sphere marker uses `content/objects3D/sphere.kn5`.
+The port uses a labeled green vertical-line marker in the shared line ABI.
+`--save-ai-spline` accepts version 7 and rebuilds the native grid.
+Use `--convert-ai-spline-v2` to create a separate version-7 file from version
+2. The command uses the recovered payload and sampled-length rules. It rejects
+native NaN results instead of writing non-finite version-7 data.
+`--save-ai-spline` uses a temporary file and atomically replaces its output.
+The input and output can be the same path.
+Replacement can change destination permissions or access-control metadata.
+`--ai-spline-save-on-exit` saves live window edits after a clean exit.
+Neither save path changes the session revision, history, baseline, or dirty state.
+The old `--selection-axis-vertex` and `--selection-axis-fragment` names remain aliases.
+The grid starts hidden. `--grid` shows the recovered 10 m magenta grid.
+The view axis starts hidden. `--view-axis` shows the recovered one-meter
+world-origin +X, +Y, and +Z marker. It draws after opaque geometry and before
+transparent geometry. The viewport draws the grid and selected-node RGB axis
+after the scene and before the MSAA resolve. The selected-node axis follows
+the selected transform from the current frame.
+The lighting options select one of the seven bounded stock weather presets and
+finite sun angles. The default is `5_light_clouds` at a 40-degree heading and
+55-degree height, as used by the production renderer. The native shell uploads
+the evaluated sun, sky, horizon, and fog values through the 128-byte portable
+frame record. The first 64 bytes stay compatible with the earlier lighting
+record. The portable material modules apply the production WebGL fog equation.
+Sky and post-processing remain staged. The shell uses the same sun direction
+for directional shadow cascades.
+KN5 conversion computes preview bounds from transformed visible vertices. A
+car-LOD workspace uses those bounds for initial framing and automatic range
+selection. The viewport prepares all car LOD packets once. Camera movement
+changes only the frame mask at a range boundary. `--lod-index` selects one
+manifest index and disables automatic selection. The stable catalog is a port
+optimization for live distance selection. The recovered editor loads and
+compiles one FBX for each LOD menu selection.
+
+Any directional-shadow module option enables the viewport shadow schedule.
+The material modules must implement the receiver bindings for this schedule.
+`--directional-shadow-vertex` supplies the opaque static vertex program.
+The `--directional-shadow-alpha-*` pair supplies the alpha-tested static
+program. `--directional-shadow-skinned-vertex` supplies the CPU-skinned vertex
+program.
+The viewport owns three fixed D32 maps and reuses them when the camera moves.
+It executes three caster passes before the receiver color pass and present.
+Malformed initial map or lighting state fails before map allocation. Malformed
+per-frame lighting fails before any caster, color, or present work.
+Missing role programs keep only their caster classes staged. The viewport
+validates each role contract before it allocates the shadow maps.
+
+Export a project through the native authoring service:
+
+```sh
+out/native/dev/native/apex-native --export-project kn5 car.kn5 car.apex.json car_apex.kn5
+out/native/dev/native/apex-native --export-project csp car.kn5 car.apex.json car_apex.ini
+out/native/dev/native/apex-native --export-project collider car.kn5 car.apex.json collider.kn5 collider_apex.kn5
+out/native/dev/native/apex-native --export-project damage car.kn5 car.apex.json damage.ini damage_apex.ini
+out/native/dev/native/apex-native --export-project bottom-colliders car.kn5 car.apex.json colliders.ini colliders_apex.ini
+out/native/dev/native/apex-native --export-project surfaces track.kn5 track.apex.json surfaces.ini surfaces_apex.ini
+out/native/dev/native/apex-native --export-project models track.kn5 track.apex.json models.ini models_apex.ini
+out/native/dev/native/apex-native --export-project lods car.kn5 car.apex.json data/lods.ini lods_apex.ini
+```
+
+The command reads all input before it writes output. The output path must not
+exist. The command creates a temporary file exclusively in the output directory
+and promotes it with a platform no-replace operation. A project diagnostic
+stops the export.
+
+An unavailable SDK, driver, validation layer, or adapter is reported
+explicitly. It is never presented as a successful backend initialization.
+The current backends initialize devices and create/upload buffers and bounded
+2D textures, samplers, and immutable shader modules. They execute bounded
+RGBA8/BGRA8 texture clears and canonical RGBA8 readback. They also validate a
+pipeline and execute fixed and indexed R16 static-mesh draws with readback.
+The device API uploads immutable, one-layer BC1, BC2, BC3, BC4 UNORM,
+BC5 UNORM, BC5 SNORM, BC6H, and BC7 sampled textures.
+It also uploads legacy D3DFMT_R32F DDS payloads as exact R32_SFLOAT sampled
+textures. This scalar path keeps the source float bits. It does not convert
+them to RGBA8 or expose them through an RGB material binding.
+The owned static-scene path uploads bounded PNG decodes as RGBA8 UNORM.
+It validates each block row before allocation. Vulkan and D3D12 query format
+support before they create a compressed image. BC4 SNORM remains outside this
+direct-upload path. BC2, BC4 UNORM, and BC6H are generic textures. The
+existing RGB material bindings do not accept them.
+The indexed path validates 11-float KN5 static geometry before allocation.
+It uploads immutable vertex and R16 index buffers. The adapter rejects
+malformed geometry, non-finite values, invalid packet ranges, and unsafe
+indices. The execution path accepts finite world and camera transforms.
+Vulkan uses a 128-byte vertex push-constant block. D3D12 uses an equivalent
+root-constant block. Each camera must use the clip-space convention for its
+backend. Both backends create persistent 1x or 4x D32 attachments.
+Single-sample D32 attachments can request shader-readable allocation. The
+fixed receiver ABI uses three distinct maps at bindings 16-18. It uses one
+nearest clamp-to-edge sampler at binding 19. It also uses one 256-byte
+constants record at binding 20.
+
+Both backends execute this ABI. They transition retained maps between depth
+write and shader read. They restore the prior map state after the receiver
+draw. A SwiftShader test samples all three maps and then runs the caster pass
+again. D3D12 uses a typeless R32 resource. This resource has a D32 view and an
+R32_FLOAT sampled view. The D3D12 pixel fixture requires a Windows WARP
+verification build.
+The native binding numbers and clip conversion are portable choices. They are
+not claims about the recovered native register layout.
+Static scenes that declare this receiver ABI own the sampler and 256-byte
+record. Each frame must supply retained maps made for the same device, backend,
+camera position, and camera direction. The adapter validates all maps and all
+draws before it updates receiver, skin, or frame buffers. The stock-scene
+facade exposes the same receiver opt-in and selects only matching shader
+modules.
+Indexed requests use explicit color-load and depth-clear controls. The
+source-evidenced main path uses `LESS` depth testing. The execution path accepts
+opaque and explicitly blended packets. The packet and pipeline blend flags must
+match. Ordinary alpha, multiply, and transparent-as-black factors match
+`applyItemRenderState` in the production WebGL renderer. Vulkan and D3D12 apply
+these factors in single draws and ordered batches. The indexed path supports
+4x multisample targets and alpha-to-coverage. Each backend resolves the final
+color to one sample before readback. A batch can resolve into a retained,
+caller-owned single-sample texture. This path can skip CPU readback.
+The workspace viewport uses this path for 4x rendering. It presents only the
+resolved texture and reuses both color textures across frames. Indexed wireframe
+uses line-list topology over the source index stream. This behavior matches the
+production `GL_LINES` selection in `public/app.js`. It does not use polygon-line
+rasterization. Vulkan and D3D12 apply this topology in single draws and ordered
+batches. A request-local
+authority can enable one portable diffuse resource pair: a sampled image at set
+0, binding 0, and a sampler at set 0, binding 1. Vulkan and D3D12 execute this
+pair for single draws and ordered batches. The pair is a portable test ABI. It
+is not a recovered stock KN5 or CSP shader contract. An optional uniform buffer
+at set 0, binding 2 carries one aligned material record. D3D12 maps it to
+`b2`. The 80-byte record uses the port's std140/HLSL-compatible packing. Its
+first 64 bytes contain the existing `ksPerPixel` values. Its last 16 bytes
+contain `damageZones`. A bounded resolver reads parsed KN5
+values and typed CSP overrides. It preserves CSP precedence and the WebGL
+emissive conversion. The plain `ksPerPixel` fixture executes ambient,
+directional diffuse, direct Blinn specular, and emissive output. Pixel tests
+prove specular enable and removal and per-draw record selection. An optional
+Vulkan `ksPerPixel` receiver fixture applies the source-evidenced three-cascade
+selection and explicit 3x3 PCF to direct diffuse and specular light. A real
+stock-scene test proves fully shadowed `(3,40,18,255)` and fully lit
+`(16,116,34,255)` center pixels. The D3D12 receiver path is implemented, but
+it still requires a Windows SDK and WARP verification run. The portable
+material variants apply distance fog after direct lighting. This equation
+follows the production WebGL renderer and does not claim recovered stock
+shader bytecode. Fresnel, reflections, and CSP lights remain staged. A bounded
+batch preflights all requests. It clears or loads attachments once and returns one
+final readback. Draw-packet texture resources resolve by canonical name.
+An exact tangent-space extension adds `txNormal` at bindings 4 and 5. A second
+extension adds linear `txMaps` at bindings 6 and 7. D3D12 uses `t4`, `s5`,
+`t6`, and `s7`. The maps shader uses `maps.r` for specular strength. It uses
+`maps.g` for the source exponent equation. The maps ABI requires zero Fresnel,
+so `maps.b` remains staged. The material handoff supports
+`ksPerPixelMultiMap` and `ksPerPixelMultiMap_AT` through this eight-binding
+ABI. It rejects active generic detail, object-space normals, and nonzero
+Fresnel. The AT profile retains alpha-to-coverage on a 4x target. A fourth ABI supports the
+`ksPerPixelMultiMap_NMDetail` family. This family includes
+`ksPerPixelMultiMap_AT_NMDetail`. It adds `txDetail` at bindings 8 and 9. It
+adds `txNormalDetail` at bindings 10 and 11. The legacy `txDetailNM` name is an
+alias for `txNormalDetail`. The 80-byte material record includes the detail UV
+multiplier, normal-detail strength, and detail enable value. The AT profile
+retains the production A2C state. Reflections and executable receiver shader
+variants for these extended profiles remain staged.
+Runtime tests cover known pixels and mixed resource layouts.
+The dirt-zero damage ABI uses the same diffuse, normal, and maps resources.
+It adds `txDamage` at bindings 12 and 13. It adds `txDamageMask` at bindings
+14 and 15. A low-level extension binds `txDust` at the mutually exclusive
+bindings 8 and 9. Vulkan and D3D12 use its alpha for direct diffuse and
+specular light. Pixel tests cover alpha values of zero and one. The stock
+material handoff selects this extension for six-resource damage packets. It
+requires the caller to label the matching shader module set as `damage_dust`.
+It retains the 12-resource path for legacy packets without `txDust`. Stock detail,
+sun-specular, Fresnel, and reflection remain staged.
+The serialized KN5 resource ID remains a shader bind point, not a
+texture-table index. A texture replacement preserves the source bind point.
+A new resource slot requires an explicit bind point. The baker reports and
+skips a new slot when the bind point is not known. A bounded static-scene
+adapter maps the final KN5 tree to dense scene IDs. It validates all packets
+and pipelines before buffer creation.
+The adapter uploads each referenced node once. It retains duplicate packets as
+ordered draw instances. It submits one batch with caller-supplied SPIR-V or
+DXIL pipelines. A constants-enabled pipeline requires an explicit table in
+final material order. The adapter validates this table before allocation. It
+owns one 256-byte buffer per used material and reuses it for duplicate packets.
+The adapter also executes static alpha-tested directional-shadow casters when
+the caller supplies a compatible pipeline. The CLI accepts this pipeline as an
+explicit vertex and fragment pair. The recovered `ksShadowGenAT`
+pixel ABI uses diffuse texture `t0`, sampler `s3`, and material buffer `b4`.
+The material record is 32 bytes. It stores `ksAlphaRef` at byte offset 28.
+Preparation owns one aligned record per used alpha-tested material. It rejects
+short tables, invalid alpha values, and insufficient byte budgets before
+allocation. The stock-scene facade resolves this record in final material
+order and forwards the complete table. The shadow traversal applies the
+recovered opaque blend and depth-write state without changing the retained
+main-pass packets. Thus, static materials with non-opaque main-pass state use
+the alpha-tested shadow path. The CLI accepts one explicit skinned vertex
+program. The native port uses its retained CPU-skinned stream instead of the
+recovered `b13` bone ABI. This difference is a labeled portable translation.
+A missing skinned program keeps those casters staged.
+Each frame can supply a byte visibility mask in stable packet order. An empty
+mask keeps all packets visible. Other masks must match the packet count and use
+only zero or one. Hidden packets do not draw or update skinned geometry. An
+all-hidden frame uses a clear-only color batch, so the viewport stays valid.
+Static scenes accept 1x and 4x pipelines. A2C requires 4x color and matching
+depth samples. A bounded material handoff derives the supported resource
+layouts, constants, and profile state from KN5 materials. The caller must
+supply explicit SPIR-V or DXIL modules. Production packets remain marked as
+staged. The handoff does not translate stock shader containers. Vulkan can
+create a headless surface and swapchain. It can present a completed offscreen
+color attachment with the same size and format. Native window surfaces,
+D3D12 swapchains, and complete stock execution remain roadmap work on
+non-Windows builds; the Windows D3D12 presentation path above remains gated on
+a Windows SDK/WARP verification run.
+The strict stock-package extractor validates all 79 nonempty packages in the
+installed SDK editor when `ASSETTO_CORSA_ROOT` is available. It also identifies
+the installed `ksPerPixel` vertex and pixel programs as Shader Model 4.0.
+The current D3D12 path requires a different root-register contract. The Vulkan
+path requires explicit SPIR-V. Therefore, both backends keep these extracted
+stock programs staged.
+A bounded stock-scene facade composes the render plan, draw packets, material
+handoff, and static-scene preparation. It uses linear topology preflight and
+rejects malformed edges, cycles, and over-budget plans before backend
+allocation. The facade can resolve F4 damage before it creates the plan. It
+merges the activity writes and complete material table before allocation. A
+real SwiftShader test executes the complete facade through
+pixel readback. Its optional retained-shadow receiver uses the same validated
+facade and static-scene ownership path. It uses a portable 256-byte record by
+default. A caller can select the recovered 208-byte stock `cbShadowMaps` record
+when its shader modules use that ABI. A second test executes the
+three-texture MultiMap facade and
+checks the `maps.r` and `maps.g` result. It also executes the AT family on a
+4x target and checks partial resolved coverage. An F4 facade test executes
+broken and intact states with six embedded textures. It checks `txDust` alpha
+and the recovered normal-alpha attenuation. The same tests run through D3D12/WARP in
+CI. The input snapshot must contain resolved workspace and CSP state. A
+bounded workspace adapter
+maps files to merged scene roots in source order. It attaches file and
+auxiliary labels without partial mutation. KN5 conversion supplies the exact
+transformed preview AABB for authored visible geometry. A bounded LOD resolver
+uses the production half-open ranges and FOV formula. The viewport maps each
+prepared packet to its workspace file root. It owns a copy of the LOD metadata
+for each file. An empty frame mask selects packets from the camera distance.
+A nonempty caller mask remains authoritative. Isolation bypasses authored
+visibility and the automatic workspace LOD mask. A second bounded resolver
+supplies cockpit, rim, and driver preview state without changing the scene. It
+uses exact cockpit and rim names. Driver
+hidden names are trimmed, matched with ASCII case ignored, and limited to driver
+subtrees. Show-hidden bypasses authored and preview state. It does not bypass
+driver suppression, the workspace LOD mask, or mesh LOD. Isolation bypasses
+visibility and subtree filters. It still applies the selected mesh LOD range.
+The workspace-file contract follows `itemPreviewVisible()` and the draw filter
+in `public/app.js`. It does not claim recovered ksNet per-mesh culling parity.
+The render library also exposes the recovered bounded ksNet mesh predicate.
+It keeps PVS input, FOV scaling, the radius floor, inclusive limits, and the
+zero-limit bypass. It also keeps an explicit `NO_CULL` input.
+The render planner does not select this rule yet.
+The ordered scene batch also supports one selected static mesh. It draws after
+opaque model packets and before the world view axis and transparent packets.
+The grid and selected-node axis remain late overlays. The pass uses
+the recovered solid, front-cull, opaque, and depth-off states. The viewport
+owns one mutable 256-byte color record and applies the recovered 2000 ms fade.
+Callers supply explicit SPIR-V or DXIL modules. The window CLI accepts
+`--selected-mesh-vertex` and `--selected-mesh-fragment` for these modules.
+The cockpit audit in `src/cockpit-preview.js` supplies the F3
+pair. Surface overlays, extended-profile shadow shader variants, reflections,
+and post-processing remain staged. A separate bounded damage adapter resolves the
+five exact F4 node sequences. It creates scene activity and material overrides
+without changing the parsed model. It applies `damageZones` after CSP values.
+It also retains the native one-way `glassDamage` write for shared materials.
+The adapter identifies the recovered dirt-zero branch. The bounded material
+handoff executes this branch with caller-supplied SPIR-V or DXIL modules.
+Nonzero dirt remains staged. Active detail, sun-specular, Fresnel, and
+reflection branches also remain staged.
+The static-scene adapter has two texture-authority modes. The first mode
+uses caller-owned tables in the final KN5 texture order. The second mode owns
+the used embedded KN5 textures and one linear-repeat sampler. It validates all
+used supported DDS and PNG payloads before backend allocation. It decodes
+supported DDS 2D mip chains and bounded PNG images to RGBA8. DDS retains
+explicit sRGB metadata. PNG retains straight alpha and top-to-bottom rows and
+uses RGBA8 UNORM without implicit color conversion. This portable CPU decode is not a
+direct block-compressed path. The separate device API supports direct BC1,
+BC2, BC3, BC4 UNORM, BC5 UNORM, BC5 SNORM, BC6H, and BC7 uploads. The embedded
+path retains its exact, bounded BC7 CPU fallback. The bounded normal-map ABI
+does not accept BC5. This ABI needs a three-channel sampled normal. Its shader
+does not reconstruct Z.
+The BC7 pixel test needs a supported Vulkan device or a Windows D3D12 device.
+BC6H requires a capable GPU because no portable CPU decoder is available. The
+upload planner supports DX10 2D arrays, cubemaps, RGB24 conversion, and direct
+legacy D3DFMT_R32F upload. R32F remains GPU-only for decode and generic
+sampled-only for resource use. The
+embedded static-scene mode rejects
+arrays, cubemaps, 1D/3D textures, BC6H, and legacy D3D9 float textures.
+The maps path rejects sRGB payloads before backend allocation. Source, decoded,
+and host-preparation budgets include the maps resource and its retained tables.
+A separate CPU bridge resolves external DDS, PNG, JPEG, and BMP files through
+explicit `AssetSource` grants. It rejects unsafe, missing, ambiguous, and
+over-budget requests. It retains source identity and returns no partial table
+after an error. The bridge also converts finite CSP solid colors to exact
+132-byte legacy BGRA8 DDS payloads. This compatibility path matches the WebGL
+and FBX adapters. It is not recovered ksEditor FBX behavior.
+If an override also contains a file or texture name, its color takes priority.
+The bridge copies each payload into an opaque, synthetic KN5 texture. It
+rewrites only the resolved material slots and preserves their bind points.
+The stock-scene facade owns and executes this effective model. Real backend
+pixel tests cover external files and solid colors. The renderer does not
+receive an `AssetSource`, a grant, or an external path.
+Workspace viewport preparation uses this bridge before GPU allocation. It
+also uses the bridge for a color-only override with no external grant. Vulkan
+and D3D12 use the same embedded-texture path. Raw external-file overrides
+remain invalid at the renderer boundary.
+The FBX converter handles static and skinned positions. It also handles polygon
+triangulation, hierarchy, bounded transforms, native material values, ordered
+node materials, and supported normal, UV, and material layers. Each material slot remains signed
+until the render adapter applies the recovered fallback behavior. Its aggregate
+budget includes temporary containers, copied strings, expanded vertices,
+material slots, skin clusters, influences, raw image data, and output
+containers. It diagnoses unsupported animation data, `Image` records,
+unsupported layer mappings, and advanced transform semantics. The raw image
+path supports `Video.Content` only.
+
+The bounded FBX render adapter now creates an owned KN5-compatible CPU model.
+Vulkan and D3D12 consume the same regenerated scene. The adapter preserves
+recovered geometric transforms, material batch order, material lookup, mesh
+names, native material values, tangent generation, and bounds. It copies
+selected external texture bytes from the authorized CPU result. It retains no
+file handle, grant, source path, or GPU object. Missing textures and unsupported
+source behavior produce a staged model. A staged model cannot enter a GPU
+backend. Malformed hierarchy, geometry, material, texture, and limit data fail
+atomically and do not publish a partial model.
+The adapter result marks these copied bytes as owned model payloads. Callers
+pass this authority to the shared Vulkan or D3D12 scene preparation path.
+
+For a supported skin, the adapter emits the recovered 19-float skinned vertex
+layout and the inverted `TransformLink` matrices. It gives each skinned source
+material an isolated `ksSkinnedMesh` copy. The shared CPU skin path supplies
+mutable vertex data to Vulkan and D3D12. Indices remain immutable.
+
+The adapter also validates owned `Video.Content` bytes before it copies them.
+Nonempty embedded content takes priority over an external file candidate.
+This priority matches the WebGL importer. It is not recovered ksEditor behavior.
+Malformed embedded data stages all embedded textures without a partial copy.
+The adapter validates all connected embedded payloads before it selects one
+payload for each material. Thus, an invalid lower-priority payload also stages
+the embedded texture set.
+
+The application layer now opens caller-owned FBX bytes as a standard preview
+document. It accepts only a logical source name. External textures require an
+explicit `AssetSource` grant. A supported file-texture record does not count as
+an image gap after the authority resolves it. Supported `Video.Content` records
+do not require an asset grant. Unsupported texture records remain staged. The
+FBX viewport overload rejects a staged document before it creates a Vulkan or
+D3D12 resource.
+The `--inspect-fbx` command uses this application path without creating a GPU
+backend. It reports staged models when no asset directory is granted. The
+optional `--fbx-assets` directory is the only authority for external textures.
+The command also reports bounded clip metadata for each converted animation.
+Window rendering uses `--fbx` as a separate model source. It requires an
+explicit `--fbx-assets` directory for external textures. Embedded-only files do
+not require this directory. Window rendering requires caller-supplied modules
+for each used `ksPerPixel` or `ksSkinnedMesh` family on the selected backend.
+`--fbx-animation` selects one converted clip by index.
+`--animation-position` selects a fixed normalized position and clamps it to the
+range from zero to one. The shell applies the clip to exact-name node wrappers
+before it rebuilds the shared scene. Invalid and staged FBX documents, and
+invalid clip indices, fail before the window or graphics device is created.
+Vulkan and D3D12 use the same owned document and the same staged-document gate.
+The native shell frames FBX bounds with its existing workspace camera. This is
+shell behavior, not recovered ksEditor behavior; the installed editor keeps its
+current camera when it loads FBX geometry. Fixed-position FBX animation uses
+the bounded explicit-linear bridge. Real-time playback, pivot evaluation, and
+non-linear interpolation remain unsupported. Skinned FBX meshes use the
+recovered cluster matrices. A fixed animation position can update linked bones
+through the shared CPU skin path.
+The optional real-backend contract test carries static and skinned ASCII FBX
+files through parsing, texture authority, the adapter, and draw readback. It
+uses a dedicated CPU-skinned 19-float transport shader. A serialized linear
+bone clip supplies a non-bind pose through the refreshed-packet path. The bind
+and animated poses must produce different color output on Vulkan and D3D12.
+Hosts without Vulkan or Windows WARP skip this contract with a backend
+diagnostic.
+
+The strict Linux build detects the Vulkan SDK. The runtime test uses a software
+Vulkan device when an ICD is available. CI defines the same Vulkan test. The
+current GitHub account billing error prevents fresh CI evidence. The production
+WebGL visual check remains mandatory for each rendering change.
+
+## Contribution rules
+
+- Put reusable byte, error, limit, and math primitives in `apex-core`.
+- Keep parsers in `apex-formats` independent of windows and GPU APIs.
+- Keep all Vulkan and D3D12 handles out of public backend-neutral headers.
+- Apply count, size, offset, recursion, and aggregate limits before allocation.
+- Add malformed input and every-boundary truncation tests for parser changes.
+- Do not remove or weaken the WebGL reference path until the complete parity
+  and rendering-evidence gates in `docs/CPP_PORT.md` are satisfied.

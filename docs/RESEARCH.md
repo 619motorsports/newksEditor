@@ -143,6 +143,22 @@ captures hashed to `afa6b58d63432335` and `7b86ac9436a1cc24`. All 80 textures lo
 both captures returned WebGL error zero, and the browser log contained no errors.
 The grid remained visible through the car, which confirms the recovered depth-off state.
 
+Ghidra identifies `GLRenderer.color3f` at `0x10047453`. The function writes alpha
+one with the magenta RGB value. `GLRenderer.end` at `0x100474bf` submits primitive
+type zero through the native line-list path. `GraphicsManager.beginScene` at
+`0x10044cfd` selects opaque blend mode. The grid block does not change that mode.
+
+The C++ viewport stores the 44 vertices in one immutable buffer. It submits the
+grid before the selected-node axis in the same scene batch. The Vulkan pixel test
+covers both 1x and 4x targets. The 4x test confirms that the final resolve contains
+the grid. The D3D12 path uses the same validated request and command-list order.
+
+A second production Chrome check used the Gen6 fixture with `CHASSIS` selected.
+The grid-on, selection-cleared, and grid-off captures hashed to
+`a9b8425c2a9a0dee`, `5409745d0815742f`, and `8e34e54dbbbf740c`.
+All 63 textures loaded. Each frame returned WebGL error zero, and the browser
+log contained no errors.
+
 ### Native view-axis marker
 
 The supporting IL opcodes, PDB-guided native decompilation excerpts, and
@@ -164,6 +180,13 @@ view axis after opaque geometry and before transparent geometry. After-3D mode t
 depth off and uses an identity world matrix. It emits one-meter lines from the world
 origin to +X, +Y, and +Z. The immediate colors are `(3, 0, 0)`, `(0, 3, 0)`, and
 `(0, 0, 3)`. The renderer restores normal depth mode after this marker.
+
+The C++ viewport now stores the six vertices in one immutable buffer. It uses
+the shared position-and-color line ABI with depth disabled. The neutral batch
+places the axis after opaque packets and the selected-mesh pass, but before
+transparent packets. The grid and selected-node axis stay in the late overlay
+phase. Vulkan and D3D12 consume the same ordered batch contract. The Linux
+SwiftShader test covers this order at 1x and 4x MSAA.
 
 A production Chrome check used the installed Abarth 500. The view-axis-on and
 view-axis-off captures hashed to `3337caacbb36b37a` and `31b3b6869fe2c020`.
@@ -196,6 +219,67 @@ A production Chrome check used the installed Abarth 500 and selected `GEO_Cofano
 The recovered origin was `(0, 0.2583455, 0)`. The selected and cleared captures hashed
 to `31b3b6869fe2c020` and `d711076968898938`. All 80 textures loaded, both frames
 returned WebGL error zero, and the browser log contained no errors.
+
+A second production Chrome check used the Gen6 fixture and selected `CHASSIS`.
+The selected and cleared captures hashed to `9525187a02419663` and
+`8e34e54dbbbf740c`. All 63 textures loaded. Both frames returned WebGL error
+zero, and the browser log contained no errors.
+
+### Native selected-mesh highlight
+
+The installed selected-mesh object, shader ABI, hashes, and disassembly are
+checked in at
+[`docs/evidence/ksnet-selected-mesh.md`](evidence/ksnet-selected-mesh.md).
+
+`SelectedMesh.render` has token `0x060000F6` and RVA `0x2D360`. It uses a
+separate static-mesh shader and disables depth for its draw. The pixel shader
+returns `ksSelectedMeshColor` from constant buffer `b5`. The initial value is
+magenta RGBA `(1, 0, 1, 0.5)`. Its alpha decreases linearly to zero during
+2000 ms. The renderer then restores normal depth.
+
+The current WebGL orange 28-percent material tint is a preview approximation.
+It does not reproduce this recovered pass. A faithful C++ implementation needs
+a separate selected-mesh draw contract.
+
+The selected material uses opaque blending, front-face culling, and solid fill.
+The selected draw disables depth tests and depth writes. Its changing alpha is
+written to the target, but it does not blend the magenta RGB value.
+
+`SceneGraph.{ctor}` adds `SCENE_ROOT`, `SelectedMesh`, and `SCENE_FINISHED` to
+the root in that order. `loadKN5` adds the model below `SCENE_ROOT`. The normal
+camera supplies an opaque filter, so model packets draw before the selected
+mesh. `SelectedMesh.render` has no pass-ID branch. The shadow-mapped camera
+traverses opaque and transparent root passes, but the exact selected-node
+attachment for that path is unresolved.
+
+The C++ viewport now executes this phased pass on Vulkan and D3D12. Vulkan
+uses a fragment uniform at set zero, binding zero. D3D12 uses the recovered
+pixel constant-buffer register `b5`. Both backends keep the pass in one batch.
+They resolve 4x color after transparent geometry and the late line overlays.
+The port draws the selected mesh once at the opaque-to-transparent boundary.
+This is a labeled portable mapping, not a claim that native shadow-mapped
+transparent participation has been recovered.
+
+The recovered `SplineEditor` listener also runs from `SCENE_FINISHED`.
+It rejects non-opaque passes and draws after the model and selected mesh.
+Its exact colors, depth changes, interpolation step, and line-strip helper are
+recorded in
+[`docs/evidence/ksnet-spline-editor-callback.md`](evidence/ksnet-spline-editor-callback.md).
+The C++ viewport implements the raw and interpolated primary AI spline on
+Vulkan and D3D12. Raw mode remains the default. Interpolated mode uses the
+recovered Catmull-Rom arc-length mapping and the 5,001-sample float schedule.
+Both modes use the recovered magenta color, identity matrix, normal depth, and
+callback phase. An optional normalized interval adds the recovered blue pass.
+This pass always uses interpolation and disables depth tests and writes.
+The backend-neutral line-list conversion is a labeled translation of the
+original OpenGL line strip. Independent version-7 side options add the
+recovered cyan raw splines. These passes use normal depth after the interval.
+Repeated version-7 index options add recovered yellow center lines and optional
+cyan width lines. The CLI keeps insertion order and ignores duplicates. These
+markers use normal depth after the side passes. Mutable edit points remain
+staged.
+An independent version-7 camber option adds the recovered vertical red and
+green lines. This pass also uses normal depth. Edit overlays remain staged.
 
 ### Native blurred-rim switch
 
@@ -284,10 +368,16 @@ The stock `ksPerPixelMultiMap_damage_dirt` pixel shader samples `txDamageMask` a
 bind point 21 and `txDamage` at bind point 4. It computes a saturated damage factor
 from `txDamage.a * dot(txDamageMask, damageZones)`. It mixes the base diffuse with
 `txDamage.rgb` by that factor. With the installed Abarth material's `dirt` value of
-zero, it also scales the specular map by `(1 - factor)` and interpolates that result
-toward the sampled normal alpha. The portable exact path is gated on the effective
-`dirt` value being zero. Nonzero dirt uses the labeled base-material preview because
-the remaining stock dirt branch has not been implemented.
+zero, it scales the specular map by `(1 - factor)`. It then multiplies the result
+by `(1 + factor * (txNormal.a - 1))`. DXBC proves that the alpha source is
+`txNormal`. The portable Vulkan and D3D12 path requires an effective `dirt` value
+of zero. Nonzero dirt uses the labeled base-material preview.
+
+This equation is exact for the recovered dirt-zero damage stage. It is not the
+complete stock material. The installed material enables detail and uses
+sun-specular and Fresnel values. The portable stage rejects these branches.
+Its normal reconstruction and output alpha also differ from the complete stock
+shader. These limits prevent a false full-parity claim.
 
 The installed Abarth 500 has nine selected damage-glass roots: two front, one rear,
 two left, two right, and two center. All nine roots are authored inactive. Five
@@ -319,6 +409,28 @@ packages to `eAlphaToCoverage`; an explicit KN5 alpha-blend flag can subsequentl
 override that default. The stock main pixel shaders output diffuse alpha without a
 discard. The portable renderer therefore uses WebGL multisample
 `SAMPLE_ALPHA_TO_COVERAGE` for mode 2 instead of a hard fragment cutoff.
+
+The strict C++ extractor checks the complete version-2 envelope and each DXBC
+chunk table. It rejects non-boolean flags, trailing bytes, overlapping chunks,
+wrong stage types, and all truncated prefixes. It owns the extracted stage
+bytes so later code cannot retain spans into a temporary file buffer.
+
+The installed SDK editor has 81 named `.shader` files. Seventy-nine files are
+valid version-2 packages. `ksPerPixelMultiMap_emissive.shader` and
+`stPerPixelNM_UVflow.shader` are empty placeholders. None of the 79 packages
+contains a geometry stage.
+
+`ksPerPixel.shader` has 11,254 bytes and SHA-256
+`255d0228faa70d5b8454a2abe618447bef16ef29612ffab4a0d684dbedcfdb0b`.
+Its vertex payload has 3,728 bytes. Its pixel payload has 7,508 bytes. Both
+programs identify themselves as Shader Model 4.0.
+
+The extracted bytes are not portable backend programs. D3D12 uses a different
+root-register ABI in the current port, while the stock programs use the native
+`b0` through `b4` lighting contract. Vulkan requires SPIR-V, and the local tool
+set has no trusted DXBC-to-SPIR-V translator. Stock execution therefore remains
+staged after extraction. The [stock package evidence](evidence/stock-shader-container-extraction.md)
+records the native split-file load path and the complete extraction boundary.
 
 `MaterialFilterSM::apply` (`0x100650c7`) selects `ksShadowGenAT` for every material
 whose effective blend mode is not opaque. Its pixel shader subtracts `ksAlphaRef`
@@ -546,13 +658,30 @@ BC3, 767 BC1, 75 BC2, 737 PNGs, and 759 legacy uncompressed DDS images in 8-, 16
 24-, or 32-bit masked layouts. No BC5 or BC7 image appeared in that sample, so the
 highest-impact missing paths were the uncompressed and PNG images rather than BC7.
 
-The renderer now decodes arbitrary contiguous legacy channel masks, including BGR24,
+The WebGL renderer now decodes arbitrary contiguous legacy channel masks, including BGR24,
 BGRA/RGBA32, RGB565, luminance, and luminance-alpha, and uses browser-native image
 decoding for embedded PNG, JPEG, and WebP. BC4 and BC5 have bounded CPU decoders;
 BC5 reconstructs the positive normal Z channel. On the complete 43.9 MB Kunos Abarth
 500 Assetto Corse, a production WebGL run loaded all 80 embedded textures: 43 BC1/2/3,
 29 raw DDS images, and 13 PNGs, with zero unsupported textures or WebGL errors. The
 raw underside texture and PNG grille texture were also isolated and visually checked.
+
+The native path now has a separate bounded PNG decoder for non-interlaced
+8-bit grayscale, RGB, indexed, grayscale-alpha, and RGBA inputs. It checks
+chunk order and CRCs, concatenates consecutive IDAT chunks, uses one shared
+bounded DEFLATE implementation, and emits straight-alpha, top-to-bottom RGBA8
+UNORM pixels. Embedded KN5 and explicitly granted external payloads retain
+owned source bytes and use the backend-neutral texture plan. Malformed,
+truncated, dimension, compressed/decompressed, aggregate, failure-atomicity,
+and real Vulkan sampled-pixel tests cover this path. Embedded FBX `Video.Content`
+uses this planner for DDS, PNG, JPEG, and BMP data. The ASCII parser joins
+comma-terminated quoted chunks before Base64 decoding. WebP and unsupported
+PNG modes remain staged in the C++ port.
+
+The ASCII parser accepts an owning-node close after the last continued payload
+chunk. The binary parser also budgets the widened 64-bit output for 32-bit
+integer arrays. Both rules reject malformed or over-budget input before the
+DOM publishes data.
 
 A wider follow-up sample found 49 DX10 BC7 images. Modern WebGL implementations can
 upload those blocks through `EXT_texture_compression_bptc`; BC6H uses the same path,
@@ -1056,9 +1185,9 @@ attenuated by `1/(1+distance^2*0.05)`. Atlas alpha is derivative-smoothed around
 distance fade does not multiply it. Instead, native direct light is scaled by
 `saturate(fade)*saturate(0.5+3*bladeY)`, while ambient alone is multiplied by
 `lerp(1,abs(toCamera.y)*0.5,TexDimming)`. Apex now carries all three generation
-outputs and uses this recovered color/coverage and available lighting core; its
-portable weather, shadow filtering, and fog remain the surrounding renderer
-integration rather than a claim of complete CSP lighting parity.
+outputs and uses this recovered color and coverage with the available lighting
+core. Portable weather, shadow filtering, and WebGL-based fog stay in the
+surrounding renderer integration. They do not prove complete CSP lighting parity.
 
 The public `GBUFFER_GRASSFX` material path defines the separate material-parameter
 target as `(ksDiffuse, ksAmbient, average(specularColor), specularExponent / 255)`.
@@ -1945,6 +2074,20 @@ remains an explicit limitation. A browser playback check advanced the same 12-se
 spline to normalized `0.153733`, produced the sampled `+0.151475 m` Y offset,
 kept FOV at 4°, loaded all 122 textures, and reported no JavaScript or WebGL errors.
 
+The native shell now uses this production WebGL mapping for track-camera preview.
+It selects a bounded camera record and resolves its spline through the safe
+asset request. Fixed preview uses the midpoint FOV. Spline preview uses
+`MIN_FOV` and changes only the saved eye position. The backend camera builder
+keeps the saved forward and up basis and applies the Vulkan or D3D12 clip space.
+This native path does not claim the game's focused-car target behavior.
+An explicit `installed-editor` mode now ports the distinct Catmull-Rom preview.
+It uses raw control points as world positions and maps position by spline length.
+It also uses the recovered one-unit look-ahead and target-facing camera basis.
+The mode ignores `SPLINE_ROTATION` and `SPLINE_ANIMATION_LENGTH`.
+The production WebGL mapping remains the default.
+The recovered installed-editor contract is recorded in
+[`docs/evidence/ksnet-track-camera-preview.md`](evidence/ksnet-track-camera-preview.md).
+
 ## Track surface physics evidence
 
 PDB-guided decompilation also resolves the stock surface pipeline. The
@@ -2167,6 +2310,39 @@ generator confirms that its pixel stage samples `txDiffuse` with `ksAlphaRef`.
 `ksNet.kMesh` and `kSkinnedMesh` each expose a `CastShadow` property, while
 `ksGraphics` exposes `setShadowMapBias` and `setSunDirection`.
 
+Reflection and disassembly of the installed stock shader binaries make the receiver
+ABI exact. `ksPerPixel_ps.fxo` (SHA-256
+`cd75bdaa71b68536a6f0879bebbd8c79234e374e2bdd24a268a8663d1a0732ad`) binds a
+208-byte `cbShadowMaps` at pixel register `b3`: three 64-byte matrices at offsets
+0, 64, and 128, three float32 bias values at offset 192, and one float32
+`textureSize` value at offset 204. The shadow textures occupy `t6`, `t7`, and `t8`,
+and the comparison sampler occupies `s1`. Its vertex shader (SHA-256
+`4a446d5c1fd0325ae5b4882d8105796ef1e72e18740a8e35e1280216fe30c7b1`) also
+declares `cbShadowMaps` at `b3` and produces the three projected coordinates with
+dot products against its twelve matrix rows. The pixel program reads the three
+biases from `cb3[12].xyz`, uses `cb3[12].w` in texture-size arithmetic, and performs
+3x3 PCF with comparison-sampling instructions. The shadow-enabled `ksPerPixel*`
+variants inspected retain these bindings; `ksPerPixel_nosdw_ps.fxo` omits them.
+
+Direct PE disassembly, cross-checked against the matching PDB, resolves the host
+updates. PDB segment offsets map to virtual addresses with `0x10001000 + offset`:
+`GraphicsManager::setShadowMapBias` is `0x10046833`, `setShadowMapMatrix` is
+`0x10046873`, and `setShadowMapTexture` is `0x100468c7`. The bias setter copies
+three floats to offset 192. The matrix setter copies cascade 0, 1, or 2 to offsets
+0, 64, or 128. The texture setter binds cascade `level` to texture slot
+`level + 6`, reads the render-target width at object offset 8, and writes
+`1.0F / width` to constant-buffer offset 204. `RenderTarget::RenderTarget` at
+`0x10064b05` independently confirms that object offset 8 stores its integer width.
+Therefore `cbShadowMaps.textureSize` is exactly the reciprocal shadow-map width.
+The shader uses it directly for PCF coordinate offsets and normalizes configured
+bias to a 2048-pixel reference size.
+
+`CameraShadowMapped::endShadowMapPass` at `0x1005e57f` loops over the three
+cascades and calls both the texture and matrix setters. `GraphicsManager` loads
+the three `SHADOW_MAP_BIAS_*` keys during construction; its missing-key defaults
+are `0.000001`, `0.000100`, and `0.001000`. The installed `dx11.ini` overrides
+them with the values listed above.
+
 Apex implements this as three portable WebGL depth targets. Each projection is fitted
 to its camera-frustum slice and snapped to shadow texels, then sampled with 3×3 PCF.
 Only direct sun diffuse/specular is attenuated; ambient, environment, emissive, and CSP
@@ -2183,6 +2359,27 @@ Production Chrome checks covered both asset scales. The complete Imola preview u
 logged no browser exception. These checks prove the portable implementation and its
 toggle, not pixel equality with a controlled ksEditor or game capture; that comparison
 remains a lighting acceptance gate.
+
+The native port now owns three shader-readable single-sample D32 attachments.
+Its portable receiver contract uses bindings 16-20 for three maps, one
+nearest clamp-to-edge sampler, and one 256-byte constants record. This is an
+explicit-PCF cross-backend contract, not the recovered 208-byte `b3` ABI or its
+comparison-sampler binding. Vulkan
+executes the three sampled maps on SwiftShader and preserves the required
+depth-write, shader-read, and readback transitions. A bounded reference test
+checks the hard 2/12/50 split selection, out-of-map lit result, per-cascade
+bias, and all nine explicit PCF comparisons. D3D12 allocates `R32_TYPELESS`
+resources with `D32_FLOAT` DSVs and `R32_FLOAT` SRVs. Its receiver descriptor
+execution remains staged until it passes a Windows WARP build. This work does
+not establish native pixel parity.
+
+The native shell now accepts separate opaque static, alpha-tested static, and
+skinned shadow programs. The alpha-tested pair keeps the recovered `t0`, `s3`,
+and `b4` bindings. The skinned program uses the retained 19-float CPU-skinned
+stream. This is a labeled translation of the recovered `cbBones b13` path.
+The viewport validates each role before it allocates the shadow maps. A Vulkan
+pixel test moves a skinned caster and its depth from the center to the expected
+right-hand pixel.
 
 ## ksEditor weather, HDR, and exposure evidence
 
@@ -2530,25 +2727,84 @@ material index and sends the corners to one `MeshBuilder` for each material.
 Ordinary nodes use `EvaluateLocalTransform` with the source pivot. The geometry path
 also applies the geometric translation, rotation, and scale matrix.
 
-The skin path reads the first skin deformer. It imports every cluster link, inverse
-bind matrix, control-point index, and weight. This path matches the 19-float KN5
-vertex layout and its four weight and index fields.
+The skin path reads the first skin deformer. It imports every cluster link,
+link-transform matrix, control-point index, and weight.
+
+`convertMatrix(FbxAMatrix&)` at `0x10003b80` copies the FBX rows directly into
+`mat44f`. The cluster path then inverts `TransformLink` through the helper at
+`0x10002c20`. It does not combine the mesh transform or perform an axis,
+handedness, or unit conversion.
+
+`MeshBuilder::setWeight` at `0x10042CB9` scans four influence slots in source order.
+It uses the first slot with bone index `-1`. It does not sort or normalize weights.
+A fifth influence produces a warning and is not stored. The native function does
+not validate the control-point index or bone index.
+
+`MeshBuilder::buildSkinnedMesh` at `0x10042538` emits the 19-float KN5 vertex layout.
+The layout contains position, normal, UV, tangent, four weights, and four bone indices.
+The function changes unused bone indices from `-1` to zero before emission.
+
+`MeshBuilder::solveSkinnedMeshBones` at `0x10042ddc` resolves a retained link
+name with recursive, exact-name hierarchy lookup. At runtime,
+`SkinnedMesh::updateBonesBuffer` at `0x1004a91b` evaluates each palette entry as
+`offsetMatrix * boneNode.matrixWS`. The skinned batch finalizer at `0x10041e77`
+changes the material shader to `ksSkinnedMesh`.
 
 The PDB identifies `FBXImporter::loadAnimation` at `0x100071a0` and
 `FBXImporter::loadAnimationNode` at `0x10007550`. The node walk accepts FBX mesh,
 skeleton, and null attributes. It evaluates each accepted node in local space.
 
 The native sample step is one percent of the selected animation time span. The loop
-stops before the end time. As a result, each nonempty animation contains 100 frames.
+stops before the end time. A positive finite span nominally produces 100 frames.
+The loader divides FBX ticks by `46,186,158`, then multiplies each sampled value by
+the same integer. This pair is consistent with truncated integer milliseconds.
+
+Exact duplicate node names share one first-seen animation set. Later nodes append
+their frames to that set. The importer marks every set as animated after sampling.
+The player binds each set to all exact-name scene nodes in depth-first order.
 
 KN5 null nodes contain local transforms. KN5 mesh records do not contain local
 transforms. The native SDK `sphere.kn5` gives its null node and child mesh the same
 `Sphere001` name. Apex therefore applies a matching animation track only to the null
 node. It does not create a second local transform for the same-named mesh.
 
+The native preview adapter follows this null-node rule. It also retains the later
+animated track when a KSANIM file contains duplicate names. The operation samples
+all selected tracks before it changes the KN5 hierarchy.
+
+The native CLI loaded the installed Porsche 917/30 door animation at position 0.5.
+It found three tracks, two animated tracks, two matching tracks, and two matching
+null nodes. The check stopped at caller-supplied shader validation. It did not
+produce a native GPU capture.
+
 `Animation::save` at `0x10043dd0` writes version 2, the track count, and each UTF-8
 track name. It then writes the frame count and 40 bytes for each frame. A frame contains
 one quaternion, one position, and one scale.
+
+The native C++ conversion bridge now exposes a bounded KSANIM v2 slice. It accepts
+only `Lcl Translation`, `Lcl Rotation`, and `Lcl Scaling` channels connected through
+an animation stack/layer, and it samples explicit FBX linear key flags at 100 local
+times using the recovered one-percent, end-exclusive schedule. Curves without an
+explicit linear flag, unsupported properties, missing links, and non-finite or
+non-monotonic key data are diagnosed; they are not silently treated as linear.
+Native pivot evaluation, non-linear interpolation, and the full SDK object
+selection rule remain outside this C++ slice. The bounded converter now retains
+the first skin deformer, the first four source-order influences, inverted link
+matrices, and influence identity across expanded UV seams. It rejects malformed
+cluster arrays, references, matrices, names, and limits. The render adapter emits
+the 19-float type-3 mesh and an isolated `ksSkinnedMesh` material.
+The native inspection command now carries the installed GT40 file through the
+converter and render adapter. It emits 157 canonical nodes. The document stays
+staged because pivot properties, interpolation, and required textures remain
+outside the supported boundary.
+The installed GT40 fixture uses the 32-bit FBX 7.3 leaf-record form with no
+per-leaf null record. The native DOM parser
+now accepts that form and still requires the enclosing end offsets and root
+terminator. Native conversion now classifies its 112 display-layer membership
+edges, eight Model-to-Deformer skin ownership edges, and explicit root edges without
+turning them into scene parents. The fixture reaches 42 converted meshes; animation
+export remains explicitly unavailable because its sampled curves do not meet the
+native bridge's explicit-linear interpolation boundary.
 
 Apex uses the [Three.js FBXLoader](https://threejs.org/docs/pages/FBXLoader.html) for
 portable FBX decoding. The adapter applies the recovered ksEditor rules after the
@@ -2578,17 +2834,51 @@ Apex embeds resolved DDS, PNG, JPEG, and WebP bytes in the KN5 output. The impor
 also captures supported embedded FBX images through their temporary blob or data URL.
 Missing, ambiguous, unreadable, and unsupported images retain the material-color DDS.
 The inspector shows the slot, state, and output name for each texture reference.
+This paragraph describes the WebGL/importer path; native FBX image conversion
+now supports bounded `Video.Content` through a separate compatibility path.
+This compatibility path does not claim recovered ksEditor behavior.
 
 `FBXImporter::load` at `0x10004200` starts each material with `ksPerPixel`.
 It also sets `ksSpecularEXP` to 1. For recognized surface materials, it reads
 the first component of the ambient, diffuse, and specular colors. Values of
 `ksSpecularEXP` that are less than 1 become 10.
 
-ksEditor loops through all 32 entries in `FbxLayerElement::sTextureChannelNames`.
-It accepts only `FbxFileTexture` objects and reduces each path to a basename.
-It searches the configured folders and the automatic sibling `texture` folder.
-The first file found fills `txDiffuse`. Later channels cannot replace this resource.
-The importer never requests `txNormal`.
+`FBXImporter::findExistingMaterial` at `0x100070D0` compares exact material
+names. Distinct FBX material pointers with one name share one native `Material`
+object. The static and skinned finalizers also share this object. The skinned
+finalizer changes its shader to `ksSkinnedMesh` at `0x10041F97`.
+
+The C++ adapter isolates the skinned material copy. This safety divergence
+prevents a static mesh from receiving a shader with an incompatible vertex ABI.
+
+`SkinnedMesh::render` at `0x1004A87E` refreshes the bone buffer before each
+draw. The loop at `0x100498C0` writes `inverse(TransformLink) * boneWorld`.
+`WorldMatrixTraverser::traverse` at `0x100634B1` supplies the cached world
+matrix.
+
+The installed `ksSkinnedMesh_vs.fxo` declares 55 matrices at `cb13`. It blends
+four source-order influences. `MeshBuilder::buildSkinnedMesh` applies L2
+normalization to the four weights. The WebGL-compatible CPU path instead
+normalizes by the weight sum during deformation. This difference remains
+explicit and does not claim native shader parity.
+
+The native importer sends these color components to `Material::setVar(float)`
+at `0x100408B6`. It does not create a one-pixel texture. `Material::setTexture`
+at `0x1004082B` binds an existing texture. The native buffer path at
+`0x10041300` receives bytes from the KN5 loader only.
+
+ksEditor checks eight texture channels, from `DiffuseColor` through
+`SpecularFactor`. It accepts only `FbxFileTexture` objects and reduces each path
+to a basename. `ResourceStore::getTexture` at `0x10041239` searches configured
+folders and the automatic sibling `texture` folder. The first file found fills
+`txDiffuse`. Later channels cannot replace this resource. A missing file stays
+null. The importer never requests `txNormal`.
+
+The WebGL and FBX adapters use a separate compatibility path for missing image
+files and CSP color resources. This path creates a 132-byte legacy BGRA8 DDS.
+It clamps and rounds RGBA channels before it writes the BGRA pixel. The native
+C++ stock-scene bridge now owns this exact payload for Vulkan and D3D12. This
+behavior is not an approximation of the ksEditor FBX importer.
 
 Apex keeps the explicit FBX diffuse channel as `txDiffuse`. For static materials,
 it maps `normalMap` to `txNormal` and selects `ksPerPixelNM`. Unresolved normal
@@ -2672,6 +2962,10 @@ A live browser check rendered the installed Porsche needle at 1,000 and 6,000 RP
 The capture hashes differed. Both captures returned WebGL error zero, with no browser errors.
 The desktop check loaded all 76 textures. Node APIs remained unavailable in the renderer.
 
+The native CLI also parsed the installed Porsche model and configuration at 6,000 RPM.
+It bound `ARROW_RPM` once and rebuilt the scene before shader-module validation.
+This check did not produce a native GPU capture.
+
 ## Desktop packaging evidence
 
 The desktop shell uses Electron 43.4.1 and serves the existing application from an
@@ -2719,3 +3013,260 @@ A second packaged check removed GrassFX and kept one RainFX soaking surface. Its
 negative-input and disabled captures both produced `22fa65aa1df02d53`. This proves
 that snow input does not extrapolate the wet-material approximation. Visual inspection
 of the snow capture showed the expected white tips and green roots.
+
+## ksEditor AI spline v7 evidence
+
+The inspected `ksNet.dll` and PDB hashes are the same binaries listed in the RPM
+section. PDB-backed Ghidra analysis resolves `AISpline::loadFast` at `0x1006959b`,
+`AISpline::loadVersion6` at `0x1006968f`, `AISpline::loadVersion7` at
+`0x10069aec`, and `AISpline::save` at `0x1006a3b9`. The editor chooses the legacy
+loader for versions below 7 and always writes version 7.
+
+Version 7 starts with four little-endian 32-bit words: version, spline-point
+count, lap time, and a reserved zero. Each spline point is the PDB-backed
+20-byte `SplinePoint`: three float32 coordinates, float32 point length, and a
+signed 32-bit tag. A 32-bit payload count follows the point array.
+
+The writer emits 72 bytes per payload in this order: speed, gas, brake, lateral
+G, radius, two side distances, camber, direction, three normal components,
+length, three forward-vector components, one reserved zero word, and grade.
+All values except the reserved word are float32. The native in-memory
+`AISplinePayload` is 80 bytes and also contains grip, distance-from-corner, and
+pit-lane fields, but `AISpline::save` does not write those fields in this block.
+
+`InterpolatingSpline::saveGrid` at `0x10037294` then writes a 32-bit presence
+flag. A present grid contains two float32 three-vectors for maximum and minimum
+extents, a 32-bit neighbor count, a float32 sampling density, and a 32-bit row
+count. Each row starts with a 32-bit cell count. Each cell starts with a 32-bit
+index count followed by that many 32-bit spline-point indices. The corresponding
+loader is at `0x10036e52`. A native parser must bound every count and aggregate
+allocation before reproducing this loader.
+
+The installed Imola `ai/fast_lane.ai` has SHA-256
+`aff2862f2194e2d3919d8eb0a4ae4485259228de06e52f70b8bbc89330c4d220`.
+It contains 3,166 points, 3,166 payloads, and a present grid. The installed
+`ai/pit_lane.ai` has SHA-256
+`2021fb12003b170519886ea34823126e22cfd04ded8de65ed76cf9ec149d5f4d`.
+It contains 1,094 points and payloads followed by a zero grid-presence word.
+These fixtures confirm the recovered strides and offsets. Version 2 remains a
+separate legacy layout and is not inferred from the version 7 records.
+
+`AISpline::loadVersion6` also exposes the legacy version-2 layout. After the
+version word, the file contains a 32-bit point count and a 32-bit lap-time
+value. Each of the declared records is exactly 28 bytes: three float32 position
+components, one opaque 32-bit word, then float32 speed, gas, and lateral G.
+There is no payload-count or grid section, so the exact file size is
+`12 + pointCount * 28`. The native loader derives each record's forward vector
+from the current raw position minus the immediately previous raw position
+before the three-to-one retention gate. Thus retained record `3k` keeps the
+direction from raw records `3k-1` to `3k`, not the direction between retained
+records. After loading, it overwrites only the first retained forward with the
+normalized wraparound vector from the last retained position to the first
+retained position.
+
+Four installed version-2 fixtures satisfy that size formula exactly. Imola has
+8,533 records and SHA-256
+`df670ef7eee7c6bb5cb4c371e2ce0e33d7851421bafdec1f75df5d833a44f7a2`;
+Magione has 4,506 records and SHA-256
+`210941d094447229652a36d099a64de2a5d0d03906ac9bfc2a48f588c77c4b71`.
+Silverstone GP and its international copy contain 10,433 records and share
+SHA-256 `c76dbef08af93bbd522281a35388ad50ce2d71fd04cc982a7a18bad4744ab935`.
+The opaque word is constant within a fixture but differs across tracks; it must
+not receive an inferred semantic name. The bounded native parser now retains
+every raw version-2 record and exposes the source indices `0, 3, 6, ...` used by
+the editor. It also exposes a forward vector parallel to those retained
+indices. The vector is normalized from the current raw position minus the
+immediately previous raw position before retention; therefore retained index
+`3k` preserves raw segment `3k-1 -> 3k`. The decompile initializes the prior
+position to `(0, 0, 0)`, leaves a zero-length vector as zero, and only replaces
+the first retained forward with retained-point wraparound when more than one
+point was retained. This leaves zero-point input empty and a one-point input
+with its initial raw displacement (zero for an origin point). It keeps
+version-2 data separate from version-7 points and payloads and rejects
+truncated prefixes, oversized counts, non-finite values, aggregate budget
+violations, and trailing bytes.
+
+The C++ format library now implements the recovered `AISpline::save` version-7
+record layout. It emits zero for both reserved words. It preserves the exact
+point, payload, and optional grid order. The writer validates point tags, grid
+indices, finite values, all counts, and the output-byte limit. Repository
+`fast_lane.ai` and `pit_lane.ai` files round-trip byte for byte. The installed
+Imola fast lane also round-trips when that fixture exists.
+
+The original managed save wrapper calls `buildGrid` before `AISpline::save`.
+It writes version 7 directly to the destination and ignores stream errors.
+The C++ writer returns owned bytes and does not write a file. App edit and save
+commands convert version-2 input to the recovered version-7 model first. The
+conversion retains each third source point and rebuilds the grid. It also uses
+the session limits. Normal version-2 viewing remains read-only.
+
+## ksEditor AI spline waypoint payload evidence
+
+`ksGraphics.getCurrentWaypointInfo` has token `0x060003ba` and RVA `0x1f6f0`.
+`ksGraphics.setWaypointInfo` has token `0x060003bc` and RVA `0x1f848`.
+Both methods require exactly one selected spline point. The setter ignores its
+integer argument. The UI commit callback passes zero for this argument.
+
+The UI object maps six fields to the native runtime payload. These fields are
+radius, two side distances, camber, length, and grade. Their runtime offsets
+are 4, 12, 16, 20, 52, and 64 bytes. The getter converts camber from radians
+with `57.295780181884766F`. The setter converts degrees with
+`0.01745299994945526F`.
+
+The setter treats each nonzero field in the first object as a replacement.
+Zero means unchanged, so this object cannot set a field to zero. The setter
+then adds every field in the additive object. It does not clamp values or make
+sure that values are finite.
+
+`AISpline::payloadAtSplineIndex` at `0x1006a318` and the setter at
+`0x1006a657` resolve a point through `Spline::wrapIndex` and `Spline::tagAt`.
+The safe C++ adapter uses strict point bounds. It also validates the signed tag,
+all finite values, the complete candidate, and the output limit. An error
+returns no candidate bytes and does not change the input spline.
+
+The `--edit-ai-spline` command exposes the recovered replacement and additive
+objects for one point. It accepts camber in degrees and writes radians. It
+preserves the parsed grid and refuses to replace an existing output file.
+
+## ksEditor AI spline edit lifecycle evidence
+
+`ksNet.loadAISpline` has token `0x060003cb` and RVA `0x25cf8`. It loads the
+file twice. The first spline becomes the active spline. The second spline
+becomes `SplineEditor.backupSpline` at field offset 8.
+
+`SplineEditor.startEditing` at `0x1002f2d8` clears the selection. It does not
+replace the backup. Refresh, resample, finish, cancel, and save also keep the
+load-time backup. Thus, a save does not establish a new reset point.
+
+`SplineEditor.finishEditing` has token `0x06000112` and VA `0x1002f324`.
+It clears edit mode but preserves the selected-index vector.
+It changes points and refreshes derived spline state only with five or more
+temporary edit points. It always cleans and clears the temporary edit points.
+
+`SplineEditor.cancelEditing` has token `0x0600011a` and VA `0x1002f55c`.
+It clears edit mode, the selected-index vector, and temporary edit points.
+It cleans temporary visual indicators but does not change spline points.
+It does not refresh the derived spline state.
+
+`SplineEditor.setSelectedIndicesToDefault` has token `0x06000113` and RVA
+`0x30c14`. It copies each selected point and tagged payload from the backup.
+It uses raw selection order and keeps the selection. An empty selection does
+nothing. A point-count mismatch replaces the complete active spline.
+
+`SplineEditor.invertCamberOnSelectedIndices` has token `0x0600002d` and RVA
+`0x1ee60`. It negates the stored-radian camber for each raw selection entry.
+Thus, a repeated point index changes camber twice. The native method does not
+validate indices, tags, or finite values.
+
+The C++ payload session owns immutable baseline and current snapshots. Each
+snapshot has a parsed model and canonical writer bytes. Count and serialized
+byte limits bound history. Writer limits bound the parsed model. A separate
+limit bounds raw selection entries. Invalid edits report zero applied entries.
+They do not change state, history, or revision.
+
+The low-level inversion API preserves raw duplicate behavior. The CLI removes
+duplicate indices in insertion order. This step matches `SplineEditor.addIndex`.
+The CLI writes a new file and does not replace an existing path.
+
+## ksEditor AI spline selection evidence
+
+The PDB places `SplineEditor.selectedIndices` at offset 52 as a
+`std::vector<int>`. `SplineEditor.addIndex` is at `0x10024bfc`. The method
+ignores an existing index and appends each new index. Thus, the vector keeps
+insertion order without duplicates.
+
+`SplineEditor.onNodeRender` has method RVA `0x2f754` and execution VA
+`0x1002f760`. It renders each selected index. The first entry drives the
+mutable edit call. `onPickedPoint` at `0x1002fed0` uses the final entry for its
+normalized UI return.
+
+The C++ marker builder accepts the selected-index vector and keeps its order.
+It ignores duplicate indices before it emits geometry. The builder bounds the
+input count and total line vertices. The single-index overload remains for
+existing callers. Repeated `--ai-spline-index` options use this vector model.
+
+## Native ksNet camera pose evidence
+
+The installed `ksNet.dll` (`b38dcb826a3311d7233cf0a6a58e5da16b6c8679f8490091e7b434bf730091ca`) and
+matching PDB were inspected with Ghidra. `Camera::moveForward` (`0x1006459b`) moves
+position along the negative backward basis, `moveRight` (`0x100645ee`) moves along
+the first basis, and `moveUpWorld` (`0x10064630`) changes only world Y.
+`rotateOnAxis` (`0x10064a60`) pre-multiplies an axis-angle matrix; `rotatePitch`
+(`0x10064aa9`) uses axis `(1, 0, 0)`. `getViewMatrix` (`0x100644e7`) builds a
+look-at from position, position minus backward, and the up basis. `getPerspectiveMatrix`
+(`0x10064474`) converts stored degree FOV with `0.01745299994945526` and uses
+the video aspect when the authored aspect is `-1`.
+
+The bounded C++ `NativeCameraPose` preserves these movement and rotation semantics
+without depending on the original matrix field ordering. It converts to the existing
+backend-specific frame builder. The projection keeps explicit WebGL/Vulkan/D3D12
+clip remapping; native `mat44f::createPerspective` internals remain unrecovered.
+
+## ksNet transparent-pass ordering evidence
+
+`CameraShadowMapped::renderPass` at `0x1005E681` starts the transparent pass in
+`PvsRenderMode::Classic`. It calls the root render function at `0x1005E89A`.
+
+`Node::render` at `0x1003F5DC` visits active children in vector order.
+`Mesh::render` at `0x100494FF` and `SkinnedMesh::render` at `0x1004A87E` send
+draws immediately. These functions do not calculate a camera-distance key.
+
+`PvsProcessor::compareDrawCalls` at `0x1006587B` has no distance key. Default
+mode uses this comparator. The transparent Classic mode does not use it.
+
+The original transparent pass therefore keeps its current traversal order. The
+retained WebGL viewport has different behavior. It sorts transparent geometry
+back-to-front for each frame.
+
+The production native viewport now retains the WebGL behavior explicitly. KN5
+and FBX conversion keep each local vertex-AABB center. The viewport transforms
+these centers with current packet matrices and compares squared double values.
+
+The shared static-scene frame accepts a complete packet-index permutation. It
+validates count, range, and uniqueness before any mutable backend update. Color
+submission uses the permutation. Shadow submission keeps its separate order.
+
+## ksNet pass-specific CameraMeshFilter evidence
+
+`CameraMeshFilter::isVisible` starts at `0x10064C8C`. The opaque pass rejects
+transparent meshes. The transparent pass rejects opaque meshes.
+
+Both color passes require `isVisible`. The `Shadowgen` pass ignores
+`isVisible` and requires `castShadows`. All passes apply the maximum layer.
+
+`noCull` and a null camera bypass LOD and frustum tests. These conditions do
+not bypass the pass gates. The port does not infer `noCull` from KN5 data.
+
+`CameraShadowMapped::shadowMapPass` creates its filter at `0x1005EB8F`. The
+filter uses the main camera and each mesh world matrix. It does not use the
+cascade camera for visibility.
+
+The native viewport now retains an active, renderable shadow caster when only
+`isVisible` excludes it from color. Each frame computes separate color and
+Shadowgen masks. Vulkan and D3D12 consume the same packet-index masks.
+
+An explicit shadow mask replaces the automatic shadow result. If it is absent,
+an explicit color mask keeps the earlier shared-mask contract.
+
+## ksNet shadow traversal order
+
+`CameraShadowMapped::shadowMapPass` repeats the root traversal three times at
+`0x1005EC2A–0x1005EC74`. Each traversal uses `PvsRenderMode::Shadows`.
+
+`Node::render` at `0x1003F5DC` reads children from the current vector in order.
+`Mesh::render` draws immediately at `0x10049599`. `SkinnedMesh::render` draws
+at `0x1004A909`, then renders its children at `0x1004A90F`.
+
+The Classic shadow path does not sort or remove repeated entries. All three
+cascades therefore use the same depth-first scene order.
+
+The native port carries a full prepared-index permutation from scene planning.
+It validates the permutation before frame updates or depth writes. Both backend
+implementations preserve the supplied draw order.
+
+`SceneGraphOptimizer` can change child-vector order before rendering. The port
+does not reproduce this one-time optimization. It preserves its retained scene
+order and reproduces the recovered per-cascade traversal.
+
+The bounded scene graph rejects repeated or cyclic node references. It does not
+copy unsafe repeated draws from the original renderer for malformed graphs.

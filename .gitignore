@@ -1,4 +1,12 @@
 node_modules/
 release/
+out/
 .DS_Store
 npm-debug.log*
+
+# CMake is commonly configured in build/, which also contains the tracked
+# desktop packaging icons. Keep those assets visible and ignore generated
+# build-system output.
+/build/*
+!/build/icon.png
+!/build/icon.svg

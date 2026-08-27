@@ -1,0 +1,853 @@
+#include "apex/authoring/project.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <regex>
+#include <set>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+namespace apex::authoring {
+
+namespace {
+
+[[nodiscard]] AuthoringError error(std::string_view code, std::string_view message) {
+    return AuthoringError("AUTHORING", "project", 0, std::string(code), std::string(message));
+}
+
+[[nodiscard]] std::string trim(std::string_view value) {
+    std::size_t begin = 0;
+    std::size_t end = value.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(value[begin])) != 0) ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) --end;
+    return std::string(value.substr(begin, end - begin));
+}
+
+[[nodiscard]] std::string lowerAscii(std::string_view value) {
+    std::string output(value);
+    for (auto& character : output) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte >= static_cast<unsigned char>('A') && byte <= static_cast<unsigned char>('Z'))
+            character = static_cast<char>(byte + ('a' - 'A'));
+    }
+    return output;
+}
+
+[[nodiscard]] std::string upperAscii(std::string_view value) {
+    std::string output(value);
+    for (auto& character : output) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('z'))
+            character = static_cast<char>(byte - ('a' - 'A'));
+    }
+    return output;
+}
+
+[[nodiscard]] std::string safeText(std::string value, std::size_t maximum,
+                                   std::string_view label, bool allowEmpty = false) {
+    value = trim(value);
+    if ((!allowEmpty && value.empty()) || value.size() > maximum)
+        throw error("EDIT_INVALID", std::string(label) + " is empty or exceeds its limit");
+    for (const auto character : value)
+        if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f' || character == '\0')
+            throw error("EDIT_INVALID", std::string(label) + " contains an unsafe character");
+    return value;
+}
+
+[[nodiscard]] std::string safePath(std::string value, std::size_t maximum,
+                                   std::string_view label) {
+    value = safeText(std::move(value), maximum, label);
+    std::replace(value.begin(), value.end(), '\\', '/');
+    if (value.front() == '/' ||
+        (value.size() >= 2 && std::isalpha(static_cast<unsigned char>(value[0])) != 0 && value[1] == ':'))
+        throw error("EDIT_INVALID", std::string(label) + " must be relative");
+    std::size_t begin = 0;
+    while (begin <= value.size()) {
+        const auto end = value.find('/', begin);
+        const auto part = value.substr(begin, end == std::string::npos ? value.size() - begin : end - begin);
+        if (part.empty() || part == "." || part == "..")
+            throw error("EDIT_INVALID", std::string(label) + " contains an unsafe path component");
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return value;
+}
+
+[[nodiscard]] std::string safeKey(std::string value, std::size_t maximum,
+                                  std::string_view label) {
+    return safeText(std::move(value), maximum, label);
+}
+
+template <std::size_t N>
+void validateVector(const std::array<float, N>& value, std::string_view label) {
+    for (const auto component : value)
+        if (!std::isfinite(component)) throw error("EDIT_INVALID", std::string(label) + " must be finite");
+}
+
+void validateMatrix(const Matrix4& value, std::string_view label) {
+    validateVector(value, label);
+}
+
+template <typename T>
+void validateOptionalFloat(const std::optional<T>& value, std::string_view label) {
+    if (value.has_value() && !std::isfinite(static_cast<float>(*value)))
+        throw error("EDIT_INVALID", std::string(label) + " must be finite");
+}
+
+void validateNodeEdit(NodeEdit& edit, const AuthoringLimits& limits) {
+    if (!edit.name && !edit.active && !edit.transform)
+        throw error("EDIT_INVALID", "node edit has no fields");
+    if (edit.name) *edit.name = safeText(std::move(*edit.name), limits.maxStringBytes, "node name");
+    if (edit.transform) validateMatrix(*edit.transform, "node transform");
+}
+
+void validateMeshEdit(MeshEdit& edit) {
+    if (!edit.transparent && !edit.castShadows && !edit.layer && !edit.lodIn && !edit.lodOut)
+        throw error("EDIT_INVALID", "mesh edit has no fields");
+    if (edit.lodIn && !std::isfinite(*edit.lodIn))
+        throw error("EDIT_INVALID", "mesh LOD in must be finite");
+    if (edit.lodOut && !std::isfinite(*edit.lodOut))
+        throw error("EDIT_INVALID", "mesh LOD out must be finite");
+}
+
+void validateGeometryEdit(GeometryEdit& edit) {
+    if (!edit.remove_degenerate && !edit.reverse_winding && !edit.recalculate_normals && !edit.transform)
+        throw error("EDIT_INVALID", "geometry edit has no fields");
+    if (edit.transform) validateMatrix(*edit.transform, "geometry transform");
+}
+
+void validateWorkspaceEdit(WorkspaceFileEdit& edit, const AuthoringLimits& limits) {
+    if (edit.name) *edit.name = safePath(std::move(*edit.name), limits.maxStringBytes, "workspace file name");
+    if (edit.position) validateVector(*edit.position, "workspace position");
+    if (edit.rotation) validateVector(*edit.rotation, "workspace rotation");
+    if (edit.positionCenter) validateVector(*edit.positionCenter, "workspace position center");
+    if (edit.positionRange) validateVector(*edit.positionRange, "workspace position range");
+    if (edit.velocityBase) validateVector(*edit.velocityBase, "workspace velocity base");
+    if (edit.velocityRange) validateVector(*edit.velocityRange, "workspace velocity range");
+    validateOptionalFloat(edit.lodIn, "workspace LOD in");
+    validateOptionalFloat(edit.lodOut, "workspace LOD out");
+    validateOptionalFloat(edit.probability, "workspace probability");
+    if (edit.multiplicity) validateVector(*edit.multiplicity, "workspace multiplicity");
+    if (edit.posMode) *edit.posMode = upperAscii(safeText(std::move(*edit.posMode), limits.maxStringBytes, "position mode"));
+    if (edit.velMode) *edit.velMode = upperAscii(safeText(std::move(*edit.velMode), limits.maxStringBytes, "velocity mode"));
+    if (edit.playWav) *edit.playWav = safeText(std::move(*edit.playWav), limits.maxStringBytes, "workspace wav", true);
+}
+
+[[nodiscard]] bool isMaterialStateField(std::string_view field) {
+    return field == "shader" || field == "blendMode" || field == "depthMode" ||
+           field == "cullMode";
+}
+
+void validateMaterialScalar(MaterialScalar& value, const AuthoringLimits& limits,
+                            std::string_view field) {
+    const bool stateField = isMaterialStateField(field);
+    if (auto* number = std::get_if<float>(&value)) {
+        if (stateField)
+            throw error("EDIT_INVALID", "material state fields must be strings");
+        if (!std::isfinite(*number)) throw error("EDIT_INVALID", "material scalar must be finite");
+    } else if (auto* text = std::get_if<std::string>(&value)) {
+        *text = safeText(std::move(*text), limits.maxStringBytes, "material scalar",
+                         !stateField);
+    } else
+        throw error("EDIT_INVALID", "boolean material properties are not modeled");
+}
+
+void validateMaterialVector(MaterialVector& value) {
+    if (value.components < 2 || value.components > value.values.size())
+        throw error("EDIT_INVALID", "material vector must contain two to four components");
+    validateVector(value.values, "material vector");
+}
+
+void validateResource(MaterialResource& value, const AuthoringLimits& limits) {
+    if (value.clear) {
+        if (value.texture || value.file || value.color)
+            throw error("EDIT_INVALID", "cleared material resource cannot contain a value");
+        return;
+    }
+    const auto count = static_cast<unsigned>(value.texture.has_value()) +
+                       static_cast<unsigned>(value.file.has_value()) +
+                       static_cast<unsigned>(value.color.has_value());
+    if (count != 1) throw error("EDIT_INVALID", "material resource must contain one value");
+    if (value.texture) *value.texture = safePath(std::move(*value.texture), limits.maxStringBytes, "material texture");
+    if (value.file) *value.file = safePath(std::move(*value.file), limits.maxStringBytes, "material resource file");
+    if (value.color) validateVector(*value.color, "material resource color");
+}
+
+void validateSurface(SurfaceEdit& edit, const AuthoringLimits& limits) {
+    if (edit.key) *edit.key = upperAscii(safeKey(std::move(*edit.key), limits.maxStringBytes, "surface key"));
+    if (edit.wav) *edit.wav = safeText(std::move(*edit.wav), limits.maxStringBytes, "surface wav", true);
+    if (edit.ffEffect) *edit.ffEffect = safeText(std::move(*edit.ffEffect), limits.maxStringBytes, "surface effect", true);
+    validateOptionalFloat(edit.friction, "surface friction");
+    validateOptionalFloat(edit.damping, "surface damping");
+    validateOptionalFloat(edit.dirtAdditive, "surface dirt additive");
+    validateOptionalFloat(edit.blackFlagTime, "surface black flag time");
+    validateOptionalFloat(edit.sinHeight, "surface sine height");
+    validateOptionalFloat(edit.sinLength, "surface sine length");
+    validateOptionalFloat(edit.vibrationGain, "surface vibration gain");
+    validateOptionalFloat(edit.vibrationLength, "surface vibration length");
+    validateOptionalFloat(edit.wavPitch, "surface wav pitch");
+}
+
+void validateCollider(ColliderEdit& edit) {
+    if (edit.transform) validateMatrix(*edit.transform, "collider transform");
+    // JavaScript project normalization keeps topology operations only when
+    // they are true. Normalize explicit false values to the same no-op state.
+    if (edit.removeDegenerate == false) edit.removeDegenerate.reset();
+    if (edit.reverseWinding == false) edit.reverseWinding.reset();
+    if (edit.recalculateNormals == false) edit.recalculateNormals.reset();
+}
+
+void validateBottomCollider(BottomColliderEdit& edit) {
+    if (edit.centre) validateVector(*edit.centre, "bottom collider centre");
+    if (edit.size) {
+        validateVector(*edit.size, "bottom collider size");
+        for (const auto component : *edit.size)
+            if (component <= 0.0F) throw error("EDIT_INVALID", "bottom collider size must be positive");
+    }
+}
+
+void validateDamage(DamageEdit& edit, const AuthoringLimits& limits) {
+    validateOptionalFloat(edit.minSpeed, "damage minimum speed");
+    validateOptionalFloat(edit.maxSpeed, "damage maximum speed");
+    validateOptionalFloat(edit.initialLevel, "damage initial level");
+    validateOptionalFloat(edit.staticRotationAngle, "damage rotation angle");
+    validateOptionalFloat(edit.multG, "damage G multiplier");
+    validateOptionalFloat(edit.fullSpeed, "damage full speed");
+    validateOptionalFloat(edit.oscillationMinAngle, "damage minimum oscillation");
+    validateOptionalFloat(edit.oscillationMaxAngle, "damage maximum oscillation");
+    if (edit.initialLevel && (*edit.initialLevel < 0.0F || *edit.initialLevel > 100.0F))
+        throw error("EDIT_INVALID", "damage initial level must be from 0 to 100");
+    if (edit.minSpeed && *edit.minSpeed < 0.0F) throw error("EDIT_INVALID", "damage minimum speed cannot be negative");
+    if (edit.maxSpeed && *edit.maxSpeed < 0.0F) throw error("EDIT_INVALID", "damage maximum speed cannot be negative");
+    if (edit.fullSpeed && *edit.fullSpeed < 0.0F) throw error("EDIT_INVALID", "damage full speed cannot be negative");
+    if (edit.staticRotationAxis) validateVector(*edit.staticRotationAxis, "damage rotation axis");
+    if (edit.oscillationAxis) validateVector(*edit.oscillationAxis, "damage oscillation axis");
+    if (edit.allowedG) validateVector(*edit.allowedG, "damage allowed G");
+    if (edit.name) *edit.name = safeText(std::move(*edit.name), std::min<std::size_t>(1024U, limits.maxStringBytes), "damage name");
+    if (edit.damageZone) {
+        *edit.damageZone = upperAscii(safeText(std::move(*edit.damageZone), limits.maxStringBytes, "damage zone"));
+        if (edit.damageZone->size() > 64 ||
+            !std::all_of(edit.damageZone->begin(), edit.damageZone->end(), [](char c) {
+                return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            }))
+            throw error("EDIT_INVALID", "damage zone is not a safe token");
+    }
+}
+
+void validateDamageForSection(std::string_view section, DamageEdit& edit,
+                              const AuthoringLimits& limits) {
+    if (!damageSectionValid(section))
+        throw error("EDIT_INVALID", "damage section is not modeled");
+    validateDamage(edit, limits);
+    const auto check = [&](std::string_view field, bool present) {
+        if (present && !damageFieldAllowed(section, field))
+            throw error("EDIT_INVALID", "damage field is not valid for its section");
+    };
+    check("minSpeed", edit.minSpeed.has_value());
+    check("maxSpeed", edit.maxSpeed.has_value());
+    check("initialLevel", edit.initialLevel.has_value());
+    check("staticRotationAngle", edit.staticRotationAngle.has_value());
+    check("multG", edit.multG.has_value());
+    check("fullSpeed", edit.fullSpeed.has_value());
+    check("oscillationMinAngle", edit.oscillationMinAngle.has_value());
+    check("oscillationMaxAngle", edit.oscillationMaxAngle.has_value());
+    check("staticRotationAxis", edit.staticRotationAxis.has_value());
+    check("oscillationAxis", edit.oscillationAxis.has_value());
+    check("allowedG", edit.allowedG.has_value());
+    check("enabled", edit.enabled.has_value());
+    check("name", edit.name.has_value());
+    check("damageZone", edit.damageZone.has_value());
+}
+
+[[nodiscard]] bool damageHasFields(const DamageEdit& edit) {
+    return edit.minSpeed || edit.maxSpeed || edit.initialLevel || edit.staticRotationAngle ||
+           edit.multG || edit.fullSpeed || edit.oscillationMinAngle || edit.oscillationMaxAngle ||
+           edit.staticRotationAxis || edit.oscillationAxis || edit.allowedG || edit.enabled ||
+           edit.name || edit.damageZone;
+}
+
+template <typename T>
+void mergeOptional(std::optional<T>& destination, const std::optional<T>& source) {
+    if (source) destination = source;
+}
+
+void mergeNode(NodeEdit& destination, const NodeEdit& source) {
+    mergeOptional(destination.name, source.name);
+    mergeOptional(destination.active, source.active);
+    mergeOptional(destination.transform, source.transform);
+}
+
+void mergeMesh(MeshEdit& destination, const MeshEdit& source) {
+    mergeOptional(destination.transparent, source.transparent);
+    mergeOptional(destination.castShadows, source.castShadows);
+    mergeOptional(destination.layer, source.layer);
+    mergeOptional(destination.lodIn, source.lodIn);
+    mergeOptional(destination.lodOut, source.lodOut);
+}
+
+void mergeGeometry(GeometryEdit& destination, const GeometryEdit& source) {
+    destination.remove_degenerate = destination.remove_degenerate || source.remove_degenerate;
+    destination.reverse_winding = destination.reverse_winding || source.reverse_winding;
+    destination.recalculate_normals = destination.recalculate_normals || source.recalculate_normals;
+    mergeOptional(destination.transform, source.transform);
+}
+
+void mergeWorkspace(WorkspaceFileEdit& destination, const WorkspaceFileEdit& source) {
+    mergeOptional(destination.name, source.name);
+    mergeOptional(destination.position, source.position);
+    mergeOptional(destination.rotation, source.rotation);
+    mergeOptional(destination.lodIn, source.lodIn);
+    mergeOptional(destination.lodOut, source.lodOut);
+    mergeOptional(destination.probability, source.probability);
+    mergeOptional(destination.multiplicity, source.multiplicity);
+    mergeOptional(destination.posMode, source.posMode);
+    mergeOptional(destination.positionCenter, source.positionCenter);
+    mergeOptional(destination.positionRange, source.positionRange);
+    mergeOptional(destination.velMode, source.velMode);
+    mergeOptional(destination.velocityBase, source.velocityBase);
+    mergeOptional(destination.velocityRange, source.velocityRange);
+    mergeOptional(destination.playWav, source.playWav);
+}
+
+void mergeSurface(SurfaceEdit& destination, const SurfaceEdit& source) {
+    mergeOptional(destination.key, source.key);
+    mergeOptional(destination.friction, source.friction);
+    mergeOptional(destination.damping, source.damping);
+    mergeOptional(destination.dirtAdditive, source.dirtAdditive);
+    mergeOptional(destination.blackFlagTime, source.blackFlagTime);
+    mergeOptional(destination.isValidTrack, source.isValidTrack);
+    mergeOptional(destination.isPitlane, source.isPitlane);
+    mergeOptional(destination.sinHeight, source.sinHeight);
+    mergeOptional(destination.sinLength, source.sinLength);
+    mergeOptional(destination.vibrationGain, source.vibrationGain);
+    mergeOptional(destination.vibrationLength, source.vibrationLength);
+    mergeOptional(destination.wav, source.wav);
+    mergeOptional(destination.wavPitch, source.wavPitch);
+    mergeOptional(destination.ffEffect, source.ffEffect);
+}
+
+void mergeCollider(ColliderEdit& destination, const ColliderEdit& source) {
+    mergeOptional(destination.transform, source.transform);
+    mergeOptional(destination.removeDegenerate, source.removeDegenerate);
+    mergeOptional(destination.reverseWinding, source.reverseWinding);
+    mergeOptional(destination.recalculateNormals, source.recalculateNormals);
+}
+
+void mergeBottomCollider(BottomColliderEdit& destination, const BottomColliderEdit& source) {
+    mergeOptional(destination.centre, source.centre);
+    mergeOptional(destination.size, source.size);
+    mergeOptional(destination.groundEnabled, source.groundEnabled);
+}
+
+void mergeDamage(DamageEdit& destination, const DamageEdit& source) {
+    mergeOptional(destination.minSpeed, source.minSpeed);
+    mergeOptional(destination.maxSpeed, source.maxSpeed);
+    mergeOptional(destination.initialLevel, source.initialLevel);
+    mergeOptional(destination.staticRotationAngle, source.staticRotationAngle);
+    mergeOptional(destination.multG, source.multG);
+    mergeOptional(destination.fullSpeed, source.fullSpeed);
+    mergeOptional(destination.oscillationMinAngle, source.oscillationMinAngle);
+    mergeOptional(destination.oscillationMaxAngle, source.oscillationMaxAngle);
+    mergeOptional(destination.staticRotationAxis, source.staticRotationAxis);
+    mergeOptional(destination.oscillationAxis, source.oscillationAxis);
+    mergeOptional(destination.allowedG, source.allowedG);
+    mergeOptional(destination.enabled, source.enabled);
+    mergeOptional(destination.name, source.name);
+    mergeOptional(destination.damageZone, source.damageZone);
+}
+
+[[nodiscard]] std::string nodePath(std::string value, std::size_t maximum) {
+    value = safeText(std::move(value), maximum, "node path");
+    if (value == "root") return value;
+    std::size_t begin = 0;
+    while (begin < value.size()) {
+        const auto end = value.find('/', begin);
+        const auto part = value.substr(begin, end == std::string::npos ? value.size() - begin : end - begin);
+        if (part.empty() || !std::all_of(part.begin(), part.end(), [](char c) { return c >= '0' && c <= '9'; }))
+            throw error("EDIT_INVALID", "node path is not a stable hierarchy path");
+        if (part.size() > 1u && part.front() == '0')
+            throw error("EDIT_INVALID", "node path contains a non-canonical index");
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return value;
+}
+
+[[nodiscard]] std::string sourceName(std::string value, std::size_t maximum) {
+    value = safePath(std::move(value), maximum, "source name");
+    return value;
+}
+
+[[nodiscard]] std::string secondaryAssetName(std::string value) {
+    value = trim(value);
+    std::replace(value.begin(), value.end(), '\\', '/');
+    value.erase(std::unique(value.begin(), value.end(), [](char left, char right) {
+        return left == '/' && right == '/';
+    }), value.end());
+    if (value.empty())
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is empty");
+    for (const auto character : value)
+        if (static_cast<unsigned char>(character) < 0x20U || character == '\x7f' || character == '\0')
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name contains an unsafe character");
+    std::size_t index = 0;
+    std::size_t utf16Units = 0;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        std::size_t bytes = 1;
+        std::uint32_t codepoint = first;
+        if (first >= 0xc2U && first <= 0xdfU) { bytes = 2; codepoint = first & 0x1fU; }
+        else if (first >= 0xe0U && first <= 0xefU) { bytes = 3; codepoint = first & 0x0fU; }
+        else if (first >= 0xf0U && first <= 0xf4U) { bytes = 4; codepoint = first & 0x07U; }
+        else if (first >= 0x80U)
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        if (index + bytes > value.size())
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        for (std::size_t byteIndex = 1; byteIndex < bytes; ++byteIndex) {
+            const auto byte = static_cast<unsigned char>(value[index + byteIndex]);
+            if ((byte & 0xc0U) != 0x80U)
+                throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+            codepoint = (codepoint << 6U) | (byte & 0x3fU);
+        }
+        if ((bytes == 2 && codepoint < 0x80U) || (bytes == 3 && codepoint < 0x800U) ||
+            (bytes == 4 && codepoint < 0x10000U) || codepoint > 0x10ffffU ||
+            (codepoint >= 0xd800U && codepoint <= 0xdfffU))
+            throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is not valid UTF-8");
+        const std::size_t units = codepoint > 0xffffU ? 2U : 1U;
+        if (utf16Units + units > 2048U) {
+            value.resize(index);
+            break;
+        }
+        utf16Units += units;
+        index += bytes;
+    }
+    if (value.empty())
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset name is empty");
+    return value;
+}
+
+void normalizeSecondaryAsset(std::optional<SourceIdentity>& identity, bool hasEdits) {
+    if (!hasEdits) {
+        identity.reset();
+        return;
+    }
+    if (identity) *identity = normalizeSecondaryAssetIdentity(std::move(*identity));
+}
+
+void validateState(ProjectState& state, const AuthoringLimits& limits) {
+    state.source = normalizeSourceIdentity(std::move(state.source));
+    normalizeSecondaryAsset(state.colliderAsset, !state.colliders.empty());
+    normalizeSecondaryAsset(state.damageAsset, !state.damage.empty());
+    normalizeSecondaryAsset(state.bottomColliderAsset, !state.bottomColliders.empty());
+    for (auto& [path, edit] : state.nodes) {
+        if (nodePath(path, limits.maxStringBytes) != path)
+            throw error("RECOVERY_INVALID", "recovery node path is not canonical");
+        validateNodeEdit(edit, limits);
+    }
+    for (auto& [name, edit] : state.meshes) {
+        if (safeKey(name, limits.maxStringBytes, "mesh name") != name)
+            throw error("RECOVERY_INVALID", "recovery mesh name is not canonical");
+        validateMeshEdit(edit);
+    }
+    for (auto& [path, edit] : state.geometry) {
+        if (nodePath(path, limits.maxStringBytes) != path)
+            throw error("RECOVERY_INVALID", "recovery geometry path is not canonical");
+        validateGeometryEdit(edit);
+    }
+    for (auto& [index, edit] : state.workspaceFiles) {
+        (void)index;
+        validateWorkspaceEdit(edit, limits);
+    }
+    for (auto& [material, edit] : state.materials) {
+        if (safeKey(material, limits.maxStringBytes, "material key") != material)
+            throw error("RECOVERY_INVALID", "recovery material key is not canonical");
+        for (auto& [field, value] : edit.scalars) {
+            if (safeKey(field, limits.maxStringBytes, "material scalar field") != field)
+                throw error("RECOVERY_INVALID", "recovery material field is not canonical");
+            validateMaterialScalar(value, limits, field);
+        }
+        for (auto& [field, value] : edit.vectors) {
+            if (safeKey(field, limits.maxStringBytes, "material vector field") != field)
+                throw error("RECOVERY_INVALID", "recovery material field is not canonical");
+            validateMaterialVector(value);
+        }
+        for (auto& [slot, value] : edit.resources) {
+            if (safeKey(slot, limits.maxStringBytes, "material resource slot") != slot)
+                throw error("RECOVERY_INVALID", "recovery material slot is not canonical");
+            validateResource(value, limits);
+        }
+    }
+    for (auto& [index, edit] : state.surfaces) {
+        (void)index;
+        validateSurface(edit, limits);
+    }
+    for (auto& [path, edit] : state.colliders) {
+        if (nodePath(path, limits.maxStringBytes) != path)
+            throw error("RECOVERY_INVALID", "recovery collider path is not canonical");
+        validateCollider(edit);
+        if (!edit.transform && !edit.removeDegenerate && !edit.reverseWinding && !edit.recalculateNormals)
+            throw error("RECOVERY_INVALID", "recovery collider edit has no fields");
+    }
+    for (auto& [index, edit] : state.bottomColliders) {
+        (void)index;
+        validateBottomCollider(edit);
+    }
+    for (auto& [section, edit] : state.damage) {
+        if (upperAscii(safeKey(section, limits.maxStringBytes, "damage section")) != section)
+            throw error("RECOVERY_INVALID", "recovery damage section is not canonical");
+        validateDamageForSection(section, edit, limits);
+        if (!damageHasFields(edit))
+            throw error("RECOVERY_INVALID", "recovery damage edit has no fields");
+    }
+}
+
+template <typename T>
+[[nodiscard]] std::size_t optionalCount(const std::optional<T>& value) { return value.has_value() ? 1U : 0U; }
+
+[[nodiscard]] std::uint64_t nextRevision(std::uint64_t revision) {
+    if (revision == std::numeric_limits<std::uint64_t>::max())
+        throw error("REVISION_LIMIT", "project revision cannot advance beyond uint64 maximum");
+    return revision + 1u;
+}
+
+} // namespace
+
+SourceIdentity normalizeSourceIdentity(SourceIdentity identity) {
+    identity.name = sourceName(std::move(identity.name), 4096);
+    identity.sha256 = lowerAscii(trim(identity.sha256));
+    if (identity.sha256.size() != 64 ||
+        !std::all_of(identity.sha256.begin(), identity.sha256.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }))
+        throw error("SOURCE_IDENTITY_INVALID", "source SHA-256 must contain 64 hexadecimal characters");
+    return identity;
+}
+
+SourceIdentity normalizeSecondaryAssetIdentity(SourceIdentity identity) {
+    constexpr std::uint64_t jsSafeIntegerMaximum = 9'007'199'254'740'991ULL;
+    identity.name = secondaryAssetName(std::move(identity.name));
+    if (identity.size > jsSafeIntegerMaximum)
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset size exceeds the JavaScript safe-integer range");
+    identity.sha256 = lowerAscii(trim(identity.sha256));
+    if (identity.sha256.size() != 64 ||
+        !std::all_of(identity.sha256.begin(), identity.sha256.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }))
+        throw error("SOURCE_IDENTITY_INVALID", "secondary asset SHA-256 must contain 64 hexadecimal characters");
+    return identity;
+}
+
+bool sourceIdentityMatches(const SourceIdentity& expected, const SourceIdentity& actual) {
+    if (lowerAscii(expected.name) != lowerAscii(actual.name) || expected.size != actual.size ||
+        lowerAscii(expected.sha256) != lowerAscii(actual.sha256))
+        return false;
+    return !expected.kn5Version.has_value() || !actual.kn5Version.has_value() ||
+           expected.kn5Version == actual.kn5Version;
+}
+
+bool secondaryAssetIdentityMatches(bool hasEdits,
+                                   const std::optional<SourceIdentity>& expected,
+                                   const std::optional<SourceIdentity>& actual) {
+    if (!hasEdits) return true;
+    if (!expected || !actual) return false;
+    try {
+        return sourceIdentityMatches(normalizeSecondaryAssetIdentity(*expected),
+                                     normalizeSecondaryAssetIdentity(*actual));
+    } catch (const AuthoringError&) {
+        return false;
+    }
+}
+
+bool damageSectionValid(std::string_view section) {
+    const auto upper = upperAscii(section);
+    if (upper == "SCRATCHES" || upper == "OSCILLATIONS" || upper == "DAMAGE") return true;
+    constexpr std::string_view prefix = "VISUAL_OBJECT_";
+    if (!upper.starts_with(prefix) || upper.size() == prefix.size()) return false;
+    std::uint64_t index = 0;
+    for (const char character : std::string_view(upper).substr(prefix.size())) {
+        if (character < '0' || character > '9') return false;
+        const auto digit = static_cast<std::uint64_t>(character - '0');
+        if (index > (1023U - digit) / 10U) return false;
+        index = index * 10U + digit;
+    }
+    return index < 1024U;
+}
+
+bool damageFieldAllowed(std::string_view section, std::string_view field) {
+    const auto upper = upperAscii(section);
+    if (upper == "SCRATCHES") return field == "minSpeed" || field == "maxSpeed";
+    if (upper == "OSCILLATIONS") return field == "enabled";
+    if (upper == "DAMAGE") return field == "initialLevel";
+    if (!damageSectionValid(upper) || !upper.starts_with("VISUAL_OBJECT_")) return false;
+    static constexpr std::array<std::string_view, 11> fields = {
+        "name", "staticRotationAxis", "staticRotationAngle", "multG", "damageZone",
+        "minSpeed", "fullSpeed", "oscillationAxis", "oscillationMinAngle",
+        "oscillationMaxAngle", "allowedG"};
+    return std::find(fields.begin(), fields.end(), field) != fields.end();
+}
+
+ProjectSession::ProjectSession(SourceIdentity source, AuthoringLimits limits)
+    : source_(normalizeSourceIdentity(std::move(source))), limits_(limits) {
+    if (limits_.maxStringBytes == 0 || limits_.maxOperationsPerTransaction == 0)
+        throw error("LIMIT_INVALID", "authoring string and operation limits must be positive");
+    current_.source = source_;
+}
+
+ProjectState ProjectSession::baselineState() const {
+    ProjectState baseline;
+    baseline.source = source_;
+    return baseline;
+}
+
+ProjectState ProjectSession::applyTransaction(const AuthoringTransaction& transaction) const {
+    if (transaction.label.size() > limits_.maxStringBytes)
+        throw error("TRANSACTION_INVALID", "transaction label exceeds its limit");
+    if (transaction.operations.size() > limits_.maxOperationsPerTransaction)
+        throw error("TRANSACTION_LIMIT", "transaction operation count exceeds its limit");
+    ProjectState candidate = current_;
+    for (const auto& operation : transaction.operations) {
+        std::visit([&](auto operationValue) {
+            using Operation = std::decay_t<decltype(operationValue)>;
+            if constexpr (std::is_same_v<Operation, SetNodeEdit>) {
+                operationValue.path = nodePath(std::move(operationValue.path), limits_.maxStringBytes);
+                validateNodeEdit(operationValue.edit, limits_);
+                mergeNode(candidate.nodes[operationValue.path], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearNodeEdit>) {
+                candidate.nodes.erase(nodePath(std::move(operationValue.path), limits_.maxStringBytes));
+            } else if constexpr (std::is_same_v<Operation, SetMeshEdit>) {
+                const auto name = safeKey(std::move(operationValue.name), limits_.maxStringBytes, "mesh name");
+                validateMeshEdit(operationValue.edit);
+                mergeMesh(candidate.meshes[name], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearMeshEdit>) {
+                candidate.meshes.erase(safeKey(std::move(operationValue.name), limits_.maxStringBytes, "mesh name"));
+            } else if constexpr (std::is_same_v<Operation, SetGeometryEdit>) {
+                operationValue.path = nodePath(std::move(operationValue.path), limits_.maxStringBytes);
+                validateGeometryEdit(operationValue.edit);
+                mergeGeometry(candidate.geometry[operationValue.path], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearGeometryEdit>) {
+                candidate.geometry.erase(nodePath(std::move(operationValue.path), limits_.maxStringBytes));
+            } else if constexpr (std::is_same_v<Operation, SetWorkspaceFileEdit>) {
+                validateWorkspaceEdit(operationValue.edit, limits_);
+                mergeWorkspace(candidate.workspaceFiles[operationValue.index], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearWorkspaceFileEdit>) {
+                candidate.workspaceFiles.erase(operationValue.index);
+            } else if constexpr (std::is_same_v<Operation, SetWorkspaceSettingsEdit>) {
+                validateOptionalFloat(operationValue.edit.cockpitHrDistance, "cockpit distance");
+                validateOptionalFloat(operationValue.edit.driverHrDistance, "driver distance");
+                if (!operationValue.edit.cockpitHrDistance && !operationValue.edit.driverHrDistance)
+                    throw error("EDIT_INVALID", "workspace settings edit has no fields");
+                mergeOptional(candidate.workspace.cockpitHrDistance, operationValue.edit.cockpitHrDistance);
+                mergeOptional(candidate.workspace.driverHrDistance, operationValue.edit.driverHrDistance);
+            } else if constexpr (std::is_same_v<Operation, ClearWorkspaceSettingsEdit>) {
+                candidate.workspace = {};
+            } else if constexpr (std::is_same_v<Operation, SetMaterialScalarEdit>) {
+                const auto material = safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key");
+                const auto field = safeKey(std::move(operationValue.field), limits_.maxStringBytes, "material scalar field");
+                validateMaterialScalar(operationValue.value, limits_, field);
+                candidate.materials[material].scalars[field] = std::move(operationValue.value);
+            } else if constexpr (std::is_same_v<Operation, SetMaterialVectorEdit>) {
+                const auto material = safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key");
+                const auto field = safeKey(std::move(operationValue.field), limits_.maxStringBytes, "material vector field");
+                validateMaterialVector(operationValue.value);
+                candidate.materials[material].vectors[field] = operationValue.value;
+            } else if constexpr (std::is_same_v<Operation, SetMaterialResourceEdit>) {
+                const auto material = safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key");
+                const auto slot = safeKey(std::move(operationValue.slot), limits_.maxStringBytes, "material resource slot");
+                validateResource(operationValue.value, limits_);
+                if (operationValue.value.clear) candidate.materials[material].resources.erase(slot);
+                else candidate.materials[material].resources[slot] = std::move(operationValue.value);
+            } else if constexpr (std::is_same_v<Operation, ClearMaterialEdit>) {
+                candidate.materials.erase(safeKey(std::move(operationValue.material), limits_.maxStringBytes, "material key"));
+            } else if constexpr (std::is_same_v<Operation, SetSurfaceEdit>) {
+                validateSurface(operationValue.edit, limits_);
+                mergeSurface(candidate.surfaces[operationValue.index], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearSurfaceEdit>) {
+                candidate.surfaces.erase(operationValue.index);
+            } else if constexpr (std::is_same_v<Operation, SetColliderEdit>) {
+                const auto rawPath = std::move(operationValue.path);
+                const auto path = nodePath(rawPath, limits_.maxStringBytes);
+                if (path != rawPath)
+                    throw error("EDIT_INVALID", "collider path is not canonical");
+                validateCollider(operationValue.edit);
+                if (!operationValue.edit.transform && !operationValue.edit.removeDegenerate &&
+                    !operationValue.edit.reverseWinding && !operationValue.edit.recalculateNormals)
+                    throw error("EDIT_INVALID", "collider edit has no fields");
+                mergeCollider(candidate.colliders[path], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearColliderEdit>) {
+                const auto rawPath = std::move(operationValue.path);
+                const auto path = nodePath(rawPath, limits_.maxStringBytes);
+                if (path != rawPath)
+                    throw error("EDIT_INVALID", "collider path is not canonical");
+                candidate.colliders.erase(path);
+            } else if constexpr (std::is_same_v<Operation, SetColliderAsset>) {
+                candidate.colliderAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearColliderAsset>) {
+                candidate.colliderAsset.reset();
+            } else if constexpr (std::is_same_v<Operation, SetBottomColliderEdit>) {
+                validateBottomCollider(operationValue.edit);
+                if (!operationValue.edit.centre && !operationValue.edit.size && !operationValue.edit.groundEnabled)
+                    throw error("EDIT_INVALID", "bottom collider edit has no fields");
+                mergeBottomCollider(candidate.bottomColliders[operationValue.index], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearBottomColliderEdit>) {
+                candidate.bottomColliders.erase(operationValue.index);
+            } else if constexpr (std::is_same_v<Operation, SetBottomColliderAsset>) {
+                candidate.bottomColliderAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearBottomColliderAsset>) {
+                candidate.bottomColliderAsset.reset();
+            } else if constexpr (std::is_same_v<Operation, SetDamageEdit>) {
+                const auto section = upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section"));
+                validateDamageForSection(section, operationValue.edit, limits_);
+                if (!damageHasFields(operationValue.edit))
+                    throw error("EDIT_INVALID", "damage edit has no fields");
+                mergeDamage(candidate.damage[section], operationValue.edit);
+            } else if constexpr (std::is_same_v<Operation, ClearDamageEdit>) {
+                const auto section = upperAscii(safeKey(std::move(operationValue.section), limits_.maxStringBytes, "damage section"));
+                if (!damageSectionValid(section))
+                    throw error("EDIT_INVALID", "damage section is not modeled");
+                candidate.damage.erase(section);
+            } else if constexpr (std::is_same_v<Operation, SetDamageAsset>) {
+                candidate.damageAsset = normalizeSecondaryAssetIdentity(std::move(operationValue.identity));
+            } else if constexpr (std::is_same_v<Operation, ClearDamageAsset>) {
+                candidate.damageAsset.reset();
+            }
+        }, operation);
+        if (editCount(candidate) > limits_.maxTotalEdits)
+            throw error("EDIT_LIMIT", "project edit count exceeds its limit");
+    }
+    normalizeSecondaryAsset(candidate.colliderAsset, !candidate.colliders.empty());
+    normalizeSecondaryAsset(candidate.damageAsset, !candidate.damage.empty());
+    normalizeSecondaryAsset(candidate.bottomColliderAsset, !candidate.bottomColliders.empty());
+    return candidate;
+}
+
+std::size_t ProjectSession::editCount(const ProjectState& state) const {
+    std::size_t count = optionalCount(state.workspace.cockpitHrDistance) +
+                        optionalCount(state.workspace.driverHrDistance);
+    for (const auto& [index, edit] : state.workspaceFiles) {
+        (void)index;
+        count += 1 + optionalCount(edit.name) + optionalCount(edit.position) + optionalCount(edit.rotation) +
+                 optionalCount(edit.lodIn) + optionalCount(edit.lodOut) + optionalCount(edit.probability) +
+                 optionalCount(edit.multiplicity) + optionalCount(edit.posMode) + optionalCount(edit.positionCenter) +
+                 optionalCount(edit.positionRange) + optionalCount(edit.velMode) + optionalCount(edit.velocityBase) +
+                 optionalCount(edit.velocityRange) + optionalCount(edit.playWav);
+    }
+    for (const auto& [key, edit] : state.nodes) count += 1 + optionalCount(edit.name) + optionalCount(edit.active) + optionalCount(edit.transform);
+    for (const auto& [key, edit] : state.meshes) {
+        (void)key;
+        count += 1 + optionalCount(edit.transparent) + optionalCount(edit.castShadows) +
+                 optionalCount(edit.layer) + optionalCount(edit.lodIn) + optionalCount(edit.lodOut);
+    }
+    for (const auto& [key, edit] : state.geometry) {
+        (void)key;
+        count += 1 + static_cast<std::size_t>(edit.remove_degenerate) +
+                 static_cast<std::size_t>(edit.reverse_winding) +
+                 static_cast<std::size_t>(edit.recalculate_normals) + optionalCount(edit.transform);
+    }
+    for (const auto& [key, edit] : state.materials) {
+        (void)key;
+        count += 1 + edit.scalars.size() + edit.vectors.size() + edit.resources.size();
+    }
+    count += state.surfaces.size() + state.colliders.size() + state.bottomColliders.size() + state.damage.size();
+    return count;
+}
+
+void ProjectSession::pushUndo(const ProjectState& state) {
+    if (limits_.maxHistory == 0) return;
+    if (undo_.size() >= limits_.maxHistory) undo_.pop_front();
+    undo_.push_back(state);
+}
+
+std::uint64_t ProjectSession::commit(const AuthoringTransaction& transaction) {
+    if (transaction.operations.empty()) return current_.revision;
+    (void)safeText(transaction.label, limits_.maxStringBytes, "transaction label", true);
+    const auto candidate = applyTransaction(transaction);
+    const auto revision = nextRevision(current_.revision);
+    pushUndo(current_);
+    current_ = candidate;
+    current_.revision = revision;
+    redo_.clear();
+    return current_.revision;
+}
+
+std::uint64_t ProjectSession::undo() {
+    if (undo_.empty()) return current_.revision;
+    if (redo_.size() >= limits_.maxHistory && limits_.maxHistory != 0) redo_.pop_front();
+    const auto revision = nextRevision(current_.revision);
+    redo_.push_back(current_);
+    current_ = undo_.back();
+    undo_.pop_back();
+    current_.revision = revision;
+    return current_.revision;
+}
+
+std::uint64_t ProjectSession::redo() {
+    if (redo_.empty()) return current_.revision;
+    const auto revision = nextRevision(current_.revision);
+    pushUndo(current_);
+    current_ = redo_.back();
+    redo_.pop_back();
+    current_.revision = revision;
+    return current_.revision;
+}
+
+std::uint64_t ProjectSession::restoreBaseline() {
+    const auto baseline = baselineState();
+    if (editCount(current_) == 0) return current_.revision;
+    const auto revision = nextRevision(current_.revision);
+    pushUndo(current_);
+    current_ = baseline;
+    current_.revision = revision;
+    redo_.clear();
+    return current_.revision;
+}
+
+RecoverySnapshot ProjectSession::recoverySnapshot() const { return {current_}; }
+
+RecoveryResult ProjectSession::validateRecoveryInternal(const RecoverySnapshot& snapshot,
+                                                         const SourceIdentity& observedSource) const {
+    RecoveryResult result;
+    try {
+        const auto observed = normalizeSourceIdentity(observedSource);
+        auto candidate = snapshot.state;
+        // Compare the same canonical representation that recovery will
+        // install.  Otherwise harmless path separators and hex casing make a
+        // valid snapshot look stale, while recover() later normalizes it.
+        validateState(candidate, limits_);
+        if (!sourceIdentityMatches(source_, observed))
+            result.diagnostics.push_back({"STALE_SOURCE", "observed source identity does not match the open source"});
+        if (!sourceIdentityMatches(source_, candidate.source))
+            result.diagnostics.push_back({"STALE_SOURCE", "recovery snapshot belongs to a different source"});
+        if (editCount(candidate) > limits_.maxRecoveryEdits)
+            result.diagnostics.push_back({"RECOVERY_LIMIT", "recovery snapshot exceeds the edit limit"});
+        if (editCount(candidate) > limits_.maxTotalEdits)
+            result.diagnostics.push_back({"EDIT_LIMIT", "recovery snapshot exceeds the project edit limit"});
+    } catch (const AuthoringError& errorValue) {
+        result.diagnostics.push_back({errorValue.code(), errorValue.what()});
+    }
+    result.restored = result.diagnostics.empty();
+    return result;
+}
+
+RecoveryResult ProjectSession::validateRecovery(const RecoverySnapshot& snapshot,
+                                                const SourceIdentity& observedSource) const {
+    return validateRecoveryInternal(snapshot, observedSource);
+}
+
+RecoveryResult ProjectSession::recover(const RecoverySnapshot& snapshot,
+                                       const SourceIdentity& observedSource) {
+    auto result = validateRecoveryInternal(snapshot, observedSource);
+    if (!result.restored) return result;
+    auto candidate = snapshot.state;
+    validateState(candidate, limits_);
+    const auto revision = nextRevision(current_.revision);
+    pushUndo(current_);
+    current_ = std::move(candidate);
+    current_.revision = revision;
+    redo_.clear();
+    return result;
+}
+
+} // namespace apex::authoring

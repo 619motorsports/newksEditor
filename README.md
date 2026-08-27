@@ -65,6 +65,18 @@ Run their package commands on their target operating systems before distribution
 npm test
 ```
 
+## Native C++ port
+
+The C++20 port is being developed alongside the feature-complete WebGL
+implementation. It uses a backend-neutral render device with Vulkan and
+Windows Direct3D 12 implementations. See [the native build guide](native/README.md)
+and [the feature-parity roadmap](docs/CPP_PORT.md). The WebGL path remains the
+reference until every documented parity and production-rendering gate passes.
+The native command can now load current project files and export primary or
+secondary authoring output through an in-memory C++ application service. The
+secondary exports include collider KN5, `damage.ini`, `colliders.ini`, and
+`surfaces.ini` output.
+
 ## Current scope
 
 - Binary or ASCII FBX import through the portable Three.js loader. The importer
@@ -137,8 +149,16 @@ npm test
   clip-plane diagnostics, plus fixed track-camera preview using the configured
   position, orientation, FOV, and near/far planes. Referenced camera-spline CSVs are
   resolved, rotated around world Y, and sampled with the game's exact normalized
-  interpolation and spline-specific minimum-FOV rule; normalized scrubbing and
-  one-shot playback use `SPLINE_ANIMATION_LENGTH`
+  interpolation and spline-specific minimum-FOV rule. Normalized scrubbing and
+  one-shot playback use `SPLINE_ANIMATION_LENGTH`. An explicit installed-editor
+  mode uses recovered arc-length Catmull-Rom sampling, absolute spline points,
+  target-facing look-ahead, and the editor's distance-based playback.
+- Version-2 and version-7 AI-spline previews with bounded parsing and raw
+  magenta lines. An explicit interpolated mode uses the installed editor's
+  Catmull-Rom curve, arc-length lookup, and 5,001-sample draw schedule.
+  A normalized in/out option adds the recovered blue interpolated interval.
+  This interval uses a separate depth-off pass after the primary spline.
+  Vulkan and D3D12 use the same backend-neutral line geometry.
 - Packed `data.acd` browsing with bounds checks, unsafe-path rejection, duplicate
   diagnostics, and virtual read-only INI files; packed or unpacked car `data/lods.ini`
   workspaces with contiguous `LOD_n` loading, `IN`/`OUT`

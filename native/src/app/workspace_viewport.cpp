@@ -1,0 +1,4601 @@
+#include "apex/app/workspace_viewport.hpp"
+
+#include "apex/core/parse_error.hpp"
+#include "apex/render/authoring_grid.hpp"
+#include "apex/render/lighting.hpp"
+#include "apex/render/selected_mesh.hpp"
+#include "apex/render/view_axis.hpp"
+#include "apex/render/viewport_frame_border.hpp"
+#include "apex/workspace/workspace_scene.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <new>
+#include <numeric>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace apex::app {
+namespace {
+
+using render::PipelineRenderTarget;
+using render::PipelineRenderTargetFormat;
+
+constexpr float radians_to_degrees = 57.2957795130823208768F;
+constexpr float degrees_to_radians =
+    0.0174532925199432957692F;
+
+[[nodiscard]] constexpr std::uint32_t fullMipCount(
+    std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t dimension = std::max(width, height);
+    std::uint32_t levels = 1U;
+    while (dimension > 1U) {
+        dimension >>= 1U;
+        ++levels;
+    }
+    return levels;
+}
+
+constexpr std::array<render::CubeFace, render::texture_cube_face_count>
+    stock_capture_target_faces = {
+        render::CubeFace::negative_x, render::CubeFace::positive_x,
+        render::CubeFace::positive_y, render::CubeFace::negative_y,
+        render::CubeFace::positive_z, render::CubeFace::negative_z};
+
+[[nodiscard]] render::Diagnostic diagnostic(const char* code, const char* message) {
+    return {code, message};
+}
+
+[[nodiscard]] std::optional<PipelineRenderTargetFormat> pipelineColorFormat(
+    render::TextureFormat format) noexcept {
+    switch (format) {
+    case render::TextureFormat::rgba16_sfloat:
+        return PipelineRenderTargetFormat::rgba16_float;
+    case render::TextureFormat::rgba8_unorm:
+        return PipelineRenderTargetFormat::rgba8_unorm;
+    case render::TextureFormat::rgba8_srgb:
+        return PipelineRenderTargetFormat::rgba8_srgb;
+    case render::TextureFormat::bgra8_unorm:
+        return PipelineRenderTargetFormat::bgra8_unorm;
+    case render::TextureFormat::bgra8_srgb:
+        return PipelineRenderTargetFormat::bgra8_srgb;
+    default:
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] render::CameraClipSpace
+expectedClipSpace(render::Backend backend) noexcept {
+    return backend == render::Backend::Vulkan ? render::CameraClipSpace::vulkan
+                                              : render::CameraClipSpace::d3d12;
+}
+
+[[nodiscard]] bool validHdrExposureMode(
+    render::HdrExposureMode mode) noexcept {
+    switch (mode) {
+    case render::HdrExposureMode::manual:
+    case render::HdrExposureMode::automatic:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<std::array<render::CameraFrame,
+                                       render::texture_cube_face_count>>
+buildStockCaptureCameras(render::Backend backend,
+                         const apex::scene::Vector3& position,
+                         render::Diagnostic& output_diagnostic) {
+    const auto& config = render::ksEditorCubemap();
+    const auto& faces = render::stockCubemapFaces();
+    std::array<render::CameraFrame, render::texture_cube_face_count> cameras{};
+    for (std::size_t index = 0U; index < faces.size(); ++index) {
+        render::CameraFrameRequest request;
+        request.eye = position;
+        request.target = {
+            position[0] + static_cast<float>(faces[index].direction[0]),
+            position[1] + static_cast<float>(faces[index].direction[1]),
+            position[2] + static_cast<float>(faces[index].direction[2])};
+        request.up = {
+            static_cast<float>(faces[index].up[0]),
+            static_cast<float>(faces[index].up[1]),
+            static_cast<float>(faces[index].up[2])};
+        request.fov_radians = config.fov_degrees * degrees_to_radians;
+        request.aspect = 1.0F;
+        request.near_plane = config.near_plane;
+        request.far_plane = config.far_plane;
+        request.clip_space = expectedClipSpace(backend);
+        auto camera = render::build_camera_frame(request);
+        if (!camera.ok()) {
+            output_diagnostic = {
+                "workspace_viewport_reflection_capture_camera_invalid",
+                "The recovered cube-face camera could not be constructed: " +
+                    camera.code + ": " + camera.message};
+            return std::nullopt;
+        }
+        cameras[index] = *camera.frame;
+    }
+    return cameras;
+}
+
+[[nodiscard]] std::optional<WorkspaceViewportStockNativeFrame>
+buildStockNativeFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting,
+    render::CameraClipSpace expected_clip_space) noexcept {
+    if (camera.clip_space != expected_clip_space ||
+        !render::valid_stock_ks_per_pixel_lighting_constants(lighting))
+        return std::nullopt;
+    const auto inverse_view_projection =
+        render::invert_camera_matrix(camera.view_projection);
+    if (!inverse_view_projection) return std::nullopt;
+
+    WorkspaceViewportStockNativeFrame frame;
+    frame.camera = render::make_stock_ks_per_pixel_camera_constants(
+        camera.view, camera.projection, *inverse_view_projection,
+        camera.position, camera.near_plane, camera.far_plane,
+        camera.fov_radians * radians_to_degrees);
+    if (!render::valid_stock_ks_per_pixel_camera_constants(frame.camera))
+        return std::nullopt;
+    frame.lighting = lighting;
+    return frame;
+}
+
+[[nodiscard]] bool finite_vector(const apex::scene::Vector3 &value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](const float component) {
+        return std::isfinite(component);
+    });
+}
+
+[[nodiscard]] render::SkeletonOverlayResult buildWorkspaceSkeletonOverlay(
+    const apex::scene::SceneSnapshot& scene,
+    const apex::scene::NodeId selected_node,
+    render::SkeletonOverlayLimits limits) {
+    const auto reject = [](const char* code, const char* message) {
+        return render::SkeletonOverlayResult{
+            render::SkeletonOverlayStatus::invalid_request,
+            {code, message}, {}, {}};
+    };
+    if (scene.nodes.empty() || scene.root == apex::scene::invalid_node_id ||
+        static_cast<std::size_t>(scene.root) >= scene.nodes.size()) {
+        return reject("workspace_viewport_skeleton_root_invalid",
+                      "The skeleton scene root must identify a supplied node");
+    }
+    if (scene.nodes[scene.root].parent != apex::scene::invalid_node_id) {
+        return reject("workspace_viewport_skeleton_root_parent_invalid",
+                      "The portable scene root must omit its engine-owned parent");
+    }
+
+    std::vector<render::SkeletonOverlayNode> nodes(scene.nodes.size());
+    std::vector<apex::scene::NodeId> expected_parents(
+        scene.nodes.size(), apex::scene::invalid_node_id);
+    for (std::size_t index = 0U; index < scene.nodes.size(); ++index) {
+        const auto& source = scene.nodes[index];
+        if (source.id != index) {
+            return reject("workspace_viewport_skeleton_node_id_invalid",
+                          "Skeleton scene node identifiers must be dense and ordered");
+        }
+        if (!std::all_of(source.transform.begin(), source.transform.end(),
+                         [](float value) { return std::isfinite(value); })) {
+            return reject("workspace_viewport_skeleton_transform_non_finite",
+                          "Skeleton world transforms must contain only finite values");
+        }
+        auto& node = nodes[index];
+        node.world_translation = {
+            source.transform[12U], source.transform[13U], source.transform[14U]};
+        node.children = source.children;
+        node.declared_child_count = source.children.size();
+        switch (source.kind) {
+        case apex::scene::NodeKind::node:
+            node.kind = render::SkeletonOverlayNodeKind::plain;
+            break;
+        case apex::scene::NodeKind::mesh:
+            node.kind = render::SkeletonOverlayNodeKind::mesh;
+            break;
+        case apex::scene::NodeKind::skinned_mesh:
+            node.kind = render::SkeletonOverlayNodeKind::skinned_mesh;
+            break;
+        default:
+            return reject("workspace_viewport_skeleton_node_kind_invalid",
+                          "Skeleton scene node kind is not recognized");
+        }
+        for (const auto child : source.children) {
+            if (static_cast<std::size_t>(child) >= scene.nodes.size()) {
+                return reject("workspace_viewport_skeleton_child_truncated",
+                              "A skeleton child falls outside the scene snapshot");
+            }
+            if (child == scene.root ||
+                expected_parents[child] != apex::scene::invalid_node_id) {
+                return reject("workspace_viewport_skeleton_hierarchy_invalid",
+                              "The skeleton scene must be a single ordered tree");
+            }
+            expected_parents[child] = static_cast<apex::scene::NodeId>(index);
+            if (scene.nodes[child].parent != index) {
+                return reject("workspace_viewport_skeleton_parent_mismatch",
+                              "A skeleton child does not reference its supplied parent");
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> reached(scene.nodes.size(), 0U);
+    std::vector<apex::scene::NodeId> stack = {scene.root};
+    reached[scene.root] = 1U;
+    std::size_t reached_count = 0U;
+    while (!stack.empty()) {
+        const auto node = stack.back();
+        stack.pop_back();
+        ++reached_count;
+        for (const auto child : scene.nodes[node].children) {
+            if (reached[child] != 0U) {
+                return reject("workspace_viewport_skeleton_hierarchy_invalid",
+                              "The skeleton scene must not contain cycles or duplicate nodes");
+            }
+            reached[child] = 1U;
+            stack.push_back(child);
+        }
+    }
+    if (reached_count != scene.nodes.size()) {
+        return reject("workspace_viewport_skeleton_hierarchy_disconnected",
+                      "Every skeleton scene node must be reachable from the root");
+    }
+    for (std::size_t index = 0U; index < scene.nodes.size(); ++index) {
+        if (index != scene.root &&
+            expected_parents[index] == apex::scene::invalid_node_id) {
+            return reject("workspace_viewport_skeleton_hierarchy_disconnected",
+                          "Every non-root skeleton node must have one parent");
+        }
+    }
+
+    if (limits.declared_node_count == 0U)
+        limits.declared_node_count = scene.nodes.size();
+    return render::build_skeleton_overlay(
+        nodes, scene.root, selected_node, limits);
+}
+
+[[nodiscard]] bool validatePortableGrassFrameOptions(
+    const WorkspaceViewportPortableGrassFrameOptions& options,
+    render::Diagnostic& output_diagnostic) noexcept {
+    render::PortableGrassParameters parameters;
+    parameters.wetness = options.wetness;
+    parameters.wind_direction = options.wind_direction;
+    parameters.wind_strength = options.wind_strength;
+    parameters.elapsed_seconds = options.elapsed_seconds.value_or(0.0F);
+    render::PortableGrassShaderConstants constants;
+    return render::build_portable_grass_shader_constants(
+        parameters, constants, output_diagnostic);
+}
+
+[[nodiscard]] bool portableGrassAtlasFormat(
+    const render::TextureFormat format) noexcept {
+    return format == render::TextureFormat::rgba8_unorm ||
+           format == render::TextureFormat::rgba8_srgb ||
+           format == render::TextureFormat::bgra8_unorm ||
+           format == render::TextureFormat::bgra8_srgb;
+}
+
+[[nodiscard]] bool validatePortableGrassAtlasPlan(
+    const render::DecodedTexturePlan* plan,
+    render::Diagnostic& output_diagnostic) {
+    if (plan == nullptr || plan->levels.empty()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_atlas_missing",
+            "Portable grass preparation requires a decoded atlas with at least one mip level");
+        return false;
+    }
+    const render::TextureDescription& description = plan->description;
+    const auto sampled = static_cast<std::uint32_t>(
+        description.usage & render::TextureUsage::sampled);
+    if (description.shape != render::TextureShape::texture_2d ||
+        description.array_layers != 1U || description.samples != 1U ||
+        sampled == 0U || !portableGrassAtlasFormat(description.format)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_atlas_invalid",
+            "The portable grass atlas must be a single-sample sampled RGBA8 or BGRA8 2D texture");
+        return false;
+    }
+    const render::TextureUploadPlan uploads = plan->make_upload_plan();
+    return render::validate_texture_description(
+               description, uploads, output_diagnostic) ==
+           render::TextureStatus::ready;
+}
+
+[[nodiscard]] bool
+validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
+                         const WorkspaceAiSplinePassKind kind,
+                         const WorkspaceAiSplineGeometry *primary,
+                         render::Diagnostic &output_diagnostic) {
+    std::size_t expected_first = 0U;
+    for (const WorkspaceAiSplineChunk &chunk : geometry.chunks) {
+        if (expected_first > geometry.vertices.size() ||
+            chunk.first_vertex != expected_first || chunk.vertex_count < 2U ||
+            chunk.vertex_count % 2U != 0U ||
+            chunk.vertex_count > render::max_overlay_line_vertices ||
+            static_cast<std::size_t>(chunk.vertex_count) >
+                geometry.vertices.size() - expected_first) {
+            output_diagnostic =
+                diagnostic("workspace_viewport_ai_spline_chunk_invalid",
+                           "AI spline chunks must cover complete bounded line "
+                           "pairs in order");
+            return false;
+        }
+        expected_first += chunk.vertex_count;
+    }
+
+    std::optional<std::size_t> expected_vertices;
+    const std::size_t sample_count = geometry.sample_point_count;
+    if (geometry.topology == WorkspaceAiSplineTopology::independent_lines) {
+        if (sample_count <= std::numeric_limits<std::size_t>::max() / 2U)
+            expected_vertices = sample_count * 2U;
+    } else if (geometry.topology == WorkspaceAiSplineTopology::polyline) {
+        if (sample_count <= 2U) {
+            expected_vertices = 0U;
+        } else if (sample_count - 1U <=
+                   std::numeric_limits<std::size_t>::max() / 2U) {
+            expected_vertices = (sample_count - 1U) * 2U;
+        }
+    }
+    const bool selection_state_empty =
+        geometry.selected_point_count == 0U &&
+        !geometry.last_selected_index.has_value();
+    const bool temporary_state_empty =
+        geometry.temporary_point_count == 0U;
+    const bool primary_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::primary &&
+        geometry.pass == WorkspaceAiSplinePassKind::primary &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        selection_state_empty && temporary_state_empty &&
+        (geometry.mode == WorkspaceAiSplineDisplayMode::raw
+             ? geometry.sample_point_count == geometry.source_point_count
+             : geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+                   geometry.source_point_count >= 4U &&
+                   geometry.sample_point_count ==
+                       workspace_ai_spline_interpolated_sample_count);
+    const bool interval_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::interval &&
+        geometry.pass == WorkspaceAiSplinePassKind::interval &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+        selection_state_empty && temporary_state_empty &&
+        geometry.source_point_count >= 4U &&
+        geometry.sample_point_count >= 1U &&
+        geometry.sample_point_count <=
+            workspace_ai_spline_interpolated_sample_count;
+    const bool side_metadata_valid =
+        (kind == WorkspaceAiSplinePassKind::left_side ||
+         kind == WorkspaceAiSplinePassKind::right_side) &&
+        geometry.pass == kind &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty && temporary_state_empty &&
+        geometry.sample_point_count <= geometry.source_point_count &&
+        geometry.source_point_count <=
+            render::max_overlay_line_total_vertices / 2U + 1U &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool selection_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::selection &&
+        geometry.pass == WorkspaceAiSplinePassKind::selection &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        temporary_state_empty &&
+        geometry.selected_point_count >= 1U &&
+        geometry.selected_point_count <= geometry.source_point_count &&
+        geometry.last_selected_index.has_value() &&
+        *geometry.last_selected_index < geometry.source_point_count &&
+        geometry.sample_point_count >= geometry.selected_point_count &&
+        static_cast<std::size_t>(geometry.sample_point_count) <=
+            static_cast<std::size_t>(geometry.selected_point_count) * 3U &&
+        geometry.source_point_count <=
+            workspace_ai_spline_max_interpolation_control_points &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool temporary_interpolation_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::temporary_interpolation &&
+        geometry.pass == WorkspaceAiSplinePassKind::temporary_interpolation &&
+        geometry.topology == WorkspaceAiSplineTopology::polyline &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::interpolated &&
+        selection_state_empty && geometry.temporary_point_count >= 5U &&
+        geometry.temporary_point_count <=
+            workspace_ai_spline_max_temporary_edit_points &&
+        geometry.sample_point_count ==
+            workspace_ai_spline_interpolated_sample_count &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool temporary_marker_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::temporary_markers &&
+        geometry.pass == WorkspaceAiSplinePassKind::temporary_markers &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty && geometry.temporary_point_count >= 1U &&
+        geometry.temporary_point_count <=
+            workspace_ai_spline_max_temporary_edit_points &&
+        (geometry.sample_point_count == geometry.temporary_point_count ||
+         geometry.sample_point_count ==
+             geometry.temporary_point_count + 2U) &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    const bool camber_metadata_valid =
+        kind == WorkspaceAiSplinePassKind::camber &&
+        geometry.pass == WorkspaceAiSplinePassKind::camber &&
+        geometry.topology == WorkspaceAiSplineTopology::independent_lines &&
+        geometry.mode == WorkspaceAiSplineDisplayMode::raw &&
+        selection_state_empty && temporary_state_empty &&
+        geometry.sample_point_count == geometry.source_point_count &&
+        geometry.source_point_count <=
+            render::max_overlay_line_total_vertices / 2U &&
+        primary != nullptr &&
+        geometry.source_point_count == primary->source_point_count;
+    if (!expected_vertices.has_value() ||
+        expected_first != geometry.vertices.size() ||
+        (geometry.vertices.empty() != geometry.chunks.empty()) ||
+        geometry.vertices.size() != *expected_vertices ||
+        !(primary_metadata_valid || interval_metadata_valid ||
+          side_metadata_valid || selection_metadata_valid ||
+          temporary_interpolation_metadata_valid ||
+          temporary_marker_metadata_valid || camber_metadata_valid)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_ai_spline_geometry_invalid",
+            "AI spline geometry does not match its display mode, sample "
+            "count, and chunk metadata");
+        return false;
+    }
+
+    const auto &expected_color = kind == WorkspaceAiSplinePassKind::primary
+                                     ? workspace_ai_spline_raw_color
+                                 : kind == WorkspaceAiSplinePassKind::interval
+                                     ? workspace_ai_spline_interval_color
+                                     : workspace_ai_spline_side_color;
+    for (const render::OverlayLineVertex &vertex : geometry.vertices) {
+        const bool color_valid =
+            kind == WorkspaceAiSplinePassKind::camber
+                ? vertex.color == workspace_ai_spline_camber_positive_color ||
+                      vertex.color ==
+                          workspace_ai_spline_camber_nonpositive_color
+            : kind == WorkspaceAiSplinePassKind::selection
+                ? vertex.color == workspace_ai_spline_selection_color ||
+                      vertex.color == workspace_ai_spline_selection_side_color
+            : kind == WorkspaceAiSplinePassKind::temporary_interpolation ||
+                      kind == WorkspaceAiSplinePassKind::temporary_markers
+                ? vertex.color == workspace_ai_spline_temporary_color ||
+                      (kind == WorkspaceAiSplinePassKind::temporary_markers &&
+                       vertex.color ==
+                           workspace_ai_spline_temporary_forward_color)
+                : vertex.color == expected_color;
+        if (!finite_vector(vertex.position) || !color_valid) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_vertex_invalid",
+                "AI spline vertices require finite positions and the "
+                "recovered pass color");
+            return false;
+        }
+    }
+
+    if (kind == WorkspaceAiSplinePassKind::selection) {
+        std::size_t center_count = 0U;
+        std::size_t side_count = 0U;
+        for (std::size_t vertex = 0U; vertex < geometry.vertices.size();
+             vertex += 2U) {
+            const auto &begin = geometry.vertices[vertex];
+            const auto &end = geometry.vertices[vertex + 1U];
+            const bool center =
+                begin.color == workspace_ai_spline_selection_color;
+            if (center) {
+                if (side_count != 0U && side_count != 2U) {
+                    output_diagnostic = diagnostic(
+                        "workspace_viewport_ai_spline_selection_line_invalid",
+                        "Each AI spline selection marker requires zero or two "
+                        "side lines");
+                    return false;
+                }
+                ++center_count;
+                side_count = 0U;
+            } else {
+                ++side_count;
+            }
+            const auto &line_color =
+                center ? workspace_ai_spline_selection_color
+                       : workspace_ai_spline_selection_side_color;
+            if (center_count == 0U || side_count > 2U ||
+                begin.color != line_color || end.color != line_color ||
+                begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] !=
+                    begin.position[1] + workspace_ai_spline_selection_height) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_selection_line_invalid",
+                    "AI spline selection lines must be vertical and use the "
+                    "recovered height and colors");
+                return false;
+            }
+        }
+        if ((side_count != 0U && side_count != 2U) ||
+            center_count != geometry.selected_point_count) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_selection_line_invalid",
+                "AI spline selection markers do not match the recovered line "
+                "groups");
+            return false;
+        }
+    }
+    if (kind == WorkspaceAiSplinePassKind::camber) {
+        for (std::size_t vertex = 0U; vertex < geometry.vertices.size();
+             vertex += 2U) {
+            const auto &begin = geometry.vertices[vertex];
+            const auto &end = geometry.vertices[vertex + 1U];
+            if (begin.color != end.color ||
+                begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] < begin.position[1]) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_camber_line_invalid",
+                    "AI spline camber lines must be vertical, upward, and one "
+                    "color");
+                return false;
+            }
+        }
+    }
+    if (kind == WorkspaceAiSplinePassKind::temporary_markers) {
+        const std::size_t marker_vertex_count =
+            static_cast<std::size_t>(geometry.temporary_point_count) * 2U;
+        for (std::size_t vertex = 0U; vertex < marker_vertex_count;
+             vertex += 2U) {
+            const auto& begin = geometry.vertices[vertex];
+            const auto& end = geometry.vertices[vertex + 1U];
+            if (begin.position[0] != end.position[0] ||
+                begin.position[2] != end.position[2] ||
+                end.position[1] != begin.position[1] +
+                                       workspace_ai_spline_temporary_marker_height) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_temporary_marker_invalid",
+                    "Temporary AI spline markers must match the portable vertical-line contract");
+                return false;
+            }
+        }
+        if (geometry.vertices.size() > marker_vertex_count) {
+            const auto& forwardBegin = geometry.vertices[marker_vertex_count];
+            const auto& forwardEnd =
+                geometry.vertices[marker_vertex_count + 1U];
+            const auto& sideBegin =
+                geometry.vertices[marker_vertex_count + 2U];
+            const auto& sideEnd =
+                geometry.vertices[marker_vertex_count + 3U];
+            const std::array<float, 3U> forwardDelta = {
+                forwardEnd.position[0U] - forwardBegin.position[0U],
+                forwardEnd.position[1U] - forwardBegin.position[1U],
+                forwardEnd.position[2U] - forwardBegin.position[2U]};
+            const std::array<float, 3U> sideDelta = {
+                sideEnd.position[0U] - sideBegin.position[0U],
+                sideEnd.position[1U] - sideBegin.position[1U],
+                sideEnd.position[2U] - sideBegin.position[2U]};
+            const float forwardLengthSquared =
+                forwardDelta[0U] * forwardDelta[0U] +
+                forwardDelta[1U] * forwardDelta[1U] +
+                forwardDelta[2U] * forwardDelta[2U];
+            const float sideLengthSquared =
+                sideDelta[0U] * sideDelta[0U] +
+                sideDelta[1U] * sideDelta[1U] +
+                sideDelta[2U] * sideDelta[2U];
+            const float axisDot =
+                forwardDelta[0U] * sideDelta[0U] +
+                forwardDelta[1U] * sideDelta[1U] +
+                forwardDelta[2U] * sideDelta[2U];
+            const bool recoveredLength =
+                (std::abs(forwardLengthSquared - 9.0F) <= 0.0001F &&
+                 std::abs(sideLengthSquared - 9.0F) <= 0.0001F) ||
+                (forwardLengthSquared == 0.0F &&
+                 sideLengthSquared == 0.0F);
+            if (forwardBegin.color !=
+                    workspace_ai_spline_temporary_forward_color ||
+                forwardEnd.color !=
+                    workspace_ai_spline_temporary_forward_color ||
+                sideBegin.color != workspace_ai_spline_temporary_color ||
+                sideEnd.color != workspace_ai_spline_temporary_color ||
+                forwardBegin.position != sideBegin.position ||
+                forwardDelta[1U] != 0.0F || sideDelta[1U] != 0.0F ||
+                !recoveredLength ||
+                std::abs(axisDot) > 0.0001F) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_temporary_axis_invalid",
+                    "Movable temporary AI spline axes must use the recovered colors, origin, length, and perpendicular directions");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+validateAiSplineDepth(const render::PipelineProgram &pipeline,
+                      const WorkspaceAiSplinePassKind kind,
+                      render::Diagnostic &output_diagnostic) {
+    const bool valid =
+        kind != WorkspaceAiSplinePassKind::interval
+            ? pipeline.depth.test_enabled && pipeline.depth.write_enabled &&
+                  pipeline.depth.compare ==
+                      render::PipelineCompareOperation::less_or_equal
+            : !pipeline.depth.test_enabled && !pipeline.depth.write_enabled;
+    if (!valid) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_ai_spline_depth_invalid",
+                       "AI spline pass depth state does not match "
+                       "the recovered spline-pass behavior");
+    }
+    return valid;
+}
+
+[[nodiscard]] bool validateSkeletonOverlayDepth(
+    const render::PipelineProgram& pipeline,
+    render::Diagnostic& output_diagnostic) {
+    if (pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_depth_invalid",
+            "The recovered skeleton pass requires depth test and writes disabled");
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool finite_input_delta(const float value) noexcept {
+    // SDL normally supplies small deltas, but keep the application seam
+    // bounded when a caller supplies synthetic or hostile event data.
+    return std::isfinite(value) && std::abs(value) <= 100'000.0F;
+}
+
+[[nodiscard]] apex::scene::Vector3
+orbit_position(const apex::scene::Vector3 &target, float yaw, float pitch,
+               float distance) noexcept {
+    const float horizontal = distance * std::cos(pitch);
+    return {
+        target[0] + horizontal * std::sin(yaw),
+        target[1] + distance * std::sin(pitch),
+        target[2] + horizontal * std::cos(yaw),
+    };
+}
+
+[[nodiscard]] WorkspaceViewportStatus
+preparationStatus(render::StaticSceneResourceStatus status) noexcept {
+    switch (status) {
+    case render::StaticSceneResourceStatus::ready:
+        return WorkspaceViewportStatus::ready;
+    case render::StaticSceneResourceStatus::unsupported:
+        return WorkspaceViewportStatus::unsupported;
+    case render::StaticSceneResourceStatus::allocation_failed:
+        return WorkspaceViewportStatus::allocation_failed;
+    case render::StaticSceneResourceStatus::invalid_request:
+    case render::StaticSceneResourceStatus::upload_failed:
+        return WorkspaceViewportStatus::invalid;
+    }
+    return WorkspaceViewportStatus::invalid;
+}
+
+[[nodiscard]] WorkspaceViewportStatus externalTextureStatus(
+    render::ExternalTextureAuthorityStatus status) noexcept {
+    switch (status) {
+    case render::ExternalTextureAuthorityStatus::ready:
+        return WorkspaceViewportStatus::ready;
+    case render::ExternalTextureAuthorityStatus::unsupported:
+        return WorkspaceViewportStatus::unsupported;
+    case render::ExternalTextureAuthorityStatus::resource_limit:
+        return WorkspaceViewportStatus::allocation_failed;
+    case render::ExternalTextureAuthorityStatus::invalid_request:
+    case render::ExternalTextureAuthorityStatus::rejected:
+    case render::ExternalTextureAuthorityStatus::missing:
+    case render::ExternalTextureAuthorityStatus::ambiguous:
+    case render::ExternalTextureAuthorityStatus::read_failed:
+        return WorkspaceViewportStatus::invalid;
+    }
+    return WorkspaceViewportStatus::invalid;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus frameStatus(
+    render::PresentationFrameStatus status) noexcept {
+    switch (status) {
+    case render::PresentationFrameStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::PresentationFrameStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::PresentationFrameStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::PresentationFrameStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus drawStatus(
+    render::IndexedStaticMeshBatchStatus status) noexcept {
+    switch (status) {
+    case render::IndexedStaticMeshBatchStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::IndexedStaticMeshBatchStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::IndexedStaticMeshBatchStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::IndexedStaticMeshBatchStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus toneMapStatus(
+    render::HdrToneMapStatus status) noexcept {
+    switch (status) {
+    case render::HdrToneMapStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::HdrToneMapStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::HdrToneMapStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::HdrToneMapStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus fxaaStatus(
+    render::FxaaStatus status) noexcept {
+    switch (status) {
+    case render::FxaaStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::FxaaStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::FxaaStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::FxaaStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus luminanceStatus(
+    render::HdrLuminanceStatus status) noexcept {
+    switch (status) {
+    case render::HdrLuminanceStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::HdrLuminanceStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::HdrLuminanceStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::HdrLuminanceStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus textureUpdateStatus(
+    render::TextureStatus status) noexcept {
+    switch (status) {
+    case render::TextureStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::TextureStatus::invalid_description:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::TextureStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::TextureStatus::allocation_failed:
+    case render::TextureStatus::upload_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportStatus shadowPreparationStatus(
+    render::DirectionalShadowMapStatus status) noexcept {
+    switch (status) {
+    case render::DirectionalShadowMapStatus::ready:
+        return WorkspaceViewportStatus::ready;
+    case render::DirectionalShadowMapStatus::invalid_request:
+        return WorkspaceViewportStatus::invalid;
+    case render::DirectionalShadowMapStatus::unsupported:
+        return WorkspaceViewportStatus::unsupported;
+    case render::DirectionalShadowMapStatus::allocation_failed:
+        return WorkspaceViewportStatus::allocation_failed;
+    }
+    return WorkspaceViewportStatus::invalid;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus shadowFrameStatus(
+    render::DirectionalShadowMapStatus status) noexcept {
+    switch (status) {
+    case render::DirectionalShadowMapStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::DirectionalShadowMapStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::DirectionalShadowMapStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::DirectionalShadowMapStatus::allocation_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus shadowDrawStatus(
+    render::StaticSceneDirectionalShadowStatus status) noexcept {
+    switch (status) {
+    case render::StaticSceneDirectionalShadowStatus::ready:
+    case render::StaticSceneDirectionalShadowStatus::partial:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::StaticSceneDirectionalShadowStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::StaticSceneDirectionalShadowStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::StaticSceneDirectionalShadowStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] bool resolveAndValidateShadowPrograms(
+    const WorkspaceViewportPrepareRequest& request,
+    render::Backend backend,
+    std::optional<WorkspaceViewportDirectionalShadowOptions>& resolved,
+    render::Diagnostic& output_diagnostic) {
+    resolved.reset();
+    if (!request.directional_shadows.has_value()) return true;
+    const auto selector = request.directional_shadows->builtin_source;
+    if (selector != render::BuiltinDirectionalShadowSourceSelector::disabled &&
+        selector != render::BuiltinDirectionalShadowSourceSelector::
+                        all_supported) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_source_selector_invalid",
+            "The built-in directional-shadow source selector is invalid");
+        return false;
+    }
+    const auto layout = request.directional_shadows->constants_layout;
+    if (layout != render::DirectionalShadowReceiverConstantsLayout::portable &&
+        layout != render::DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_constants_layout_invalid",
+            "Directional shadow constants require an explicit supported layout");
+        return false;
+    }
+
+    std::uint64_t total_shader_bytes = 0U;
+    const auto add_bytes = [&](std::uint64_t size) {
+        if (size > request.limits.material.scene.max_total_shader_bytes ||
+            total_shader_bytes >
+                request.limits.material.scene.max_total_shader_bytes - size)
+            return false;
+        total_shader_bytes += size;
+        return true;
+    };
+    const auto add_modules = [&](std::span<const render::PipelineShaderModule> modules) {
+        for (const auto& module : modules) {
+            const std::uint64_t size = module.bytes.size();
+            if (!add_bytes(size)) return false;
+        }
+        return true;
+    };
+    for (const auto& set : request.shader_modules) {
+        if (!add_modules(set.modules)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_budget",
+                "Material and shadow programs exceed the shared shader byte budget");
+            return false;
+        }
+    }
+    struct ProgramRole {
+        const std::optional<render::PipelineProgram>* program = nullptr;
+        render::DepthOnlyIndexedPipelineRole role =
+            render::DepthOnlyIndexedPipelineRole::opaque_static;
+    };
+    const std::array<ProgramRole, 3U> programs = {{
+        {&request.directional_shadows->opaque_pipeline,
+         render::DepthOnlyIndexedPipelineRole::opaque_static},
+        {&request.directional_shadows->alpha_static_pipeline,
+         render::DepthOnlyIndexedPipelineRole::stock_alpha_tested_static},
+        {&request.directional_shadows->skinned_pipeline,
+         render::DepthOnlyIndexedPipelineRole::skinned},
+    }};
+    const auto format_matches_backend =
+        [backend](render::PipelineShaderFormat format) {
+            return backend == render::Backend::Vulkan
+                       ? format == render::PipelineShaderFormat::spirv
+                       : format == render::PipelineShaderFormat::dxbc ||
+                             format == render::PipelineShaderFormat::dxil;
+        };
+    for (const ProgramRole& entry : programs) {
+        if (!entry.program->has_value()) continue;
+        const render::PipelineProgram& program = **entry.program;
+        const auto validation = render::validate_pipeline(
+            program, request.limits.material.scene.pipeline);
+        if (!validation.valid) {
+            if (validation.diagnostics.empty()) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_shadow_pipeline_invalid",
+                    "Directional shadow pipeline validation failed");
+            } else {
+                output_diagnostic = {
+                    "workspace_viewport_shadow_pipeline_" +
+                        validation.diagnostics.front().code,
+                    validation.diagnostics.front().message};
+            }
+            return false;
+        }
+        render::Diagnostic role_diagnostic;
+        if (!render::validate_depth_only_indexed_pipeline_contract(
+                program, entry.role, role_diagnostic)) {
+            output_diagnostic = {
+                "workspace_viewport_shadow_" + role_diagnostic.code,
+                role_diagnostic.message};
+            return false;
+        }
+        if (!std::all_of(
+                program.shaders.begin(), program.shaders.end(),
+                [&](const render::PipelineShaderModule& shader) {
+                    return format_matches_backend(shader.format);
+                })) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_format_mismatch",
+                "Directional shadow shader formats must match the backend");
+            return false;
+        }
+        if (!add_modules(program.shaders)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_shader_budget",
+                "Material and shadow programs exceed the shared shader byte budget");
+            return false;
+        }
+    }
+
+    const bool use_builtin_source =
+        selector == render::BuiltinDirectionalShadowSourceSelector::
+                        all_supported;
+    if (use_builtin_source) {
+        const std::array<std::pair<bool, render::DirectionalShadowSourceRole>,
+                         3U>
+            missing_roles = {{
+                {!request.directional_shadows->opaque_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::opaque_static},
+                {!request.directional_shadows->alpha_static_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::alpha_tested_static},
+                {!request.directional_shadows->skinned_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::cpu_skinned},
+            }};
+        for (const auto& [missing, role] : missing_roles) {
+            if (!missing) continue;
+            const std::size_t size =
+                render::directional_shadow_source_shader_bytes(backend, role);
+            if (size == 0U || !add_bytes(size)) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_shadow_shader_budget",
+                    "Material and shadow programs exceed the shared shader byte budget");
+                return false;
+            }
+        }
+    }
+
+    resolved = *request.directional_shadows;
+    if (use_builtin_source) {
+        const auto resolve_role =
+            [&](std::optional<render::PipelineProgram>& destination,
+                render::DirectionalShadowSourceRole role) {
+                if (destination.has_value()) return true;
+                auto built =
+                    render::create_builtin_directional_shadow_source_program(
+                        backend, role);
+                if (!built.ok()) {
+                    output_diagnostic = {
+                        "workspace_viewport_shadow_source_" +
+                            std::string(render::directional_shadow_source_status_name(
+                                built.status)),
+                        "The built-in directional-shadow source program did not pass its immutable contract"};
+                    return false;
+                }
+                destination = std::move(*built.program);
+                return true;
+            };
+        if (!resolve_role(resolved->opaque_pipeline,
+                          render::DirectionalShadowSourceRole::opaque_static) ||
+            !resolve_role(resolved->alpha_static_pipeline,
+                          render::DirectionalShadowSourceRole::alpha_tested_static) ||
+            !resolve_role(resolved->skinned_pipeline,
+                          render::DirectionalShadowSourceRole::cpu_skinned))
+            return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool finiteFrameLighting(
+    const render::KsPerPixelFrameConstants& constants) noexcept {
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    return finite(constants.sun_direction) && finite(constants.sun_color) &&
+           finite(constants.ambient_color) && finite(constants.camera_position) &&
+           finite(constants.horizon_color) && finite(constants.sky_color) &&
+           finite(constants.fog_color) && finite(constants.fog);
+}
+
+[[nodiscard]] bool nonzeroFrameSun(
+    const render::KsPerPixelFrameConstants& constants) noexcept {
+    const double length_squared =
+        static_cast<double>(constants.sun_direction[0]) *
+            constants.sun_direction[0] +
+        static_cast<double>(constants.sun_direction[1]) *
+            constants.sun_direction[1] +
+        static_cast<double>(constants.sun_direction[2]) *
+            constants.sun_direction[2];
+    return length_squared > 1.0e-12;
+}
+
+}  // namespace
+
+WorkspaceViewportLightingResult evaluateWorkspaceViewportLighting(
+    const WorkspaceViewportLightingRequest& request) try {
+    WorkspaceViewportLightingResult result;
+    if (request.weather_id.size() > 128U ||
+        !std::isfinite(request.sun_heading_degrees) ||
+        !std::isfinite(request.sun_height_degrees) ||
+        request.sun_heading_degrees < 0.0F ||
+        request.sun_heading_degrees > 360.0F ||
+        request.sun_height_degrees < 0.0F ||
+        request.sun_height_degrees > 90.0F) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_lighting_input_invalid",
+            "Weather ID and sun angles must stay inside their finite bounds");
+        return result;
+    }
+
+    const auto& presets = render::stockWeatherPresets();
+    const render::WeatherPreset* preset = &render::defaultWeatherPreset();
+    if (!request.weather_id.empty()) {
+        const auto found = std::find_if(
+            presets.begin(), presets.end(), [&](const auto& candidate) {
+                return candidate.id == request.weather_id;
+            });
+        if (found == presets.end()) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_weather_unknown",
+                "Weather ID must name one of the bounded stock presets");
+            return result;
+        }
+        preset = &*found;
+    }
+
+    const auto sun_direction = render::sunDirectionFromAngles(
+        request.sun_heading_degrees, request.sun_height_degrees);
+    result.evaluated = render::evaluateKsLighting(*preset, sun_direction);
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](float value) { return std::isfinite(value); });
+    };
+    if (!finite(result.evaluated.sun_direction) ||
+        !finite(result.evaluated.sun_color) ||
+        !finite(result.evaluated.ambient_color) ||
+        !finite(result.evaluated.horizon_color) ||
+        !finite(result.evaluated.sky_color) ||
+        !finite(result.evaluated.fog_color) ||
+        !std::isfinite(result.evaluated.fog_distance) ||
+        !std::isfinite(result.evaluated.fog_blend)) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_lighting_result_invalid",
+            "Evaluated weather lighting must contain only finite values");
+        return result;
+    }
+    result.frame_constants.sun_direction = {
+        result.evaluated.sun_direction[0], result.evaluated.sun_direction[1],
+        result.evaluated.sun_direction[2], 0.0F};
+    result.frame_constants.sun_color = {
+        result.evaluated.sun_color[0], result.evaluated.sun_color[1],
+        result.evaluated.sun_color[2], 0.0F};
+    result.frame_constants.ambient_color = {
+        result.evaluated.ambient_color[0], result.evaluated.ambient_color[1],
+        result.evaluated.ambient_color[2], 0.0F};
+    result.frame_constants.camera_position = {};
+    result.frame_constants.horizon_color = {
+        result.evaluated.horizon_color[0], result.evaluated.horizon_color[1],
+        result.evaluated.horizon_color[2], 0.0F};
+    result.frame_constants.sky_color = {
+        result.evaluated.sky_color[0], result.evaluated.sky_color[1],
+        result.evaluated.sky_color[2], 0.0F};
+    result.frame_constants.fog_color = {
+        result.evaluated.fog_color[0], result.evaluated.fog_color[1],
+        result.evaluated.fog_color[2], 0.0F};
+    result.frame_constants.fog = {
+        result.evaluated.fog_distance, result.evaluated.fog_blend, 1.0F, 0.0F};
+    result.status = WorkspaceViewportLightingStatus::ready;
+    return result;
+} catch (const std::bad_alloc&) {
+    WorkspaceViewportLightingResult result;
+    result.status = WorkspaceViewportLightingStatus::allocation_failed;
+    result.diagnostic = diagnostic(
+        "workspace_viewport_lighting_allocation_failed",
+        "Weather lighting evaluation has insufficient memory");
+    return result;
+}
+
+std::optional<render::StockKsPerPixelLightingConstants>
+buildWorkspaceViewportStockVulkanSourceLighting(
+    const render::EvaluatedLighting& lighting, std::uint32_t viewport_width,
+    std::uint32_t viewport_height) noexcept {
+    if (viewport_width == 0U || viewport_height == 0U) return std::nullopt;
+
+    render::StockKsPerPixelLightingConstants constants;
+    constants.light_direction = {
+        -lighting.sun_direction[0], -lighting.sun_direction[1],
+        -lighting.sun_direction[2]};
+    constants.ambient_color = {
+        lighting.ambient_color[0], lighting.ambient_color[1],
+        lighting.ambient_color[2], 1.0F};
+    constants.light_color = lighting.sun_color;
+    std::copy(lighting.horizon_color.begin(), lighting.horizon_color.end(),
+              constants.horizon_color.begin());
+    std::copy(lighting.sky_color.begin(), lighting.sky_color.end(),
+              constants.zenith_color.begin());
+    constants.exposure = 2.0F;
+    constants.screen_width = 1.0F / static_cast<float>(viewport_width);
+    constants.screen_height = 1.0F / static_cast<float>(viewport_height);
+    constants.fog_linear = lighting.fog_distance;
+    constants.fog_blend = lighting.fog_blend;
+    constants.fog_color = lighting.fog_color;
+    constants.cloud_cover = lighting.preset.cloud_cover;
+    constants.cloud_cutoff = lighting.preset.cloud_cutoff;
+    constants.cloud_color = lighting.preset.cloud_color;
+    constants.cloud_offset = 0.0F;
+    constants.minimum_exposure = 0.0F;
+    constants.maximum_exposure = 10000.0F;
+    constants.dof_focus = 400.0F;
+    constants.dof_range = 500.0F;
+    constants.saturation = 1.0F;
+    constants.game_time = 0.0F;
+    if (!render::valid_stock_ks_per_pixel_lighting_constants(constants))
+        return std::nullopt;
+    return constants;
+}
+
+std::optional<WorkspaceViewportStockVulkanSourceFrame>
+buildWorkspaceViewportStockVulkanSourceFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept {
+    return buildStockNativeFrame(camera, lighting,
+                                 render::CameraClipSpace::vulkan);
+}
+
+std::optional<WorkspaceViewportStockD3D12NativeFrame>
+buildWorkspaceViewportStockD3D12NativeFrame(
+    const render::CameraFrame& camera,
+    const render::StockKsPerPixelLightingConstants& lighting) noexcept {
+    return buildStockNativeFrame(camera, lighting,
+                                 render::CameraClipSpace::d3d12);
+}
+
+bool WorkspaceViewportCameraController::apply(
+    const WorkspaceViewportCameraInput& input) noexcept {
+    switch (input.gesture) {
+    case WorkspaceViewportCameraGesture::begin_orbit:
+        dragging_ = true;
+        panning_ = false;
+        return true;
+    case WorkspaceViewportCameraGesture::begin_pan:
+        dragging_ = true;
+        panning_ = true;
+        return true;
+    case WorkspaceViewportCameraGesture::end_drag:
+        dragging_ = false;
+        panning_ = false;
+        return true;
+    case WorkspaceViewportCameraGesture::drag:
+        if (!dragging_ || !finite_input_delta(input.x_delta) ||
+            !finite_input_delta(input.y_delta) || !finite_vector(target) ||
+            !std::isfinite(yaw) || !std::isfinite(pitch) ||
+            !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F))
+            return false;
+        if (panning_) {
+            const float scale = distance * 0.0015F;
+            auto next_target = target;
+            next_target[0] -= input.x_delta * scale * std::cos(yaw);
+            next_target[2] += input.x_delta * scale * std::sin(yaw);
+            next_target[1] += input.y_delta * scale;
+            if (!finite_vector(next_target)) return false;
+            target = next_target;
+        } else {
+            const float next_yaw = yaw - input.x_delta * 0.006F;
+            const float next_pitch = std::clamp(
+                pitch - input.y_delta * 0.006F, -1.5F, 1.5F);
+            if (!std::isfinite(next_yaw) || !std::isfinite(next_pitch)) return false;
+            yaw = next_yaw;
+            pitch = next_pitch;
+        }
+        return true;
+    case WorkspaceViewportCameraGesture::wheel:
+        if (!finite_input_delta(input.y_delta) || !finite_vector(target) ||
+            !std::isfinite(yaw) || !std::isfinite(pitch) ||
+            !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F))
+            return false;
+        {
+            const float next_distance = std::clamp(
+                distance * std::exp(input.y_delta * 0.001F), 0.02F, 1.0e7F);
+            if (!std::isfinite(next_distance)) return false;
+            distance = next_distance;
+        }
+        return true;
+    }
+    return false;
+}
+
+render::CameraFrameResult WorkspaceViewportCameraController::frame(
+    const float aspect, const render::CameraClipSpace clip_space) const {
+    if (!finite_vector(target) || !std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(distance) || !(distance >= 0.02F && distance <= 1.0e7F)) {
+        return {std::nullopt, "workspace_viewport_camera_invalid",
+                "workspace viewport camera state is outside its finite bounds"};
+    }
+    render::CameraFrameRequest request;
+    request.eye = orbit_position(target, yaw, pitch, distance);
+    request.target = target;
+    request.up = {0.0F, 1.0F, 0.0F};
+    request.aspect = aspect;
+    request.near_plane = std::max(0.01F, distance / 10'000.0F);
+    request.far_plane = std::max(100.0F, distance * 10.0F);
+    request.clip_space = clip_space;
+    return render::build_camera_frame(request);
+}
+
+bool WorkspaceViewportCameraController::move(
+    const WorkspaceViewportCameraMove direction, const float step) noexcept {
+    if (!finite_input_delta(step) || !finite_vector(target) ||
+        !std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(this->distance) ||
+        !(this->distance >= 0.02F && this->distance <= 1.0e7F))
+        return false;
+
+    const float forward_x = -std::cos(pitch) * std::sin(yaw);
+    const float forward_y = -std::sin(pitch);
+    const float forward_z = -std::cos(pitch) * std::cos(yaw);
+    const float right_x = std::cos(yaw);
+    const float right_z = -std::sin(yaw);
+    apex::scene::Vector3 delta{};
+    switch (direction) {
+    case WorkspaceViewportCameraMove::forward:
+        delta = {forward_x * step, forward_y * step,
+                 forward_z * step};
+        break;
+    case WorkspaceViewportCameraMove::backward:
+        delta = {-forward_x * step, -forward_y * step,
+                 -forward_z * step};
+        break;
+    case WorkspaceViewportCameraMove::left:
+        delta = {-right_x * step, 0.0F, -right_z * step};
+        break;
+    case WorkspaceViewportCameraMove::right:
+        delta = {right_x * step, 0.0F, right_z * step};
+        break;
+    case WorkspaceViewportCameraMove::up:
+        delta = {0.0F, step, 0.0F};
+        break;
+    case WorkspaceViewportCameraMove::down:
+        delta = {0.0F, -step, 0.0F};
+        break;
+    }
+    const apex::scene::Vector3 next_target = {
+        target[0] + delta[0], target[1] + delta[1], target[2] + delta[2]};
+    if (!finite_vector(next_target)) return false;
+    target = next_target;
+    return true;
+}
+
+const char *
+workspace_viewport_status_name(WorkspaceViewportStatus status) noexcept {
+    switch (status) {
+    case WorkspaceViewportStatus::ready:
+        return "ready";
+    case WorkspaceViewportStatus::invalid:
+        return "invalid";
+    case WorkspaceViewportStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportStatus::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unsupported";
+}
+
+const char *workspace_viewport_frame_status_name(
+    WorkspaceViewportFrameStatus status) noexcept {
+    switch (status) {
+    case WorkspaceViewportFrameStatus::ready:
+        return "ready";
+    case WorkspaceViewportFrameStatus::invalid:
+        return "invalid";
+    case WorkspaceViewportFrameStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportFrameStatus::execution_failed:
+        return "execution_failed";
+    }
+    return "execution_failed";
+}
+
+const char *workspace_viewport_ai_spline_update_status_name(
+    WorkspaceViewportAiSplineUpdateStatus status) noexcept {
+    switch (status) {
+    case WorkspaceViewportAiSplineUpdateStatus::ready: return "ready";
+    case WorkspaceViewportAiSplineUpdateStatus::invalid: return "invalid";
+    case WorkspaceViewportAiSplineUpdateStatus::unsupported:
+        return "unsupported";
+    case WorkspaceViewportAiSplineUpdateStatus::allocation_failed:
+        return "allocation_failed";
+    case WorkspaceViewportAiSplineUpdateStatus::upload_failed:
+        return "upload_failed";
+    }
+    return "invalid";
+}
+
+WorkspaceViewport::WorkspaceViewport(
+    render::Device *device, render::Backend backend,
+    render::PresentationTargetDescription presentation,
+    std::unique_ptr<render::Texture> color,
+    std::unique_ptr<render::Texture> resolved_color,
+    std::unique_ptr<render::Texture> tone_mapped_color,
+    std::unique_ptr<render::Texture> fxaa_color,
+    std::optional<render::HdrToneMapParameters> hdr_tone_map,
+    render::HdrExposureMode hdr_exposure_mode,
+    bool sky_enabled,
+    bool fxaa_enabled,
+    std::unique_ptr<render::DepthAttachment> depth,
+    std::unique_ptr<render::StockSceneExecutionResult> execution,
+    std::optional<render::PipelineProgram> authoring_overlay_pipeline,
+    std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+        ai_spline_passes,
+    std::optional<WorkspaceViewportAiSplineGeneration> ai_spline_generation,
+    std::unique_ptr<render::Buffer> authoring_grid_buffer, bool grid_visible,
+    std::unique_ptr<render::Buffer> view_axis_buffer, bool view_axis_visible,
+    std::unique_ptr<render::Buffer> selection_axis_buffer,
+    std::optional<apex::scene::Matrix4> selection_axis_world,
+    std::optional<render::PipelineProgram> selected_mesh_pipeline,
+    std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
+    std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
+    std::optional<WorkspaceViewportDirectionalShadowOptions>
+        directional_shadows,
+    std::optional<WorkspaceViewport::PortableCloudResources> portable_clouds,
+    std::optional<WorkspaceViewport::PortableGrassResources> portable_grass,
+    std::optional<WorkspaceViewport::SkeletonOverlayResources> skeleton_overlay,
+    std::optional<PortableReflectionCaptureResources> reflection_capture,
+    std::optional<FrameCatalog> frame_catalog)
+    : device_(device), backend_(backend), presentation_(presentation),
+      color_(std::move(color)), resolved_color_(std::move(resolved_color)),
+      tone_mapped_color_(std::move(tone_mapped_color)),
+      fxaa_color_(std::move(fxaa_color)),
+      hdr_tone_map_(std::move(hdr_tone_map)),
+      hdr_exposure_mode_(hdr_exposure_mode),
+      sky_enabled_(sky_enabled),
+      fxaa_enabled_(fxaa_enabled),
+      depth_(std::move(depth)), execution_(std::move(execution)),
+      authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
+      ai_spline_passes_(std::move(ai_spline_passes)),
+      ai_spline_generation_(ai_spline_generation),
+      authoring_grid_buffer_(std::move(authoring_grid_buffer)),
+      grid_visible_(grid_visible),
+      view_axis_buffer_(std::move(view_axis_buffer)),
+      view_axis_visible_(view_axis_visible),
+      selection_axis_buffer_(std::move(selection_axis_buffer)),
+      selection_axis_world_(std::move(selection_axis_world)),
+      selected_mesh_pipeline_(std::move(selected_mesh_pipeline)),
+      selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
+      shadow_maps_(std::move(shadow_maps)),
+      directional_shadows_(std::move(directional_shadows)),
+      portable_clouds_(std::move(portable_clouds)),
+      portable_grass_(std::move(portable_grass)),
+      skeleton_overlay_(std::move(skeleton_overlay)),
+      reflection_capture_(std::move(reflection_capture)),
+      frame_catalog_(std::move(frame_catalog)) {}
+
+WorkspaceViewport::~WorkspaceViewport() = default;
+
+WorkspaceViewportAiSplineUpdateResult
+WorkspaceViewport::replaceAiSplineOverlaysBorrowed(
+    render::Device &device, const AiSplineUpdateRequest &request,
+    std::optional<WorkspaceViewportAiSplineGenerationTransition> generation) {
+    WorkspaceViewportAiSplineUpdateResult result;
+    if (&device != device_ || device.info().backend != backend_) {
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_update_device_mismatch",
+                       "AI spline overlays must use the device that prepared "
+                       "the viewport");
+        return result;
+    }
+    if (ai_spline_generation_.has_value() != generation.has_value()) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_ai_spline_generation_required",
+            "AI spline replacement must preserve controller generation "
+            "tracking");
+        return result;
+    }
+    if (generation.has_value()) {
+        const bool nextModelRevision =
+            generation->expected.revision !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            generation->replacement.revision ==
+                generation->expected.revision + 1U;
+        const bool validModelRevision =
+            generation->replacement.revision ==
+                generation->expected.revision ||
+            nextModelRevision;
+        const bool nextPublication =
+            generation->expected.publication !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            generation->replacement.publication ==
+                generation->expected.publication + 1U;
+        if (!generation->expected.valid() ||
+            !generation->replacement.valid() ||
+            !generation->expected.sameOwner(generation->replacement) ||
+            !validModelRevision || !nextPublication) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_transition_invalid",
+                "AI spline generation replacement must retain its owner and "
+                "use the next publication with the current or next model "
+                "revision");
+            return result;
+        }
+        if (generation->expected != *ai_spline_generation_) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_stale",
+                "AI spline replacement expected a different visible "
+                "generation");
+            return result;
+        }
+    }
+
+    const std::array<const WorkspaceAiSplineGeometry *,
+                     workspace_ai_spline_pass_count>
+        geometries = {request.primary,
+                      request.interval,
+                      request.left,
+                      request.right,
+                      request.selection,
+                      request.temporaryInterpolation,
+                      request.temporaryMarkers,
+                      request.camber};
+    constexpr std::array<WorkspaceAiSplinePassKind,
+                         workspace_ai_spline_pass_count>
+        kinds = {WorkspaceAiSplinePassKind::primary,
+                 WorkspaceAiSplinePassKind::interval,
+                 WorkspaceAiSplinePassKind::left_side,
+                 WorkspaceAiSplinePassKind::right_side,
+                 WorkspaceAiSplinePassKind::selection,
+                 WorkspaceAiSplinePassKind::temporary_interpolation,
+                 WorkspaceAiSplinePassKind::temporary_markers,
+                 WorkspaceAiSplinePassKind::camber};
+
+    for (std::size_t index = 0U; index < geometries.size(); ++index) {
+        const bool dynamicPassMayBeEmpty =
+            (kinds[index] == WorkspaceAiSplinePassKind::left_side ||
+             kinds[index] == WorkspaceAiSplinePassKind::right_side ||
+             kinds[index] == WorkspaceAiSplinePassKind::selection ||
+             kinds[index] ==
+                 WorkspaceAiSplinePassKind::temporary_interpolation ||
+             kinds[index] == WorkspaceAiSplinePassKind::temporary_markers) &&
+            geometries[index] == nullptr &&
+            ai_spline_passes_[index].pipeline.has_value();
+        if ((geometries[index] != nullptr &&
+             !ai_spline_passes_[index].pipeline.has_value()) ||
+            (geometries[index] == nullptr &&
+             ai_spline_passes_[index].pipeline.has_value() &&
+             !dynamicPassMayBeEmpty)) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_update_configuration_invalid",
+                "AI spline replacement must preserve prepared pass presence");
+            return result;
+        }
+    }
+    if ((request.interval != nullptr || request.left != nullptr ||
+         request.right != nullptr || request.selection != nullptr ||
+         request.temporaryInterpolation != nullptr ||
+         request.temporaryMarkers != nullptr || request.camber != nullptr) &&
+        request.primary == nullptr) {
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_overlay_primary_missing",
+                       "AI spline overlays require the primary spline pass");
+        return result;
+    }
+
+    std::size_t ai_draw_count = 0U;
+    std::size_t ai_vertex_count = 0U;
+    for (const WorkspaceAiSplineGeometry *geometry : geometries) {
+        if (geometry == nullptr) continue;
+        if (geometry->chunks.size() >
+                render::max_overlay_line_draws - ai_draw_count ||
+            geometry->vertices.size() >
+                render::max_overlay_line_total_vertices - ai_vertex_count) {
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_limit",
+                "AI spline geometry exceeds the bounded line-render limits");
+            return result;
+        }
+        ai_draw_count += geometry->chunks.size();
+        ai_vertex_count += geometry->vertices.size();
+    }
+    const std::size_t authoring_draw_count =
+        static_cast<std::size_t>(authoring_grid_buffer_ != nullptr) +
+        static_cast<std::size_t>(view_axis_buffer_ != nullptr) +
+        static_cast<std::size_t>(selection_axis_buffer_ != nullptr);
+    const std::size_t authoring_vertex_count =
+        (authoring_grid_buffer_ != nullptr ? render::authoring_grid_vertex_count
+                                           : 0U) +
+        (view_axis_buffer_ != nullptr ? render::view_axis_vertex_count : 0U) +
+        (selection_axis_buffer_ != nullptr ? 6U : 0U);
+    if (ai_draw_count > render::max_overlay_line_draws - authoring_draw_count ||
+        ai_vertex_count >
+            render::max_overlay_line_total_vertices - authoring_vertex_count) {
+        result.diagnostic = diagnostic(
+            "workspace_viewport_overlay_budget_exceeded",
+            "AI spline and authoring overlays exceed the shared render budget");
+        return result;
+    }
+
+    for (std::size_t index = 0U; index < geometries.size(); ++index) {
+        if (geometries[index] == nullptr) continue;
+        if (!validateAiSplineGeometry(*geometries[index], kinds[index],
+                                      request.primary, result.diagnostic) ||
+            !validateAiSplineDepth(*ai_spline_passes_[index].pipeline,
+                                   kinds[index], result.diagnostic))
+            return result;
+    }
+
+    try {
+        std::array<AiSplinePassResources, workspace_ai_spline_pass_count>
+            candidate;
+        for (std::size_t index = 0U; index < geometries.size(); ++index) {
+            const WorkspaceAiSplineGeometry *geometry = geometries[index];
+            candidate[index].pipeline = ai_spline_passes_[index].pipeline;
+            if (geometry == nullptr) continue;
+            candidate[index].chunks = geometry->chunks;
+            if (geometry->vertices.empty()) continue;
+
+            render::BufferDescription description;
+            description.size_bytes =
+                geometry->vertices.size() * sizeof(render::OverlayLineVertex);
+            description.usage = render::BufferUsage::vertex;
+            description.memory = render::BufferMemory::host_visible;
+            description.mutability = render::BufferMutability::immutable;
+            auto buffer = device.create_buffer(
+                description, std::as_bytes(std::span(geometry->vertices)));
+            if (!buffer.ok()) {
+                result.status =
+                    buffer.status == render::BufferStatus::unsupported
+                        ? WorkspaceViewportAiSplineUpdateStatus::unsupported
+                    : buffer.status == render::BufferStatus::allocation_failed
+                        ? WorkspaceViewportAiSplineUpdateStatus::
+                              allocation_failed
+                    : buffer.status == render::BufferStatus::upload_failed
+                        ? WorkspaceViewportAiSplineUpdateStatus::upload_failed
+                        : WorkspaceViewportAiSplineUpdateStatus::invalid;
+                result.diagnostic = std::move(buffer.diagnostic);
+                return result;
+            }
+
+            std::array<render::OverlayLineDrawRequest,
+                       render::max_overlay_line_draws>
+                draws{};
+            for (std::size_t chunk = 0U; chunk < geometry->chunks.size();
+                 ++chunk) {
+                draws[chunk].pipeline = &*candidate[index].pipeline;
+                draws[chunk].vertex_buffer = buffer.buffer.get();
+                draws[chunk].vertex_offset_bytes =
+                    static_cast<std::uint64_t>(
+                        geometry->chunks[chunk].first_vertex) *
+                    sizeof(render::OverlayLineVertex);
+                draws[chunk].vertex_count =
+                    geometry->chunks[chunk].vertex_count;
+            }
+            render::IndexedStaticMeshBatchDescription batch;
+            batch.depth_attachment = depth_.get();
+            batch.overlay_draws =
+                std::span<const render::OverlayLineDrawRequest>(draws).first(
+                    geometry->chunks.size());
+            render::Diagnostic overlay_diagnostic;
+            const auto validation =
+                render::validate_indexed_static_mesh_batch_description(
+                    *color_, batch, overlay_diagnostic);
+            if (validation != render::IndexedStaticMeshBatchStatus::ready) {
+                result.status =
+                    validation ==
+                            render::IndexedStaticMeshBatchStatus::unsupported
+                        ? WorkspaceViewportAiSplineUpdateStatus::unsupported
+                        : WorkspaceViewportAiSplineUpdateStatus::invalid;
+                result.diagnostic = std::move(overlay_diagnostic);
+                return result;
+            }
+            candidate[index].buffer = std::move(buffer.buffer);
+        }
+        const std::size_t replacedPassCount =
+            static_cast<std::size_t>(std::count_if(
+                candidate.begin(), candidate.end(), [](const auto& pass) {
+                    return pass.pipeline.has_value();
+                }));
+        ai_spline_passes_.swap(candidate);
+        if (generation.has_value())
+            ai_spline_generation_ = generation->replacement;
+        result.replaced_pass_count = replacedPassCount;
+        result.status = WorkspaceViewportAiSplineUpdateStatus::ready;
+        return result;
+    } catch (const std::bad_alloc &) {
+        result.status =
+            WorkspaceViewportAiSplineUpdateStatus::allocation_failed;
+        result.diagnostic =
+            diagnostic("workspace_viewport_ai_spline_update_allocation_failed",
+                       "AI spline overlay replacement exceeded available "
+                       "allocation capacity");
+        return result;
+    } catch (const std::exception &error) {
+        result.diagnostic = {"workspace_viewport_ai_spline_update_failed",
+                             error.what()};
+        return result;
+    }
+}
+
+WorkspaceViewportAiSplineUpdateResult
+WorkspaceViewport::replaceAiSplineOverlays(
+    render::Device &device, const WorkspaceAiSplineOverlaySet &overlays,
+    std::optional<WorkspaceViewportAiSplineGenerationTransition> generation) {
+    AiSplineUpdateRequest request;
+    request.primary = &overlays.primary;
+    request.interval =
+        overlays.interval.has_value() ? &*overlays.interval : nullptr;
+    request.left = overlays.left.has_value() ? &*overlays.left : nullptr;
+    request.right = overlays.right.has_value() ? &*overlays.right : nullptr;
+    request.selection =
+        overlays.selection.has_value() ? &*overlays.selection : nullptr;
+    request.temporaryInterpolation =
+        overlays.temporaryInterpolation.has_value()
+            ? &*overlays.temporaryInterpolation
+            : nullptr;
+    request.temporaryMarkers = overlays.temporaryMarkers.has_value()
+                                   ? &*overlays.temporaryMarkers
+                                   : nullptr;
+    request.camber = overlays.camber.has_value() ? &*overlays.camber : nullptr;
+    return replaceAiSplineOverlaysBorrowed(device, request, generation);
+}
+
+WorkspaceViewportFrameStatus
+WorkspaceViewport::drawAndPresent(render::Device &device,
+                                  render::PresentationTarget &target,
+                                  const WorkspaceViewportFrameRequest &request,
+                                  render::Diagnostic &output_diagnostic) {
+    output_diagnostic = {};
+    if (&device != device_) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_device_mismatch",
+            "workspace viewport must use the device that prepared it");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (device.info().backend != backend_ || target.backend() != backend_) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_backend_mismatch",
+                       "workspace viewport, device, and "
+                       "presentation target must use one backend");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const auto &description = target.info().description;
+    if (description.width != presentation_.width ||
+        description.height != presentation_.height ||
+        description.format != presentation_.format) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_target_mismatch",
+                       "presentation target dimensions and format "
+                       "must match viewport preparation");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.camera.clip_space != expectedClipSpace(backend_)) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_camera_clip_space",
+                       "camera clip space does not match the prepared backend");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.hdr_tone_map.has_value() && !hdr_tone_map_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_tone_map_unprepared",
+            "An LDR viewport cannot use frame HDR tone-map parameters");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const render::HdrExposureMode effective_hdr_exposure_mode =
+        request.hdr_exposure_mode.value_or(hdr_exposure_mode_);
+    if (!validHdrExposureMode(effective_hdr_exposure_mode)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_exposure_mode_invalid",
+            "The HDR exposure mode is not recognized");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (effective_hdr_exposure_mode == render::HdrExposureMode::automatic &&
+        !hdr_tone_map_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_exposure_requires_hdr",
+            "Automatic exposure requires a prepared HDR scene target");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (sky_enabled_ && !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_sky_constants_missing",
+            "An enabled portable sky requires the current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (portable_clouds_.has_value() && !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_cloud_constants_missing",
+            "An enabled portable cloud pass requires current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    std::optional<WorkspaceViewportPortableGrassFrameOptions>
+        effective_portable_grass_frame;
+    if (portable_grass_.has_value()) {
+        effective_portable_grass_frame =
+            request.portable_grass.value_or(portable_grass_->frame);
+        if (!validatePortableGrassFrameOptions(
+                *effective_portable_grass_frame, output_diagnostic)) {
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+    }
+    if (portable_grass_.has_value() &&
+        effective_portable_grass_frame.has_value() &&
+        effective_portable_grass_frame->visible &&
+        portable_grass_->vertex_count != 0U &&
+        !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_constants_missing",
+            "An enabled portable grass pass requires current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.portable_grass.has_value() && !portable_grass_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_unprepared",
+            "Portable grass frame values require prepared portable grass resources");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const render::HdrToneMapParameters* effective_hdr_tone_map =
+        request.hdr_tone_map.has_value()
+            ? &*request.hdr_tone_map
+            : hdr_tone_map_.has_value() ? &*hdr_tone_map_ : nullptr;
+    if (fxaa_enabled_ && effective_hdr_tone_map == nullptr) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_fxaa_requires_hdr",
+            "FXAA requires a prepared HDR tone-map stage");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (effective_hdr_tone_map != nullptr) {
+        if (tone_mapped_color_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_hdr_target_missing",
+                "The prepared HDR viewport has no tone-map destination");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        render::Texture& source =
+            resolved_color_ != nullptr ? *resolved_color_ : *color_;
+        const auto validation = render::validate_hdr_tone_map_request(
+            source, *tone_mapped_color_, *effective_hdr_tone_map,
+            output_diagnostic);
+        if (validation != render::HdrToneMapStatus::ready)
+            return toneMapStatus(validation);
+        if (fxaa_enabled_) {
+            if (fxaa_color_ == nullptr) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_fxaa_target_missing",
+                    "The prepared FXAA viewport has no output texture");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const auto fxaa_validation = render::validate_fxaa_request(
+                *tone_mapped_color_, *fxaa_color_, output_diagnostic);
+            if (fxaa_validation != render::FxaaStatus::ready)
+                return fxaaStatus(fxaa_validation);
+        }
+    }
+    if (reflection_capture_.has_value() &&
+        (request.multimap_reflection_cube.texture != nullptr ||
+         request.multimap_reflection_cube.sampler != nullptr)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_reflection_capture_override_conflict",
+            "A viewport-owned reflection capture cannot use a caller cube override");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool requires_stock_vulkan_source_frame =
+        execution_->resources->requires_stock_vulkan_source_frame();
+    const bool requires_stock_d3d12_native_frame =
+        execution_->resources->requires_stock_d3d12_native_frame();
+    if (requires_stock_vulkan_source_frame !=
+        request.stock_vulkan_source_frame.has_value()) {
+        output_diagnostic = diagnostic(
+            requires_stock_vulkan_source_frame
+                ? "static_scene_stock_vulkan_source_frame_missing"
+                : "static_scene_stock_vulkan_source_frame_unexpected",
+            requires_stock_vulkan_source_frame
+                ? "Retained Vulkan source-equivalent draws require exact "
+                  "native camera and lighting records"
+                : "Native Vulkan source records were supplied to a "
+                  "portable-only viewport");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (requires_stock_d3d12_native_frame !=
+        request.stock_d3d12_native_frame.has_value()) {
+        output_diagnostic = diagnostic(
+            requires_stock_d3d12_native_frame
+                ? "static_scene_stock_d3d12_native_frame_missing"
+                : "static_scene_stock_d3d12_native_frame_unexpected",
+            requires_stock_d3d12_native_frame
+                ? "Retained installed D3D12 draws require exact native "
+                  "camera and lighting records"
+                : "Installed D3D12 native records were supplied to a "
+                  "viewport without native owners");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool d3d12_native_frame = requires_stock_d3d12_native_frame;
+    const WorkspaceViewportStockNativeFrame* native_frame =
+        requires_stock_vulkan_source_frame
+            ? &*request.stock_vulkan_source_frame
+        : requires_stock_d3d12_native_frame
+            ? &*request.stock_d3d12_native_frame
+            : nullptr;
+    if (native_frame != nullptr) {
+        const WorkspaceViewportStockNativeFrame& source = *native_frame;
+        if (!render::valid_stock_ks_per_pixel_camera_constants(
+                source.camera) ||
+            !render::valid_stock_ks_per_pixel_lighting_constants(
+                source.lighting)) {
+            output_diagnostic = diagnostic(
+                d3d12_native_frame
+                    ? "static_scene_stock_d3d12_native_frame_invalid"
+                    : "static_scene_stock_vulkan_source_frame_invalid",
+                "Stock native camera and lighting records must be finite "
+                "and complete");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (source.camera.view !=
+                render::stock_ks_per_pixel_transpose_matrix(
+                    request.camera.view) ||
+            source.camera.projection !=
+                render::stock_ks_per_pixel_transpose_matrix(
+                    request.camera.projection) ||
+            source.camera.camera_position != request.camera.position ||
+            source.camera.near_plane != request.camera.near_plane ||
+            source.camera.far_plane != request.camera.far_plane ||
+            source.camera.field_of_view !=
+                request.camera.fov_radians * radians_to_degrees) {
+            output_diagnostic = diagnostic(
+                d3d12_native_frame
+                    ? "workspace_viewport_stock_d3d12_native_camera_mismatch"
+                    : "workspace_viewport_stock_vulkan_source_camera_mismatch",
+                "Stock native camera state must match the current viewport "
+                "camera");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        double source_light_length_squared = 0.0;
+        for (const float component : source.lighting.light_direction)
+            source_light_length_squared +=
+                static_cast<double>(component) * component;
+        if (!(source_light_length_squared > 1.0e-12)) {
+            output_diagnostic = diagnostic(
+                d3d12_native_frame
+                    ? "static_scene_stock_d3d12_native_frame_invalid"
+                    : "static_scene_stock_vulkan_source_frame_invalid",
+                "Stock native lighting requires a nonzero light direction");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (request.frame_constants.has_value()) {
+            constexpr float lighting_match_tolerance = 1.0e-6F;
+            for (std::size_t component = 0U; component < 3U; ++component) {
+                if (std::abs(
+                        source.lighting.light_direction[component] -
+                        -request.frame_constants->sun_direction[component]) >
+                    lighting_match_tolerance) {
+                    output_diagnostic = diagnostic(
+                        d3d12_native_frame
+                            ? "workspace_viewport_stock_d3d12_native_lighting_mismatch"
+                            : "workspace_viewport_stock_vulkan_source_lighting_mismatch",
+                        "Stock native light-ray direction must oppose the "
+                        "portable surface-to-sun direction");
+                    return WorkspaceViewportFrameStatus::invalid;
+                }
+            }
+        }
+        if (shadow_maps_ == nullptr || !directional_shadows_.has_value()) {
+            output_diagnostic = diagnostic(
+                d3d12_native_frame
+                    ? "workspace_viewport_stock_d3d12_native_shadows_missing"
+                    : "workspace_viewport_stock_vulkan_source_shadows_missing",
+                "Stock native draws require retained directional shadow "
+                "resources");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+    }
+    const bool grid_visible = request.grid_visible.value_or(grid_visible_);
+    if (grid_visible && (authoring_overlay_pipeline_ == std::nullopt ||
+                         authoring_grid_buffer_ == nullptr)) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_grid_unprepared",
+                       "A frame cannot show a grid that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool view_axis_visible =
+        request.view_axis_visible.value_or(view_axis_visible_);
+    if (view_axis_visible && (authoring_overlay_pipeline_ == std::nullopt ||
+                              view_axis_buffer_ == nullptr)) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_view_axis_unprepared",
+                       "A frame cannot show a view axis that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const bool skeleton_overlay_visible =
+        request.skeleton_overlay_visible.value_or(
+            skeleton_overlay_.has_value() && skeleton_overlay_->visible);
+    if (request.skeleton_overlay_visible.has_value() &&
+        !skeleton_overlay_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_unprepared",
+            "A frame cannot override a skeleton overlay that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (skeleton_overlay_visible &&
+        (!skeleton_overlay_.has_value() ||
+         !authoring_overlay_pipeline_.has_value())) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_unprepared",
+            "A frame cannot show a skeleton overlay that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!request.skeleton_world_transforms.empty()) {
+        if (!skeleton_overlay_.has_value()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_skeleton_transforms_unprepared",
+                "Skeleton world transforms require a prepared skeleton overlay");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto& skeleton = *skeleton_overlay_;
+        if (request.skeleton_world_transforms.size() != skeleton.node_count) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_skeleton_transform_count_invalid",
+                "Skeleton world transforms must match the prepared scene-node count");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (render::update_skeleton_overlay_positions(
+                skeleton.staging_vertices, skeleton.position_sources,
+                request.skeleton_world_transforms, output_diagnostic) !=
+            render::SkeletonOverlayUpdateStatus::ready) {
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+    }
+    if (request.selection_axis_world.has_value() &&
+        (authoring_overlay_pipeline_ == std::nullopt ||
+         selection_axis_buffer_ == nullptr ||
+         selection_axis_world_ == std::nullopt)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_selection_axis_unprepared",
+            "A frame cannot override a selection axis that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!request.shadow_packet_visibility.empty() &&
+        !directional_shadows_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_visibility_unprepared",
+            "A shadow packet mask requires prepared directional shadows");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!request.shadow_packet_order.empty() &&
+        !directional_shadows_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_order_unprepared",
+            "A shadow packet order requires prepared directional shadows");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+
+    const auto prepared_packets = execution_->resources->prepared_packets();
+    std::span<const render::DrawPacket> frame_packets = prepared_packets;
+    if (!request.refreshed_packets.empty()) {
+        if (request.refreshed_packets.size() != prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_refreshed_packet_count_invalid",
+                "Refreshed packets must match the prepared packet count");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        frame_packets = request.refreshed_packets;
+    }
+
+    const auto validate_visibility_mask =
+        [&](std::span<const std::uint8_t> mask, const char* count_code,
+            const char* value_code, const char* label) {
+            if (!mask.empty() && mask.size() != prepared_packets.size()) {
+                output_diagnostic = {
+                    count_code, std::string(label) +
+                                    " must match the prepared packet count"};
+                return false;
+            }
+            if (std::any_of(mask.begin(), mask.end(),
+                            [](std::uint8_t value) { return value > 1U; })) {
+                output_diagnostic = {
+                    value_code,
+                    std::string(label) + " values must be 0 or 1"};
+                return false;
+            }
+            return true;
+        };
+    if (!validate_visibility_mask(
+            request.packet_visibility,
+            "workspace_viewport_color_visibility_count_invalid",
+            "workspace_viewport_color_visibility_value_invalid",
+            "Color packet visibility") ||
+        !validate_visibility_mask(
+            request.shadow_packet_visibility,
+            "workspace_viewport_shadow_visibility_count_invalid",
+            "workspace_viewport_shadow_visibility_value_invalid",
+            "Shadow packet visibility")) {
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!execution_->resources->validate_refreshed_packets(
+            request.refreshed_packets, output_diagnostic)) {
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+
+    std::span<const std::uint32_t> shadow_packet_order =
+        request.shadow_packet_order.empty()
+            ? std::span<const std::uint32_t>(execution_->shadow_packet_order)
+            : request.shadow_packet_order;
+    if (!shadow_packet_order.empty() &&
+        shadow_packet_order.size() != prepared_packets.size()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_order_count_invalid",
+            "Shadow packet order must contain every prepared packet");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    std::array<bool, render::max_indexed_static_mesh_batch_draws>
+        ordered_shadow_packets{};
+    for (const std::uint32_t packet_index : shadow_packet_order) {
+        if (static_cast<std::size_t>(packet_index) >= prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_order_index_invalid",
+                "Shadow packet order contains an out-of-range index");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (ordered_shadow_packets[packet_index]) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_order_duplicate",
+                "Shadow packet order contains a duplicate index");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        ordered_shadow_packets[packet_index] = true;
+    }
+
+    std::span<const std::uint8_t> packet_visibility = request.packet_visibility;
+    std::span<const std::uint8_t> shadow_packet_visibility =
+        !request.shadow_packet_visibility.empty()
+            ? request.shadow_packet_visibility
+            : request.packet_visibility;
+    const bool derive_color = packet_visibility.empty();
+    const bool derive_shadow = shadow_packet_visibility.empty();
+    if ((derive_color || derive_shadow) && frame_catalog_.has_value()) {
+        auto& catalog = *frame_catalog_;
+        if (catalog.frame_color_visibility.size() != prepared_packets.size() ||
+            catalog.frame_shadow_visibility.size() != prepared_packets.size() ||
+            (!catalog.mesh_filters.empty() &&
+             catalog.mesh_filters.size() != prepared_packets.size())) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_visibility_catalog_invalid",
+                "The retained packet visibility catalog is not dense");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        for (std::size_t index = 0U; index < prepared_packets.size(); ++index) {
+            catalog.frame_color_visibility[index] =
+                prepared_packets[index].shadow_only ? 0U : 1U;
+            catalog.frame_shadow_visibility[index] = 1U;
+        }
+        if (catalog.workspace_lod) {
+            if (!finite_vector(request.camera.position)) {
+                output_diagnostic =
+                    diagnostic("workspace_viewport_lod_camera_invalid",
+                               "Workspace LOD camera position must be finite");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const double dx = static_cast<double>(request.camera.position[0]) -
+                              static_cast<double>(catalog.bounds_center[0]);
+            const double dy = static_cast<double>(request.camera.position[1]) -
+                              static_cast<double>(catalog.bounds_center[1]);
+            const double dz = static_cast<double>(request.camera.position[2]) -
+                              static_cast<double>(catalog.bounds_center[2]);
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (!std::isfinite(distance) ||
+                distance > static_cast<double>(std::numeric_limits<float>::max())) {
+                output_diagnostic =
+                    diagnostic("workspace_viewport_lod_camera_invalid",
+                               "Workspace LOD camera distance is outside the "
+                               "finite float range");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const float effective_distance = workspace::carLodDistance(
+                static_cast<float>(distance), catalog.fov_degrees,
+                catalog.distance_divisor, catalog.track_camera);
+            for (std::size_t index = 0U; index < catalog.file_for_packet.size();
+                 ++index) {
+                const std::size_t file_index = catalog.file_for_packet[index];
+                const auto& lod = catalog.file_lods[file_index];
+                const bool workspace_visible = workspace::carLodVisible(
+                    lod.has_value() ? &*lod : nullptr, effective_distance,
+                    catalog.selected_index);
+                if (!workspace_visible) {
+                    catalog.frame_color_visibility[index] = 0U;
+                    catalog.frame_shadow_visibility[index] = 0U;
+                }
+            }
+        }
+        if (!catalog.mesh_filters.empty()) {
+            for (std::size_t index = 0U; index < catalog.mesh_filters.size();
+                 ++index) {
+                if (!catalog.mesh_filters[index].has_value()) continue;
+                render::CameraMeshFilterRequest filter_request;
+                filter_request.renderable = *catalog.mesh_filters[index];
+                filter_request.world_matrix = frame_packets[index].world_matrix;
+                filter_request.camera = &request.camera;
+                filter_request.max_layer = catalog.max_layer;
+                if (derive_color) {
+                    filter_request.pass = filter_request.renderable.transparent
+                                              ? render::CameraMeshPass::transparent
+                                              : render::CameraMeshPass::opaque;
+                    const auto color_result =
+                        render::camera_mesh_filter_visible(filter_request);
+                    if (color_result.status ==
+                        render::CameraMeshFilterStatus::invalid_input) {
+                        output_diagnostic = diagnostic(
+                            "workspace_viewport_color_camera_mesh_filter_invalid",
+                            "A live color CameraMeshFilter input is invalid");
+                        return WorkspaceViewportFrameStatus::invalid;
+                    }
+                    if (!color_result.visible())
+                        catalog.frame_color_visibility[index] = 0U;
+                }
+                if (derive_shadow) {
+                    filter_request.pass = render::CameraMeshPass::shadow;
+                    const auto shadow_result =
+                        render::camera_mesh_filter_visible(filter_request);
+                    if (shadow_result.status ==
+                        render::CameraMeshFilterStatus::invalid_input) {
+                        output_diagnostic = diagnostic(
+                            "workspace_viewport_shadow_camera_mesh_filter_invalid",
+                            "A live Shadowgen CameraMeshFilter input is invalid");
+                        return WorkspaceViewportFrameStatus::invalid;
+                    }
+                    if (!shadow_result.visible())
+                        catalog.frame_shadow_visibility[index] = 0U;
+                }
+            }
+        }
+        if (derive_color)
+            packet_visibility = catalog.frame_color_visibility;
+        if (derive_shadow)
+            shadow_packet_visibility = catalog.frame_shadow_visibility;
+    }
+
+    std::span<const std::uint32_t> color_packet_order;
+    if (frame_catalog_.has_value() &&
+        frame_catalog_->webgl_live_transparent_order) {
+        auto& catalog = *frame_catalog_;
+        if (catalog.color_order_packets.size() != prepared_packets.size() ||
+            catalog.frame_color_order.size() != prepared_packets.size() ||
+            catalog.frame_color_distance_squared.size() !=
+                prepared_packets.size()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_color_order_catalog_invalid",
+                "The retained color-order catalog is not dense");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (!finite_vector(request.camera.position)) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_color_order_camera_invalid",
+                "Live transparent ordering requires a finite camera position");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        std::iota(catalog.frame_color_order.begin(),
+                  catalog.frame_color_order.end(), 0U);
+        for (std::size_t index = 0U; index < prepared_packets.size(); ++index) {
+            const auto& local =
+                catalog.color_order_packets[index].local_aabb_center;
+            const auto& world = frame_packets[index].world_matrix;
+            double distance_squared = 0.0;
+            for (std::size_t row = 0U; row < 3U; ++row) {
+                const double center =
+                    static_cast<double>(world[row]) * local[0] +
+                    static_cast<double>(world[4U + row]) * local[1] +
+                    static_cast<double>(world[8U + row]) * local[2] +
+                    static_cast<double>(world[12U + row]);
+                const double delta =
+                    center - static_cast<double>(request.camera.position[row]);
+                distance_squared += delta * delta;
+            }
+            if (!std::isfinite(distance_squared)) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_color_order_bounds_invalid",
+                    "A transformed transparent-sort center is not finite");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            catalog.frame_color_distance_squared[index] = distance_squared;
+        }
+        std::stable_sort(
+            catalog.frame_color_order.begin(), catalog.frame_color_order.end(),
+            [&](std::uint32_t first, std::uint32_t second) {
+                const auto& first_packet = prepared_packets[first];
+                const auto& second_packet = prepared_packets[second];
+                if (first_packet.flags.transparent !=
+                    second_packet.flags.transparent) {
+                    return !first_packet.flags.transparent;
+                }
+                if (first_packet.layer != second_packet.layer)
+                    return first_packet.layer < second_packet.layer;
+                if (first_packet.flags.transparent &&
+                    catalog.frame_color_distance_squared[first] !=
+                        catalog.frame_color_distance_squared[second]) {
+                    return catalog.frame_color_distance_squared[first] >
+                           catalog.frame_color_distance_squared[second];
+                }
+                return false;
+            });
+        color_packet_order = catalog.frame_color_order;
+    }
+
+    render::StaticSceneFrameDescription frame;
+    frame.camera = request.camera;
+    frame.draw_sky = sky_enabled_;
+    frame.depth_attachment = depth_.get();
+    frame.load_color = request.load_color;
+    frame.clear_color = request.clear_color;
+    frame.clear_depth = request.clear_depth;
+    frame.depth_clear_value = request.depth_clear_value;
+    frame.resolve_target = resolved_color_.get();
+    frame.capture_rgba8 = false;
+    frame.refreshed_packets = request.refreshed_packets;
+    frame.packet_visibility = packet_visibility;
+    frame.color_packet_order = color_packet_order;
+    frame.apply_skinning = request.apply_skinning;
+    frame.frame_constants = request.frame_constants;
+    if (portable_clouds_.has_value()) {
+        const auto& resources = *portable_clouds_;
+        render::PortableCloudParameters clouds;
+        clouds.camera = request.camera;
+        const float elapsed_seconds = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - resources.start_time).count();
+        clouds.elapsed_seconds = std::max(0.0F, elapsed_seconds);
+        const auto& lighting = *request.frame_constants;
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            clouds.light_direction[index] = -lighting.sun_direction[index];
+            clouds.light_color[index] = lighting.sun_color[index];
+            clouds.ambient_color[index] = lighting.ambient_color[index];
+        }
+        clouds.fog_distance = lighting.fog[0U];
+        clouds.cloud_cover = resources.cloud_cover;
+        clouds.cloud_cutoff = resources.cloud_cutoff;
+        clouds.cloud_color = resources.cloud_color;
+        clouds.vertex_buffer = resources.vertex_buffer.get();
+        clouds.texture_runs = resources.texture_runs;
+        clouds.sampler = resources.sampler.get();
+        for (std::size_t index = 0U; index < resources.textures.size(); ++index)
+            clouds.textures[index] = resources.textures[index].get();
+        frame.clouds = std::move(clouds);
+    }
+    if (portable_grass_.has_value() &&
+        effective_portable_grass_frame.has_value() &&
+        effective_portable_grass_frame->visible &&
+        portable_grass_->vertex_count != 0U) {
+        const auto& resources = *portable_grass_;
+        const auto& grass_frame = *effective_portable_grass_frame;
+        render::PortableGrassParameters grass;
+        grass.camera = request.camera;
+        const auto& lighting = *request.frame_constants;
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            grass.sun_direction[index] = lighting.sun_direction[index];
+            grass.sun_color[index] = lighting.sun_color[index];
+            grass.ambient_color[index] = lighting.ambient_color[index];
+            grass.fog_color[index] = lighting.fog_color[index];
+        }
+        grass.fog_distance = lighting.fog[0U];
+        grass.fog_blend = lighting.fog[1U];
+        grass.wetness = grass_frame.wetness;
+        grass.elapsed_seconds = grass_frame.elapsed_seconds.value_or(
+            std::max(0.0F, std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - resources.start_time)
+                                  .count()));
+        grass.wind_direction = grass_frame.wind_direction;
+        grass.wind_strength = grass_frame.wind_strength;
+        grass.vertex_buffer = resources.vertex_buffer.get();
+        grass.vertex_count = resources.vertex_count;
+        grass.atlas = resources.atlas.get();
+        grass.sampler = resources.sampler.get();
+        frame.grass = std::move(grass);
+    }
+    if (!reflection_capture_.has_value())
+        frame.multimap_reflection_cube = request.multimap_reflection_cube;
+    if (request.selected_mesh_elapsed_ms.has_value() &&
+        !selected_mesh_pipeline_.has_value()) {
+        output_diagnostic =
+            diagnostic("workspace_viewport_selected_mesh_unprepared",
+                       "A selected-mesh elapsed time requires prepared "
+                       "highlight resources");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!request.skeleton_world_transforms.empty()) {
+        auto& skeleton = *skeleton_overlay_;
+        if (skeleton.vertex_buffer != nullptr &&
+            !skeleton.staging_vertices.empty()) {
+            const auto bytes =
+                std::as_bytes(std::span(skeleton.staging_vertices));
+            const auto updated =
+                device.update_buffer(*skeleton.vertex_buffer, 0U, bytes);
+            if (!updated.ok()) {
+                output_diagnostic = updated.diagnostic;
+                switch (updated.status) {
+                case render::BufferStatus::invalid_description:
+                    return WorkspaceViewportFrameStatus::invalid;
+                case render::BufferStatus::unsupported:
+                    return WorkspaceViewportFrameStatus::unsupported;
+                case render::BufferStatus::allocation_failed:
+                case render::BufferStatus::upload_failed:
+                    return WorkspaceViewportFrameStatus::execution_failed;
+                case render::BufferStatus::ready:
+                    break;
+                }
+                return WorkspaceViewportFrameStatus::execution_failed;
+            }
+        }
+        skeleton.vertices.swap(skeleton.staging_vertices);
+    }
+    if (selected_mesh_pipeline_.has_value()) {
+        if (selected_mesh_color_buffer_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_selected_mesh_resource_missing",
+                "The prepared selected-mesh pass has no color buffer");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_count =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - selected_mesh_touch_time_)
+                .count();
+        const std::uint32_t elapsed =
+            request.selected_mesh_elapsed_ms.has_value()
+                ? *request.selected_mesh_elapsed_ms
+            : elapsed_count > render::selected_mesh_fade_milliseconds
+                ? render::selected_mesh_fade_milliseconds + 1U
+                : static_cast<std::uint32_t>(
+                      std::max<std::int64_t>(0, elapsed_count));
+        const render::SelectedMeshHighlight highlight =
+            render::evaluate_selected_mesh_highlight(elapsed);
+        if (highlight.visible) {
+            const auto color_bytes =
+                std::as_bytes(std::span(&highlight.color, 1U));
+            const auto updated = device.update_buffer(
+                *selected_mesh_color_buffer_, 0U, color_bytes);
+            if (!updated.ok()) {
+                output_diagnostic = updated.diagnostic;
+                switch (updated.status) {
+                case render::BufferStatus::invalid_description:
+                    return WorkspaceViewportFrameStatus::invalid;
+                case render::BufferStatus::unsupported:
+                    return WorkspaceViewportFrameStatus::unsupported;
+                case render::BufferStatus::allocation_failed:
+                case render::BufferStatus::upload_failed:
+                    return WorkspaceViewportFrameStatus::execution_failed;
+                case render::BufferStatus::ready:
+                    break;
+                }
+                return WorkspaceViewportFrameStatus::execution_failed;
+            }
+            frame.selected_mesh_pipeline = &*selected_mesh_pipeline_;
+            frame.selected_mesh_color_buffer =
+                selected_mesh_color_buffer_.get();
+        }
+    }
+
+    std::array<render::OverlayLineDrawRequest, render::max_overlay_line_draws>
+        scene_finished_draws{};
+    std::size_t scene_finished_draw_count = 0U;
+    for (const AiSplinePassResources &pass : ai_spline_passes_) {
+        if (pass.buffer != nullptr) {
+            for (const WorkspaceAiSplineChunk &chunk : pass.chunks) {
+                auto &draw = scene_finished_draws[scene_finished_draw_count++];
+                draw.pipeline = &*pass.pipeline;
+                draw.vertex_buffer = pass.buffer.get();
+                draw.vertex_offset_bytes =
+                    static_cast<std::uint64_t>(chunk.first_vertex) *
+                    sizeof(render::OverlayLineVertex);
+                draw.vertex_count = chunk.vertex_count;
+                draw.matrices.world = apex::scene::identity_matrix;
+                draw.matrices.view_projection = request.camera.view_projection;
+            }
+        }
+    }
+    frame.scene_finished_overlay_draws =
+        std::span<const render::OverlayLineDrawRequest>(scene_finished_draws)
+            .first(scene_finished_draw_count);
+
+    std::array<render::OverlayLineDrawRequest, 1U> view_axis_draws{};
+    std::size_t view_axis_draw_count = 0U;
+    if (view_axis_visible) {
+        auto &axis = view_axis_draws[view_axis_draw_count++];
+        axis.pipeline = &*authoring_overlay_pipeline_;
+        axis.vertex_buffer = view_axis_buffer_.get();
+        axis.vertex_count =
+            static_cast<std::uint32_t>(render::view_axis_vertex_count);
+        axis.matrices.world = apex::scene::identity_matrix;
+        axis.matrices.view_projection = request.camera.view_projection;
+    }
+    frame.view_axis_draws =
+        std::span<const render::OverlayLineDrawRequest>(view_axis_draws)
+            .first(view_axis_draw_count);
+
+    std::array<render::OverlayLineDrawRequest, 3U> overlay_draws{};
+    std::size_t overlay_count = 0U;
+    if (skeleton_overlay_visible &&
+        skeleton_overlay_->vertex_buffer != nullptr &&
+        skeleton_overlay_->vertex_count != 0U) {
+        auto& skeleton = overlay_draws[overlay_count++];
+        skeleton.pipeline = &*authoring_overlay_pipeline_;
+        skeleton.vertex_buffer = skeleton_overlay_->vertex_buffer.get();
+        skeleton.vertex_count = skeleton_overlay_->vertex_count;
+        skeleton.matrices.world = apex::scene::identity_matrix;
+        skeleton.matrices.view_projection = request.camera.view_projection;
+    }
+    if (grid_visible) {
+        auto &grid = overlay_draws[overlay_count++];
+        grid.pipeline = &*authoring_overlay_pipeline_;
+        grid.vertex_buffer = authoring_grid_buffer_.get();
+        grid.vertex_count =
+            static_cast<std::uint32_t>(render::authoring_grid_vertex_count);
+        grid.matrices.world = apex::scene::identity_matrix;
+        grid.matrices.view_projection = request.camera.view_projection;
+    }
+    if (authoring_overlay_pipeline_.has_value() &&
+        selection_axis_buffer_ != nullptr &&
+        selection_axis_world_.has_value()) {
+        const auto axis = render::build_selection_axis(
+            request.selection_axis_world.value_or(*selection_axis_world_));
+        if (!axis.ok()) {
+            output_diagnostic = axis.diagnostic;
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        const auto bytes = std::as_bytes(std::span(axis.vertices));
+        const auto updated =
+            device.update_buffer(*selection_axis_buffer_, 0U, bytes);
+        if (!updated.ok()) {
+            output_diagnostic = updated.diagnostic;
+            switch (updated.status) {
+            case render::BufferStatus::invalid_description:
+                return WorkspaceViewportFrameStatus::invalid;
+            case render::BufferStatus::unsupported:
+                return WorkspaceViewportFrameStatus::unsupported;
+            case render::BufferStatus::allocation_failed:
+            case render::BufferStatus::upload_failed:
+                return WorkspaceViewportFrameStatus::execution_failed;
+            case render::BufferStatus::ready:
+                break;
+            }
+            return WorkspaceViewportFrameStatus::execution_failed;
+        }
+        auto &selection = overlay_draws[overlay_count++];
+        selection.pipeline = &*authoring_overlay_pipeline_;
+        selection.vertex_buffer = selection_axis_buffer_.get();
+        selection.vertex_count =
+            static_cast<std::uint32_t>(axis.vertices.size());
+        selection.matrices.world = apex::scene::identity_matrix;
+        selection.matrices.view_projection = request.camera.view_projection;
+    }
+    frame.overlay_draws =
+        std::span<const render::OverlayLineDrawRequest>(overlay_draws)
+            .first(overlay_count);
+    if (frame_border_.has_value()) {
+        const auto& border = *frame_border_;
+        frame.viewport_frame_border = render::ViewportFrameBorderDrawRequest{
+            &border.pipeline,
+            request.native_frame_controls_active
+                ? border.active_vertices.get()
+                : border.inactive_vertices.get(),
+            border.indices.get(), border.matrices};
+    }
+
+    render::Diagnostic shadow_diagnostic;
+    if (directional_shadows_.has_value()) {
+        if (shadow_maps_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_shadow_maps_missing",
+                "Prepared directional shadows require retained map resources");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (execution_->resources->owns_frame_constants() &&
+            !request.frame_constants.has_value()) {
+            output_diagnostic =
+                diagnostic("static_scene_frame_constants_missing",
+                           "A prepared pipeline requires per-frame constants");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (request.frame_constants.has_value() &&
+            !finiteFrameLighting(*request.frame_constants)) {
+            output_diagnostic = diagnostic(
+                "static_scene_frame_constants_non_finite",
+                "Per-frame constants must contain only finite values");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (request.frame_constants.has_value() &&
+            !nonzeroFrameSun(*request.frame_constants)) {
+            output_diagnostic = diagnostic(
+                "static_scene_frame_sun_direction_invalid",
+                "Per-frame lighting requires a nonzero sun direction");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto lighting = directional_shadows_->maps.lighting;
+        lighting.eye = request.camera.position;
+        lighting.target = {
+            request.camera.position[0] + request.camera.forward[0],
+            request.camera.position[1] + request.camera.forward[1],
+            request.camera.position[2] + request.camera.forward[2],
+        };
+        lighting.up = request.camera.up;
+        lighting.fov_radians = request.camera.fov_radians;
+        lighting.aspect = request.camera.aspect;
+        lighting.near_plane = request.camera.near_plane;
+        lighting.far_plane = native_frame != nullptr
+                                 ? directional_shadows_->maps.lighting.far_plane
+                                 : request.camera.far_plane;
+        if (request.frame_constants.has_value()) {
+            lighting.sun_direction = {
+                request.frame_constants->sun_direction[0],
+                request.frame_constants->sun_direction[1],
+                request.frame_constants->sun_direction[2],
+            };
+        }
+        if (native_frame != nullptr) {
+            const auto& source_lighting =
+                native_frame->lighting.light_direction;
+            lighting.sun_direction = {
+                -source_lighting[0], -source_lighting[1],
+                -source_lighting[2]};
+        }
+        const auto refreshed =
+            render::refresh_directional_shadow_maps(*shadow_maps_, lighting);
+        if (!refreshed.ok()) {
+            output_diagnostic = refreshed.diagnostic;
+            return shadowFrameStatus(refreshed.status);
+        }
+
+        render::StaticSceneDirectionalShadowFrameDescription shadow_frame;
+        shadow_frame.maps = shadow_maps_.get();
+        shadow_frame.opaque_pipeline =
+            directional_shadows_->opaque_pipeline.has_value()
+                ? &*directional_shadows_->opaque_pipeline
+                : nullptr;
+        shadow_frame.alpha_static_pipeline =
+            directional_shadows_->alpha_static_pipeline.has_value()
+                ? &*directional_shadows_->alpha_static_pipeline
+                : nullptr;
+        shadow_frame.skinned_pipeline =
+            directional_shadows_->skinned_pipeline.has_value()
+                ? &*directional_shadows_->skinned_pipeline
+                : nullptr;
+        shadow_frame.refreshed_packets = request.refreshed_packets;
+        shadow_frame.packet_visibility = shadow_packet_visibility;
+        shadow_frame.shadow_packet_order = shadow_packet_order;
+        const auto shadowed =
+            execution_->resources->draw_opaque_directional_shadows(
+                device, shadow_frame);
+        if (!shadowed.ok()) {
+            output_diagnostic = shadowed.diagnostic;
+            return shadowDrawStatus(shadowed.status);
+        }
+        shadow_diagnostic = shadowed.diagnostic;
+        if (execution_->resources->owns_directional_shadow_receiver()) {
+            frame.directional_shadow_maps = shadow_maps_.get();
+            frame.directional_shadow_constants_layout =
+                directional_shadows_->constants_layout;
+        }
+        if (native_frame != nullptr) {
+            render::StaticSceneFrameDescription::StockNativeFrame source_frame;
+            source_frame.camera = native_frame->camera;
+            source_frame.lighting = native_frame->lighting;
+            std::array<apex::scene::Matrix4,
+                       render::stock_ks_per_pixel_shadow_cascade_count>
+                shadow_matrices{};
+            for (std::size_t cascade = 0U;
+                 cascade < shadow_matrices.size(); ++cascade) {
+                shadow_matrices[cascade] =
+                    shadow_maps_->camera(cascade).view_projection;
+                source_frame.shadow_maps[cascade] =
+                    &shadow_maps_->attachment(cascade);
+            }
+            source_frame.shadow_constants =
+                render::make_stock_directional_shadow_receiver_constants(
+                    shadow_matrices, render::ks_shadow_biases,
+                    shadow_maps_->map_size());
+            if (!render::valid_stock_directional_shadow_receiver_constants(
+                    source_frame.shadow_constants)) {
+                output_diagnostic = diagnostic(
+                    d3d12_native_frame
+                        ? "static_scene_stock_d3d12_native_frame_invalid"
+                        : "static_scene_stock_vulkan_source_frame_invalid",
+                    "Fresh directional-shadow state cannot populate the "
+                    "stock native frame");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            if (d3d12_native_frame)
+                frame.stock_d3d12_native_frame = source_frame;
+            else
+                frame.stock_vulkan_source_frame = source_frame;
+        }
+    }
+
+    std::optional<std::size_t> pending_reflection_capture;
+    if (reflection_capture_.has_value()) {
+        auto& capture = *reflection_capture_;
+        if (capture.cubes[0U] == nullptr || capture.cubes[1U] == nullptr ||
+            capture.black_cube == nullptr || capture.sampler == nullptr ||
+            capture.depth == nullptr ||
+            capture.packet_visibility.size() !=
+                execution_->resources->draw_count()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_reflection_capture_resources_invalid",
+                "Retained portable reflection capture resources are incomplete");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto cameras = buildStockCaptureCameras(
+            backend_, request.camera.position, output_diagnostic);
+        if (!cameras.has_value())
+            return WorkspaceViewportFrameStatus::invalid;
+
+        std::vector<std::uint8_t> capture_visibility =
+            capture.packet_visibility;
+        if (!packet_visibility.empty()) {
+            for (std::size_t index = 0U;
+                 index < capture_visibility.size(); ++index) {
+                capture_visibility[index] =
+                    static_cast<std::uint8_t>(
+                        capture_visibility[index] != 0U &&
+                        packet_visibility[index] != 0U);
+            }
+        }
+
+        render::StaticSceneFrameDescription capture_frame = frame;
+        capture_frame.draw_sky = sky_enabled_;
+        capture_frame.depth_attachment = capture.depth.get();
+        capture_frame.load_color = false;
+        capture_frame.clear_color = {0.0F, 0.0F, 0.0F, 0.0F};
+        capture_frame.clear_depth = true;
+        capture_frame.depth_clear_value = 1.0F;
+        capture_frame.resolve_target = nullptr;
+        capture_frame.capture_rgba8 = false;
+        capture_frame.color_target_format_override =
+            PipelineRenderTargetFormat::rgba16_float;
+        capture_frame.packet_visibility = capture_visibility;
+        capture_frame.multimap_reflection_cube = {
+            capture.published_cube.has_value()
+                ? capture.cubes[*capture.published_cube].get()
+                : capture.black_cube.get(),
+            capture.sampler.get()};
+        capture_frame.overlay_draws = {};
+        capture_frame.selected_mesh_pipeline = nullptr;
+        capture_frame.selected_mesh_color_buffer = nullptr;
+        capture_frame.scene_finished_overlay_draws = {};
+        capture_frame.view_axis_draws = {};
+        capture_frame.viewport_frame_border.reset();
+
+        for (std::size_t face = 0U; face < cameras->size(); ++face) {
+            capture_frame.camera = (*cameras)[face];
+            capture_frame.target_subresource = {
+                0U, 0U, stock_capture_target_faces[face]};
+            const auto captured = execution_->resources->draw_and_readback(
+                device, *capture.cubes[capture.write_cube], capture_frame);
+            if (!captured.ok()) {
+                output_diagnostic = captured.diagnostic;
+                return drawStatus(captured.status);
+            }
+        }
+        if (capture.cubes[capture.write_cube]->info().description.mip_levels >
+            1U) {
+            const auto generated = device.generate_texture_mips(
+                *capture.cubes[capture.write_cube]);
+            if (!generated.ok()) {
+                output_diagnostic = generated.diagnostic;
+                return textureUpdateStatus(generated.status);
+            }
+        }
+        pending_reflection_capture = capture.write_cube;
+        frame.multimap_reflection_cube = {
+            capture.cubes[*pending_reflection_capture].get(),
+            capture.sampler.get()};
+    }
+
+    const auto drawn =
+        execution_->resources->draw_and_readback(device, *color_, frame);
+    if (!drawn.ok()) {
+        output_diagnostic = drawn.diagnostic;
+        return drawStatus(drawn.status);
+    }
+    render::Texture* presentation_color =
+        resolved_color_ != nullptr ? resolved_color_.get() : color_.get();
+    if (effective_hdr_tone_map != nullptr) {
+        render::HdrToneMapParameters tone_map_parameters =
+            *effective_hdr_tone_map;
+        if (effective_hdr_exposure_mode == render::HdrExposureMode::automatic) {
+            const auto measurement =
+                device.measure_hdr_luminance(*presentation_color);
+            if (!measurement.ok()) {
+                output_diagnostic = measurement.diagnostic;
+                return luminanceStatus(measurement.status);
+            }
+            tone_map_parameters.exposure =
+                render::ksEditorAutoExposure(measurement.luminance);
+        }
+        const auto tone_mapped = device.tone_map_hdr_texture(
+            *presentation_color, *tone_mapped_color_, tone_map_parameters);
+        if (!tone_mapped.ok()) {
+            output_diagnostic = tone_mapped.diagnostic;
+            return toneMapStatus(tone_mapped.status);
+        }
+        presentation_color = tone_mapped_color_.get();
+        if (fxaa_enabled_) {
+            const auto fxaa = device.apply_fxaa(
+                *presentation_color, *fxaa_color_);
+            if (!fxaa.ok()) {
+                output_diagnostic = fxaa.diagnostic;
+                return fxaaStatus(fxaa.status);
+            }
+            presentation_color = fxaa_color_.get();
+        }
+    }
+    const auto presented = device.present_texture(target, *presentation_color);
+    if (presented.ok() && pending_reflection_capture.has_value()) {
+        auto& capture = *reflection_capture_;
+        capture.published_cube = *pending_reflection_capture;
+        capture.write_cube = 1U - *pending_reflection_capture;
+    }
+    output_diagnostic = presented.ok() && !shadow_diagnostic.code.empty()
+                            ? std::move(shadow_diagnostic)
+                            : presented.diagnostic;
+    return frameStatus(presented.status);
+}
+
+WorkspaceViewportPrepareResult prepareWorkspaceViewport(
+    render::Device& device, const WorkspaceSessionDocument& document,
+    const WorkspaceViewportPrepareRequest& request) {
+    WorkspaceViewportPrepareResult result;
+    try {
+        if (request.color_samples != 1U && request.color_samples != 4U) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_multisample_unsupported",
+                "workspace presentation supports one-sample or four-sample color rendering");
+            return result;
+        }
+        if (!validHdrExposureMode(request.hdr_exposure_mode)) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_exposure_mode_invalid",
+                "The HDR exposure mode is not recognized");
+            return result;
+        }
+        if (request.hdr_exposure_mode == render::HdrExposureMode::automatic &&
+            !request.hdr_tone_map.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_exposure_requires_hdr",
+                "Automatic exposure requires HDR tone mapping");
+            return result;
+        }
+        if (request.fxaa_enabled && !request.hdr_tone_map.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_fxaa_requires_hdr",
+                "FXAA requires HDR tone mapping");
+            return result;
+        }
+        if (request.portable_clouds.has_value()) {
+            const auto& options = *request.portable_clouds;
+            const auto cloud_validation = render::validatePortableCloudRequest(
+                options.settings, options.build);
+            if (!cloud_validation.accepted()) {
+                result.status =
+                    cloud_validation.status == render::PortableCloudStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    cloud_validation.code,
+                    "Portable cloud preparation rejected the supplied layout request"};
+                return result;
+            }
+            if (!std::isfinite(options.cloud_cover) ||
+                !std::isfinite(options.cloud_cutoff) ||
+                !std::isfinite(options.cloud_color) ||
+                options.cloud_cover < 0.0F || options.cloud_cover > 1.0F ||
+                options.cloud_cutoff < 0.0F || options.cloud_cutoff > 1.0F ||
+                options.cloud_color < 0.0F || options.cloud_color > 1000.0F) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_cloud_lighting_invalid",
+                    "Portable cloud cover, cutoff, and colour must be finite and bounded");
+                return result;
+            }
+        }
+        if (request.portable_grass.has_value()) {
+            const auto& options = *request.portable_grass;
+            const auto grass_validation = render::validatePortableGrassRequest(
+                options.triangles, options.settings, options.build);
+            if (!grass_validation.accepted()) {
+                result.status =
+                    grass_validation.status ==
+                            render::PortableGrassStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    grass_validation.code,
+                    "Portable grass preparation rejected the supplied source geometry"};
+                return result;
+            }
+            if (!validatePortableGrassFrameOptions(options.frame,
+                                                   result.diagnostic) ||
+                !validatePortableGrassAtlasPlan(options.atlas,
+                                                result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
+                return result;
+            }
+        }
+        const bool builtin_vulkan_source =
+            request.builtin_vulkan_source ==
+            render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
+        const bool builtin_d3d12_native_base =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+        const bool builtin_d3d12_native_alpha_to_coverage =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::
+                ks_per_pixel_alpha_to_coverage;
+        const bool builtin_d3d12_native_combined =
+            request.builtin_d3d12_native ==
+            render::BuiltinD3D12StockNativeSelector::
+                ks_per_pixel_base_and_alpha_to_coverage;
+        const bool builtin_d3d12_native =
+            builtin_d3d12_native_base ||
+            builtin_d3d12_native_alpha_to_coverage ||
+            builtin_d3d12_native_combined;
+        const bool builtin_multimap_source =
+            request.builtin_multimap_source ==
+            render::BuiltinStockMultiMapSourceSelector::normal_detail;
+        if (request.builtin_vulkan_source !=
+                render::BuiltinVulkanStockSourceSelector::disabled &&
+            !builtin_vulkan_source) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_builtin_source_selector_invalid",
+                "The built-in Vulkan stock source selector is invalid");
+            return result;
+        }
+        if (request.builtin_d3d12_native !=
+                render::BuiltinD3D12StockNativeSelector::disabled &&
+            !builtin_d3d12_native) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_selector_invalid",
+                "The installed D3D12 stock selector is invalid");
+            return result;
+        }
+        if (request.builtin_multimap_source !=
+                render::BuiltinStockMultiMapSourceSelector::disabled &&
+            !builtin_multimap_source) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_builtin_multimap_selector_invalid",
+                "The built-in MultiMap source selector is invalid");
+            return result;
+        }
+        if (builtin_vulkan_source && builtin_d3d12_native) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_native_selector_conflict",
+                "Vulkan source and installed D3D12 selectors are mutually "
+                "exclusive");
+            return result;
+        }
+        if (request.hdr_tone_map.has_value()) {
+            render::Diagnostic parameter_diagnostic;
+            if (render::validate_hdr_tone_map_parameters(
+                    *request.hdr_tone_map, parameter_diagnostic) !=
+                render::HdrToneMapStatus::ready) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(parameter_diagnostic);
+                return result;
+            }
+        }
+        if (request.portable_reflection_capture.has_value()) {
+            const std::uint32_t size =
+                request.portable_reflection_capture->size;
+            if (size == 0U || size > 2048U) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_size_invalid",
+                    "Portable reflection capture size must be between 1 and 2048 pixels");
+                return result;
+            }
+            if (!request.multimap_reflection ||
+                !request.render.include_reflections) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_pipeline_missing",
+                    "Portable reflection capture requires reflection planning and portable MultiMap modules");
+                return result;
+            }
+            if (request.color_samples != 1U) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_multisample_unsupported",
+                    "The current portable reflection capture path requires single-sample scene pipelines");
+                return result;
+            }
+            if (builtin_vulkan_source || builtin_d3d12_native) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_native_program_unsupported",
+                    "The single-mip portable capture path does not substitute recovered native frame records");
+                return result;
+            }
+        }
+        if (builtin_vulkan_source && request.shader_modules.empty() &&
+            device.info().backend != render::Backend::Vulkan) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_builtin_source_backend_unsupported",
+                "The built-in ksPerPixel source-equivalent path requires "
+                "Vulkan");
+            return result;
+        }
+        if (builtin_d3d12_native &&
+            device.info().backend != render::Backend::D3D12) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_backend_unsupported",
+                "Installed native ksPerPixel packages require D3D12");
+            return result;
+        }
+        const std::size_t expected_d3d12_native_program_count =
+            builtin_d3d12_native_combined ? 2U : 1U;
+        if (builtin_d3d12_native &&
+            request.builtin_d3d12_native_programs.size() !=
+                expected_d3d12_native_program_count) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "stock_material_d3d12_native_program_count_invalid",
+                "Installed native selection requires the exact bounded "
+                "program count for its selector");
+            return result;
+        }
+        if (builtin_d3d12_native && request.shader_modules.empty() &&
+            request.color_samples !=
+                ((builtin_d3d12_native_alpha_to_coverage ||
+                  builtin_d3d12_native_combined)
+                     ? 4U
+                     : 1U)) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_multisample_unsupported",
+                (builtin_d3d12_native_alpha_to_coverage ||
+                 builtin_d3d12_native_combined)
+                    ? "The installed D3D12 ksPerPixelAT or combined viewport requires a four-sample target"
+                    : "The installed D3D12 base ksPerPixel viewport requires a one-sample target");
+            return result;
+        }
+        if (builtin_d3d12_native && request.shader_modules.empty() &&
+            request.wireframe) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_d3d12_native_wireframe_unsupported",
+                "Installed D3D12 native programs cannot change their "
+                "recovered fill mode for a wireframe viewport");
+            return result;
+        }
+        if ((request.directional_shadow_receiver &&
+             !request.directional_shadows.has_value()) ||
+            (request.directional_shadows.has_value() &&
+             !request.directional_shadow_receiver && !builtin_vulkan_source &&
+             !builtin_d3d12_native)) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_directional_shadow_configuration_invalid",
+                "Directional shadows require the portable receiver or a "
+                "stock native selector, and portable receivers always "
+                "require directional shadows");
+            return result;
+        }
+        std::optional<WorkspaceViewportDirectionalShadowOptions>
+            resolved_directional_shadows;
+        render::Diagnostic shadow_program_diagnostic;
+        if (!resolveAndValidateShadowPrograms(
+                request, device.info().backend, resolved_directional_shadows,
+                shadow_program_diagnostic)) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = std::move(shadow_program_diagnostic);
+            return result;
+        }
+        render::Diagnostic target_diagnostic;
+        if (render::validate_presentation_target_description(
+                request.presentation, target_diagnostic) !=
+            render::PresentationTargetStatus::ready) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = std::move(target_diagnostic);
+            return result;
+        }
+        const auto color_format = request.hdr_tone_map.has_value()
+                                      ? std::optional(
+                                            render::PipelineRenderTargetFormat::
+                                                rgba16_float)
+                                      : pipelineColorFormat(
+                                            request.presentation.format);
+        if (!color_format.has_value()) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_color_format_unsupported",
+                "presentation format has no bounded stock-scene color contract");
+            return result;
+        }
+        if (document.assembly.model.root.kind.empty() ||
+            document.scene.snapshot.root == apex::scene::invalid_node_id) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_document_invalid",
+                "workspace document has no valid model and scene roots");
+            return result;
+        }
+
+        std::optional<render::SkeletonOverlayResult> skeleton_geometry;
+        if (request.skeleton_overlay.has_value()) {
+            skeleton_geometry = buildWorkspaceSkeletonOverlay(
+                document.scene.snapshot, request.packets.selected_node,
+                request.skeleton_overlay->limits);
+            if (!skeleton_geometry->ok()) {
+                result.status =
+                    skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::node_count_exceeded ||
+                        skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::edge_count_exceeded ||
+                        skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::vertex_count_exceeded
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = skeleton_geometry->diagnostic;
+                return result;
+            }
+        }
+
+        render::RenderPlanOptions render_options = request.render;
+        if (render_options.defer_camera_mesh_filter &&
+            !request.camera_mesh_filter) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_camera_mesh_filter_catalog_missing",
+                "Deferred camera mesh filtering requires a retained viewport catalog");
+            return result;
+        }
+        if (request.camera_mesh_filter &&
+            render_options.ksnet_mesh_lod.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_camera_mesh_filter_mode_conflict",
+                "Active camera mesh filtering cannot use the PVS-array LOD mode");
+            return result;
+        }
+        render_options.defer_camera_mesh_filter = request.camera_mesh_filter;
+        if (render_options.workspace_kind.empty())
+            render_options.workspace_kind = document.scene.snapshot.workspace_kind;
+        if (render_options.bounds_radius <= 0.0F)
+            render_options.bounds_radius = document.scene.snapshot.bounds_radius;
+
+        std::vector<apex::scene::NodeId> excluded_roots(
+            render_options.excluded_subtree_roots.begin(),
+            render_options.excluded_subtree_roots.end());
+        std::vector<apex::scene::NodeId> suppressed_roots(
+            render_options.suppressed_subtree_roots.begin(),
+            render_options.suppressed_subtree_roots.end());
+        std::vector<apex::scene::NodeActivityOverride> activity_overrides(
+            render_options.activity_overrides.begin(),
+            render_options.activity_overrides.end());
+
+        std::optional<workspace::WorkspaceLodResolution> lod_resolution;
+        if (request.workspace.lod_bounds_center.has_value()) {
+            workspace::WorkspaceLodResolutionRequest lod_request;
+            lod_request.workspace = &document.assembly.workspace;
+            lod_request.scene = &document.scene.snapshot;
+            lod_request.file_root_nodes = document.sceneBinding.file_root_nodes;
+            lod_request.bounds_center = *request.workspace.lod_bounds_center;
+            lod_request.camera_position = render_options.camera_position;
+            lod_request.selected_index = request.workspace.lod_index;
+            lod_request.lod_fov_degrees = request.workspace.lod_fov_degrees;
+            lod_request.lod_distance_divisor = request.workspace.lod_distance_divisor;
+            lod_request.track_camera = request.workspace.lod_track_camera;
+            lod_resolution = workspace::resolveWorkspaceLod(
+                lod_request, request.workspace_scene_limits);
+        }
+
+        if (request.workspace.cockpit_high_visible.has_value() ||
+            request.workspace.blurred_rims_visible.has_value() ||
+            request.workspace.driver_cockpit ||
+            !request.workspace.driver_hidden_names.empty()) {
+            workspace::WorkspacePreviewResolutionRequest preview_request;
+            preview_request.scene = &document.scene.snapshot;
+            preview_request.cockpit_high_visible = request.workspace.cockpit_high_visible;
+            preview_request.blurred_rims_visible = request.workspace.blurred_rims_visible;
+            preview_request.driver_cockpit = request.workspace.driver_cockpit;
+            preview_request.driver_hidden_names = request.workspace.driver_hidden_names;
+            const auto preview = workspace::resolveWorkspacePreview(
+                preview_request, request.workspace_scene_limits);
+            activity_overrides.insert(activity_overrides.end(),
+                                      preview.activity_overrides.begin(),
+                                      preview.activity_overrides.end());
+            suppressed_roots.insert(suppressed_roots.end(),
+                                    preview.suppressed_root_nodes.begin(),
+                                    preview.suppressed_root_nodes.end());
+        }
+        render_options.excluded_subtree_roots = excluded_roots;
+        render_options.suppressed_subtree_roots = suppressed_roots;
+        render_options.activity_overrides = activity_overrides;
+
+        std::unique_ptr<render::ExternalTextureEffectiveStockSceneInput> effective_scene;
+        const formats::Kn5File* scene_model = &document.assembly.model;
+        std::span<const render::MaterialBindingOverrides> material_overrides = request.overrides_by_material;
+        const bool has_solid_color_overrides =
+            std::any_of(request.overrides_by_material.begin(), request.overrides_by_material.end(),
+                        [](const render::MaterialBindingOverrides& overrides) {
+                            return std::any_of(overrides.resources.begin(), overrides.resources.end(),
+                                               [](const auto& entry) { return entry.second.color.has_value(); });
+                        });
+        if (request.external_textures.has_value() || has_solid_color_overrides) {
+            std::span<const render::ExternalTextureGrant> grants;
+            std::span<const render::ExternalTextureRequest> requests;
+            render::ExternalTextureAuthorityLimits limits;
+            if (request.external_textures.has_value()) {
+                if (request.external_textures->requests.empty()) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic("workspace_viewport_external_texture_request_empty",
+                                                   "External texture viewport preparation requires at least one "
+                                                   "request");
+                    return result;
+                }
+                grants = request.external_textures->grants;
+                requests = request.external_textures->requests;
+                limits = request.external_textures->limits;
+            }
+            auto prepared_effective = render::prepare_effective_stock_scene_input(
+                document.assembly.model, request.overrides_by_material, grants, requests, limits);
+            if (!prepared_effective.ok()) {
+                result.status = externalTextureStatus(prepared_effective.status);
+                if (prepared_effective.diagnostics.empty()) {
+                    result.diagnostic = diagnostic("workspace_viewport_external_texture_failed",
+                                                   "External texture viewport preparation failed "
+                                                   "without a diagnostic");
+                } else {
+                    result.diagnostic = {prepared_effective.diagnostics.front().code,
+                                         prepared_effective.diagnostics.front().message};
+                }
+                return result;
+            }
+            const auto residual_resource = std::find_if(
+                prepared_effective.input->overrides_by_material.begin(),
+                prepared_effective.input->overrides_by_material.end(),
+                [](const render::MaterialBindingOverrides& overrides) {
+                    return !overrides.resources.empty();
+                });
+            if (residual_resource !=
+                prepared_effective.input->overrides_by_material.end()) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_texture_override_unresolved",
+                    "A texture override remains unresolved after effective scene preparation");
+                return result;
+            }
+            effective_scene = std::move(prepared_effective.input);
+            scene_model = &effective_scene->model;
+            material_overrides = effective_scene->overrides_by_material;
+        }
+
+        render::TextureDescription color_description;
+        color_description.width = request.presentation.width;
+        color_description.height = request.presentation.height;
+        color_description.format = request.hdr_tone_map.has_value()
+                                       ? render::TextureFormat::rgba16_sfloat
+                                       : request.presentation.format;
+        color_description.usage = render::TextureUsage::color_attachment |
+                                   render::TextureUsage::transfer_source;
+        if (request.hdr_tone_map.has_value() && request.color_samples == 1U) {
+            color_description.usage = color_description.usage |
+                                      render::TextureUsage::sampled;
+            color_description.access_policy =
+                render::TextureAccessPolicy::render_then_sample;
+        }
+        color_description.mutability = render::TextureMutability::mutable_data;
+        color_description.samples = request.color_samples;
+        if (request.hdr_tone_map.has_value() && request.color_samples == 1U)
+            color_description.mip_levels = fullMipCount(
+                color_description.width, color_description.height);
+        auto color = device.create_texture(color_description);
+        if (!color.ok()) {
+            result.status = color.status == render::TextureStatus::allocation_failed
+                                ? WorkspaceViewportStatus::allocation_failed
+                                : WorkspaceViewportStatus::unsupported;
+            result.diagnostic = color.diagnostic;
+            return result;
+        }
+
+        std::unique_ptr<render::Texture> resolved_color;
+        if (request.color_samples == 4U) {
+            render::TextureDescription resolve_description = color_description;
+            resolve_description.samples = 1U;
+            if (request.hdr_tone_map.has_value()) {
+                resolve_description.mip_levels = fullMipCount(
+                    resolve_description.width, resolve_description.height);
+                resolve_description.usage =
+                    render::TextureUsage::sampled |
+                    render::TextureUsage::color_attachment |
+                    render::TextureUsage::transfer_source;
+                resolve_description.access_policy =
+                    render::TextureAccessPolicy::render_then_sample;
+            }
+            auto resolved = device.create_texture(resolve_description);
+            if (!resolved.ok()) {
+                result.status = resolved.status == render::TextureStatus::allocation_failed
+                                    ? WorkspaceViewportStatus::allocation_failed
+                                    : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = resolved.diagnostic;
+                return result;
+            }
+            resolved_color = std::move(resolved.texture);
+        }
+
+        std::unique_ptr<render::Texture> tone_mapped_color;
+        std::unique_ptr<render::Texture> fxaa_color;
+        if (request.hdr_tone_map.has_value()) {
+            render::TextureDescription tone_mapped_description;
+            tone_mapped_description.width = request.presentation.width;
+            tone_mapped_description.height = request.presentation.height;
+            tone_mapped_description.format = request.fxaa_enabled
+                                                  ? render::TextureFormat::rgba8_unorm
+                                                  : request.presentation.format;
+            tone_mapped_description.usage =
+                render::TextureUsage::color_attachment |
+                render::TextureUsage::transfer_source;
+            if (request.fxaa_enabled) {
+                tone_mapped_description.usage =
+                    tone_mapped_description.usage | render::TextureUsage::sampled;
+                tone_mapped_description.access_policy =
+                    render::TextureAccessPolicy::render_then_sample;
+            }
+            tone_mapped_description.mutability =
+                render::TextureMutability::mutable_data;
+            auto tone_mapped = device.create_texture(tone_mapped_description);
+            if (!tone_mapped.ok()) {
+                result.status =
+                    tone_mapped.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(tone_mapped.diagnostic);
+                return result;
+            }
+            render::Diagnostic tone_map_diagnostic;
+            const auto tone_map_validation =
+                render::validate_hdr_tone_map_request(
+                    resolved_color != nullptr ? *resolved_color : *color.texture,
+                    *tone_mapped.texture,
+                    *request.hdr_tone_map, tone_map_diagnostic);
+            if (tone_map_validation != render::HdrToneMapStatus::ready) {
+                result.status =
+                    tone_map_validation == render::HdrToneMapStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(tone_map_diagnostic);
+                return result;
+            }
+            tone_mapped_color = std::move(tone_mapped.texture);
+
+            if (request.fxaa_enabled) {
+                render::TextureDescription fxaa_description;
+                fxaa_description.width = request.presentation.width;
+                fxaa_description.height = request.presentation.height;
+                fxaa_description.format = request.presentation.format;
+                fxaa_description.usage =
+                    render::TextureUsage::color_attachment |
+                    render::TextureUsage::transfer_source;
+                fxaa_description.mutability =
+                    render::TextureMutability::mutable_data;
+                auto fxaa = device.create_texture(fxaa_description);
+                if (!fxaa.ok()) {
+                    result.status =
+                        fxaa.status == render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::unsupported;
+                    result.diagnostic = std::move(fxaa.diagnostic);
+                    return result;
+                }
+                render::Diagnostic fxaa_diagnostic;
+                const auto fxaa_validation = render::validate_fxaa_request(
+                    *tone_mapped_color, *fxaa.texture, fxaa_diagnostic);
+                if (fxaa_validation != render::FxaaStatus::ready) {
+                    result.status =
+                        fxaa_validation == render::FxaaStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(fxaa_diagnostic);
+                    return result;
+                }
+                fxaa_color = std::move(fxaa.texture);
+            }
+        }
+
+        std::optional<WorkspaceViewport::PortableCloudResources>
+            portable_clouds;
+        if (request.portable_clouds.has_value()) {
+            const auto& options = *request.portable_clouds;
+            const auto layout = render::buildPortableCloudLayout(
+                options.settings, options.build);
+            if (layout.status != render::PortableCloudStatus::ready &&
+                layout.status != render::PortableCloudStatus::empty) {
+                result.status =
+                    layout.status == render::PortableCloudStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    layout.code,
+                    "Portable cloud preparation could not build the bounded layout"};
+                return result;
+            }
+
+            WorkspaceViewport::PortableCloudResources resources;
+            resources.settings = options.settings;
+            resources.cloud_cover = options.cloud_cover;
+            resources.cloud_cutoff = options.cloud_cutoff;
+            resources.cloud_color = options.cloud_color;
+            resources.texture_runs = layout.texture_runs;
+            resources.start_time = std::chrono::steady_clock::now();
+
+            if (!layout.vertices.empty()) {
+                render::BufferDescription cloud_buffer_description;
+                cloud_buffer_description.size_bytes =
+                    layout.vertices.size() * render::portable_cloud_vertex_stride_bytes;
+                cloud_buffer_description.usage = render::BufferUsage::vertex;
+                cloud_buffer_description.memory = render::BufferMemory::device_local;
+                cloud_buffer_description.mutability =
+                    render::BufferMutability::immutable;
+                auto cloud_buffer = device.create_buffer(
+                    cloud_buffer_description,
+                    std::as_bytes(std::span<const render::PortableCloudVertex>(
+                        layout.vertices)));
+                if (!cloud_buffer.ok()) {
+                    result.status =
+                        cloud_buffer.status == render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : cloud_buffer.status == render::BufferStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(cloud_buffer.diagnostic);
+                    return result;
+                }
+                if (cloud_buffer.buffer->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_buffer_backend_mismatch",
+                        "Portable cloud vertex storage belongs to a different backend");
+                    return result;
+                }
+                resources.vertex_buffer = std::move(cloud_buffer.buffer);
+            }
+
+            for (std::size_t index = 0U;
+                 index < options.textures.size(); ++index) {
+                const render::DecodedTexturePlan* plan = options.textures[index];
+                if (plan == nullptr)
+                    continue;
+                if (plan->levels.empty()) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_texture_plan_empty",
+                        "A portable cloud texture plan must contain at least one mip level");
+                    return result;
+                }
+                const render::TextureUploadPlan uploads = plan->make_upload_plan();
+                render::Diagnostic texture_diagnostic;
+                const render::TextureStatus texture_validation =
+                    render::validate_texture_description(
+                        plan->description, uploads, texture_diagnostic);
+                if (texture_validation != render::TextureStatus::ready) {
+                    result.status =
+                        texture_validation == render::TextureStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(texture_diagnostic);
+                    return result;
+                }
+                auto texture = device.create_texture(plan->description, uploads);
+                if (!texture.ok()) {
+                    result.status =
+                        texture.status == render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : texture.status == render::TextureStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(texture.diagnostic);
+                    return result;
+                }
+                if (texture.texture->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_texture_backend_mismatch",
+                        "Portable cloud texture belongs to a different backend");
+                    return result;
+                }
+                resources.textures[index] = std::move(texture.texture);
+            }
+
+            render::SamplerDescription cloud_sampler_description;
+            cloud_sampler_description.min_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.mag_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.mip_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.address_u = render::SamplerAddressMode::repeat;
+            cloud_sampler_description.address_v = render::SamplerAddressMode::repeat;
+            cloud_sampler_description.address_w = render::SamplerAddressMode::repeat;
+            auto cloud_sampler = device.create_sampler(cloud_sampler_description);
+            if (!cloud_sampler.ok()) {
+                result.status =
+                    cloud_sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : cloud_sampler.status == render::SamplerStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(cloud_sampler.diagnostic);
+                return result;
+            }
+            if (cloud_sampler.sampler->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_cloud_sampler_backend_mismatch",
+                    "Portable cloud sampler belongs to a different backend");
+                return result;
+            }
+            resources.sampler = std::move(cloud_sampler.sampler);
+            portable_clouds = std::move(resources);
+        }
+
+        std::optional<WorkspaceViewport::PortableGrassResources>
+            portable_grass;
+        if (request.portable_grass.has_value()) {
+            const auto& options = *request.portable_grass;
+            const auto layout = render::buildPortableGrassLayout(
+                options.triangles, options.settings, options.build);
+            if (layout.status != render::PortableGrassStatus::ready &&
+                layout.status != render::PortableGrassStatus::empty) {
+                result.status =
+                    layout.status == render::PortableGrassStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    layout.code,
+                    "Portable grass preparation could not build the bounded layout"};
+                return result;
+            }
+
+            WorkspaceViewport::PortableGrassResources resources;
+            resources.frame = options.frame;
+            resources.start_time = std::chrono::steady_clock::now();
+            resources.vertex_count =
+                static_cast<std::uint32_t>(layout.vertices.size());
+            if (!layout.vertices.empty()) {
+                render::BufferDescription buffer_description;
+                buffer_description.size_bytes =
+                    layout.vertices.size() *
+                    render::portable_grass_vertex_stride_bytes;
+                buffer_description.usage = render::BufferUsage::vertex;
+                buffer_description.memory = render::BufferMemory::device_local;
+                buffer_description.mutability =
+                    render::BufferMutability::immutable;
+                auto buffer = device.create_buffer(
+                    buffer_description,
+                    std::as_bytes(
+                        std::span<const render::PortableGrassVertex>(
+                            layout.vertices)));
+                if (!buffer.ok()) {
+                    result.status =
+                        buffer.status == render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : buffer.status == render::BufferStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(buffer.diagnostic);
+                    return result;
+                }
+                if (buffer.buffer->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_grass_buffer_backend_mismatch",
+                        "Portable grass vertex storage belongs to a different backend");
+                    return result;
+                }
+                resources.vertex_buffer = std::move(buffer.buffer);
+            }
+
+            const render::TextureUploadPlan atlas_uploads =
+                options.atlas->make_upload_plan();
+            auto atlas = device.create_texture(options.atlas->description,
+                                               atlas_uploads);
+            if (!atlas.ok()) {
+                result.status =
+                    atlas.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : atlas.status == render::TextureStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(atlas.diagnostic);
+                return result;
+            }
+            if (atlas.texture->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_grass_atlas_backend_mismatch",
+                    "The portable grass atlas belongs to a different backend");
+                return result;
+            }
+            resources.atlas = std::move(atlas.texture);
+
+            render::SamplerDescription sampler_description;
+            sampler_description.min_filter = render::SamplerFilter::linear;
+            sampler_description.mag_filter = render::SamplerFilter::linear;
+            sampler_description.mip_filter = render::SamplerFilter::linear;
+            sampler_description.address_u = render::SamplerAddressMode::repeat;
+            sampler_description.address_v = render::SamplerAddressMode::repeat;
+            sampler_description.address_w = render::SamplerAddressMode::repeat;
+            auto sampler = device.create_sampler(sampler_description);
+            if (!sampler.ok()) {
+                result.status =
+                    sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : sampler.status == render::SamplerStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(sampler.diagnostic);
+                return result;
+            }
+            if (sampler.sampler->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_grass_sampler_backend_mismatch",
+                    "The portable grass sampler belongs to a different backend");
+                return result;
+            }
+            resources.sampler = std::move(sampler.sampler);
+            portable_grass = std::move(resources);
+        }
+
+        render::DepthAttachmentDescription depth_description;
+        depth_description.width = request.presentation.width;
+        depth_description.height = request.presentation.height;
+        depth_description.samples = request.color_samples;
+        auto depth = device.create_depth_attachment(depth_description);
+        if (!depth.ok()) {
+            result.status = depth.status == render::DepthAttachmentStatus::allocation_failed
+                                ? WorkspaceViewportStatus::allocation_failed
+                                : WorkspaceViewportStatus::unsupported;
+            result.diagnostic = depth.diagnostic;
+            return result;
+        }
+
+        auto directional_shadows = std::move(resolved_directional_shadows);
+        std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps;
+        if (directional_shadows.has_value()) {
+            auto prepared_maps = render::prepare_directional_shadow_maps(
+                device, directional_shadows->maps);
+            if (!prepared_maps.ok()) {
+                result.status = shadowPreparationStatus(prepared_maps.status);
+                result.diagnostic = std::move(prepared_maps.diagnostic);
+                return result;
+            }
+            shadow_maps = std::move(prepared_maps.resources);
+        }
+
+        render::StockSceneExecutionRequest scene_request;
+        scene_request.model = scene_model;
+        scene_request.scene = &document.scene.snapshot;
+        scene_request.render = render_options;
+        scene_request.packets = request.packets;
+        scene_request.shader_modules = request.shader_modules;
+        scene_request.builtin_vulkan_source =
+            request.builtin_vulkan_source;
+        scene_request.builtin_vulkan_source_sampler_settings =
+            request.builtin_vulkan_source_sampler_settings;
+        scene_request.builtin_d3d12_native =
+            request.builtin_d3d12_native;
+        scene_request.builtin_d3d12_native_programs =
+            request.builtin_d3d12_native_programs;
+        scene_request.builtin_d3d12_native_sampler_settings =
+            request.builtin_d3d12_native_sampler_settings;
+        scene_request.builtin_multimap_source =
+            request.builtin_multimap_source;
+        scene_request.builtin_stock_tyres_source =
+            request.builtin_stock_tyres_source;
+        scene_request.overrides_by_material = material_overrides;
+        scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
+        scene_request.damage_broken_visible = request.damage_broken_visible;
+        scene_request.targets.colors = {
+            PipelineRenderTarget{*color_format, request.color_samples}};
+        scene_request.targets.has_depth = true;
+        scene_request.targets.depth = {
+            PipelineRenderTargetFormat::depth32_float, request.color_samples};
+        scene_request.wireframe = request.wireframe;
+        scene_request.directional_shadow_receiver = request.directional_shadow_receiver;
+        scene_request.multimap_reflection = request.multimap_reflection;
+        scene_request.texture_authority =
+            render::StaticSceneTextureAuthority::owned_model_payloads;
+        scene_request.limits = request.limits;
+        auto execution = std::make_unique<render::StockSceneExecutionResult>(
+            render::prepare_stock_scene_execution(device, scene_request));
+        if (!execution->ok()) {
+            result.status = preparationStatus(execution->status);
+            result.diagnostic = execution->diagnostic;
+            return result;
+        }
+        if (execution->resources->requires_stock_vulkan_source_frame() &&
+            shadow_maps == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_stock_vulkan_source_shadows_missing",
+                "A selected immutable Vulkan source program requires "
+                "viewport-owned directional shadow maps");
+            return result;
+        }
+        if (execution->resources->requires_stock_d3d12_native_frame() &&
+            shadow_maps == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_stock_d3d12_native_shadows_missing",
+                "A selected installed D3D12 native program requires "
+                "viewport-owned directional shadow maps");
+            return result;
+        }
+        if (execution->resources->requires_stock_vulkan_source_frame() ||
+            execution->resources->requires_stock_d3d12_native_frame()) {
+            directional_shadows->maps.lighting.splits =
+                render::ks_editor_shadow_splits;
+            directional_shadows->maps.lighting.far_plane =
+                render::ks_editor_shadow_range;
+        }
+
+        std::optional<WorkspaceViewport::PortableReflectionCaptureResources>
+            reflection_capture;
+        if (request.portable_reflection_capture.has_value()) {
+            const auto packets = execution->resources->prepared_packets();
+            const auto& reflection_items = execution->render_plan.reflection.items;
+            if (reflection_items.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_selection_empty",
+                    "Portable reflection capture requires at least one selected scene packet");
+                return result;
+            }
+
+            WorkspaceViewport::PortableReflectionCaptureResources capture;
+            capture.packet_visibility.assign(packets.size(), 0U);
+            std::unordered_map<apex::scene::NodeId, bool> selected_nodes;
+            selected_nodes.reserve(reflection_items.size());
+            for (const render::RenderItem& item : reflection_items) {
+                // The recovered cube camera uses the opaque mesh filter.
+                if (item.transparent) continue;
+                selected_nodes.emplace(item.node, false);
+            }
+            if (selected_nodes.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_reflection_capture_selection_empty",
+                    "Portable reflection capture requires at least one selected opaque packet");
+                return result;
+            }
+            for (std::size_t index = 0U; index < packets.size(); ++index) {
+                const auto found = selected_nodes.find(packets[index].node);
+                if (found == selected_nodes.end()) continue;
+                capture.packet_visibility[index] = 1U;
+                found->second = true;
+            }
+            for (const auto& [node, found] : selected_nodes) {
+                (void)node;
+                if (!found) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_reflection_capture_packet_mapping_missing",
+                        "A selected reflection item has no prepared packet");
+                    return result;
+                }
+            }
+
+            constexpr std::array<render::CubeFace,
+                                 render::texture_cube_face_count>
+                upload_faces = {
+                    render::CubeFace::positive_x,
+                    render::CubeFace::negative_x,
+                    render::CubeFace::positive_y,
+                    render::CubeFace::negative_y,
+                    render::CubeFace::positive_z,
+                    render::CubeFace::negative_z};
+            constexpr std::array<std::byte, 4U> black_pixel{};
+            render::TextureUploadPlan black_uploads;
+            black_uploads.subresources.reserve(upload_faces.size());
+            for (const render::CubeFace face : upload_faces) {
+                black_uploads.subresources.push_back(
+                    {0U, 0U, 1U, 1U, 4U, black_pixel, face});
+            }
+            render::TextureDescription black_description;
+            black_description.width = 1U;
+            black_description.height = 1U;
+            black_description.format = request.presentation.format;
+            black_description.usage = render::TextureUsage::sampled;
+            black_description.shape = render::TextureShape::texture_cube;
+            auto black = device.create_texture(black_description, black_uploads);
+            if (!black.ok()) {
+                result.status =
+                    black.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(black.diagnostic);
+                return result;
+            }
+            capture.black_cube = std::move(black.texture);
+
+            render::TextureDescription cube_description;
+            cube_description.width =
+                request.portable_reflection_capture->size;
+            cube_description.height = cube_description.width;
+            cube_description.format = render::TextureFormat::rgba16_sfloat;
+            std::uint32_t dimension = cube_description.width;
+            while (dimension != 0U &&
+                   cube_description.mip_levels < 7U) {
+                dimension >>= 1U;
+                if (dimension != 0U)
+                    ++cube_description.mip_levels;
+            }
+            cube_description.usage =
+                render::TextureUsage::sampled |
+                render::TextureUsage::color_attachment |
+                render::TextureUsage::transfer_source;
+            cube_description.mutability =
+                render::TextureMutability::mutable_data;
+            cube_description.shape = render::TextureShape::texture_cube;
+            cube_description.access_policy =
+                render::TextureAccessPolicy::render_then_sample;
+            for (auto& cube : capture.cubes) {
+                auto created = device.create_texture(cube_description);
+                if (!created.ok()) {
+                    result.status =
+                        created.status ==
+                                render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::unsupported;
+                    result.diagnostic = std::move(created.diagnostic);
+                    return result;
+                }
+                cube = std::move(created.texture);
+            }
+
+            render::SamplerDescription sampler_description;
+            sampler_description.min_filter = render::SamplerFilter::linear;
+            sampler_description.mag_filter = render::SamplerFilter::linear;
+            sampler_description.mip_filter = render::SamplerFilter::linear;
+            sampler_description.address_u =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.address_v =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.address_w =
+                render::SamplerAddressMode::clamp_to_edge;
+            sampler_description.max_lod = static_cast<float>(
+                cube_description.mip_levels - 1U);
+            auto sampler = device.create_sampler(sampler_description);
+            if (!sampler.ok()) {
+                result.status =
+                    sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(sampler.diagnostic);
+                return result;
+            }
+            capture.sampler = std::move(sampler.sampler);
+
+            render::DepthAttachmentDescription capture_depth_description;
+            capture_depth_description.width = cube_description.width;
+            capture_depth_description.height = cube_description.height;
+            auto capture_depth =
+                device.create_depth_attachment(capture_depth_description);
+            if (!capture_depth.ok()) {
+                result.status =
+                    capture_depth.status ==
+                            render::DepthAttachmentStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(capture_depth.diagnostic);
+                return result;
+            }
+            capture.depth = std::move(capture_depth.attachment);
+            reflection_capture = std::move(capture);
+        }
+
+        std::optional<WorkspaceViewport::FrameCatalog> frame_catalog;
+        if ((lod_resolution.has_value() && !render_options.isolated) ||
+            request.camera_mesh_filter ||
+            request.webgl_live_transparent_order) {
+            WorkspaceViewport::FrameCatalog catalog;
+            const auto packets = execution->resources->prepared_packets();
+            const auto& scene = document.scene.snapshot;
+            if (lod_resolution.has_value() && !render_options.isolated) {
+                catalog.workspace_lod = true;
+                catalog.bounds_center = *request.workspace.lod_bounds_center;
+                catalog.selected_index = request.workspace.lod_index;
+                catalog.fov_degrees = request.workspace.lod_fov_degrees;
+                catalog.distance_divisor = request.workspace.lod_distance_divisor;
+                catalog.track_camera = request.workspace.lod_track_camera;
+                catalog.file_lods.reserve(document.assembly.workspace.files.size());
+                for (const auto& file : document.assembly.workspace.files)
+                    catalog.file_lods.push_back(file.lod);
+
+                constexpr std::size_t invalid_file =
+                    std::numeric_limits<std::size_t>::max();
+                std::vector<std::size_t> file_for_root(scene.nodes.size(), invalid_file);
+                for (std::size_t index = 0U;
+                     index < document.sceneBinding.file_root_nodes.size(); ++index) {
+                    const auto root = document.sceneBinding.file_root_nodes[index];
+                    if (root == apex::scene::invalid_node_id ||
+                        static_cast<std::size_t>(root) >= file_for_root.size() ||
+                        file_for_root[static_cast<std::size_t>(root)] != invalid_file) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_lod_root_mapping_invalid",
+                            "Workspace LOD root mapping is not valid and unique");
+                        return result;
+                    }
+                    file_for_root[static_cast<std::size_t>(root)] = index;
+                }
+                catalog.file_for_packet.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    auto node = packet.node;
+                    std::size_t file_index = invalid_file;
+                    for (std::size_t ancestry_depth = 0U;
+                         ancestry_depth < scene.nodes.size(); ++ancestry_depth) {
+                        if (node == apex::scene::invalid_node_id ||
+                            static_cast<std::size_t>(node) >= scene.nodes.size())
+                            break;
+                        file_index = file_for_root[static_cast<std::size_t>(node)];
+                        if (file_index != invalid_file) break;
+                        node = scene.nodes[static_cast<std::size_t>(node)].parent;
+                    }
+                    if (file_index == invalid_file ||
+                        file_index >= catalog.file_lods.size()) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_lod_packet_mapping_invalid",
+                            "A prepared packet is not inside a workspace LOD file root");
+                        return result;
+                    }
+                    catalog.file_for_packet.push_back(file_index);
+                }
+            }
+            if (request.camera_mesh_filter) {
+                catalog.max_layer = request.camera_mesh_max_layer;
+                catalog.mesh_filters.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    const auto color_item = std::find_if(
+                        execution->render_plan.items.begin(),
+                        execution->render_plan.items.end(),
+                        [&](const render::RenderItem& candidate) {
+                            return candidate.node == packet.node;
+                        });
+                    const render::RenderItem* item =
+                        color_item == execution->render_plan.items.end()
+                            ? nullptr
+                            : &*color_item;
+                    if (item == nullptr) {
+                        const auto shadow_item = std::find_if(
+                            execution->render_plan.shadow_only_items.begin(),
+                            execution->render_plan.shadow_only_items.end(),
+                            [&](const render::RenderItem& candidate) {
+                                return candidate.node == packet.node;
+                            });
+                        if (shadow_item !=
+                            execution->render_plan.shadow_only_items.end()) {
+                            item = &*shadow_item;
+                        }
+                    }
+                    if (item == nullptr) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_camera_mesh_packet_mapping_invalid",
+                            "A prepared packet has no retained render item");
+                        return result;
+                    }
+                    const auto* node = scene.find_node(packet.node);
+                    if (node == nullptr) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_camera_mesh_node_invalid",
+                            "A prepared packet references an unknown scene node");
+                        return result;
+                    }
+                    catalog.mesh_filters.push_back(item->camera_mesh_filter);
+                }
+            }
+            if (request.webgl_live_transparent_order) {
+                catalog.webgl_live_transparent_order = true;
+                catalog.color_order_packets.reserve(packets.size());
+                for (const auto& packet : packets) {
+                    const auto* node = scene.find_node(packet.node);
+                    if (node == nullptr) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_color_order_node_invalid",
+                            "A prepared packet references an unknown scene node");
+                        return result;
+                    }
+                    if (!node->local_aabb_center.has_value()) {
+                        result.status = WorkspaceViewportStatus::unsupported;
+                        result.diagnostic = diagnostic(
+                            "workspace_viewport_color_order_bounds_unavailable",
+                            "WebGL-compatible live ordering requires a vertex-AABB center for every packet");
+                        return result;
+                    }
+                    catalog.color_order_packets.push_back(
+                        {*node->local_aabb_center});
+                }
+                catalog.frame_color_order.resize(packets.size());
+                catalog.frame_color_distance_squared.resize(packets.size());
+            }
+            catalog.frame_color_visibility.resize(packets.size(), 1U);
+            catalog.frame_shadow_visibility.resize(packets.size(), 1U);
+            frame_catalog = std::move(catalog);
+        }
+
+        std::optional<render::PipelineProgram> selected_mesh_pipeline;
+        std::unique_ptr<render::Buffer> selected_mesh_color_buffer;
+        if (request.selected_mesh_pipeline.has_value()) {
+            const auto packets = execution->resources->prepared_packets();
+            const render::DrawPacket* selected_packet = nullptr;
+            for (const render::DrawPacket& packet : packets) {
+                if (!packet.flags.selected) continue;
+                if (selected_packet != nullptr) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_selected_mesh_count_invalid",
+                        "A selected-mesh pipeline requires exactly one selected packet");
+                    return result;
+                }
+                selected_packet = &packet;
+            }
+            if (selected_packet == nullptr) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_missing",
+                    "A selected-mesh pipeline requires one selected packet");
+                return result;
+            }
+            if (selected_packet->primitive !=
+                    render::DrawPrimitiveKind::static_mesh ||
+                selected_packet->vertex_stride_floats != 11U) {
+                result.status = WorkspaceViewportStatus::unsupported;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_unsupported",
+                    "The recovered selected-mesh pass supports only static 44-byte geometry");
+                return result;
+            }
+            const render::PipelineProgram& pipeline =
+                *request.selected_mesh_pipeline;
+            const auto pipeline_validation = render::validate_pipeline(pipeline);
+            const render::PipelineVertexAttribute expected_position{
+                render::PipelineVertexSemantic::position,
+                render::PipelineVertexAttributeFormat::float32x3, 0U, 0U};
+            const bool shader_format_matches = std::all_of(
+                pipeline.shaders.begin(), pipeline.shaders.end(),
+                [&](const render::PipelineShaderModule& shader) {
+                    return device.info().backend == render::Backend::Vulkan
+                               ? shader.format ==
+                                     render::PipelineShaderFormat::spirv
+                               : shader.format ==
+                                         render::PipelineShaderFormat::dxbc ||
+                                     shader.format ==
+                                         render::PipelineShaderFormat::dxil;
+                });
+            const auto shader_stage_count = [&](render::PipelineShaderStage stage) {
+                return std::count_if(
+                    pipeline.shaders.begin(), pipeline.shaders.end(),
+                    [&](const render::PipelineShaderModule& shader) {
+                        return shader.stage == stage;
+                    });
+            };
+            if (!pipeline_validation.valid || pipeline.shaders.size() != 2U ||
+                shader_stage_count(render::PipelineShaderStage::vertex) != 1 ||
+                shader_stage_count(render::PipelineShaderStage::fragment) != 1 ||
+                !shader_format_matches ||
+                pipeline.transform_contract !=
+                    render::PipelineTransformContract::selected_mesh ||
+                pipeline.vertex_layout.stride != 11U * sizeof(float) ||
+                pipeline.vertex_layout.attributes.size() != 1U ||
+                pipeline.vertex_layout.attributes[0].semantic !=
+                    expected_position.semantic ||
+                pipeline.vertex_layout.attributes[0].format !=
+                    expected_position.format ||
+                pipeline.vertex_layout.attributes[0].location != 0U ||
+                pipeline.vertex_layout.attributes[0].offset != 0U ||
+                pipeline.targets.colors.size() != 1U ||
+                pipeline.targets.colors[0].format != *color_format ||
+                pipeline.targets.colors[0].samples != request.color_samples ||
+                !pipeline.targets.has_depth ||
+                pipeline.targets.depth.format !=
+                    render::PipelineRenderTargetFormat::depth32_float ||
+                pipeline.targets.depth.samples != request.color_samples ||
+                pipeline.raster.fill != render::PipelineFillMode::solid ||
+                pipeline.raster.cull != render::PipelineCullMode::front ||
+                pipeline.depth.test_enabled || pipeline.depth.write_enabled ||
+                pipeline.blend.enabled || pipeline.blend.alpha_to_coverage ||
+                !pipeline.resources.empty()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selected_mesh_pipeline_invalid",
+                    "The selected-mesh pipeline does not match the recovered pass contract");
+                return result;
+            }
+            const render::SelectedMeshHighlight initial =
+                render::evaluate_selected_mesh_highlight(0U);
+            std::array<std::byte, render::selected_mesh_color_view_bytes> bytes{};
+            std::memcpy(bytes.data(), &initial.color, sizeof(initial.color));
+            render::BufferDescription color_buffer_description;
+            color_buffer_description.size_bytes = bytes.size();
+            color_buffer_description.usage = render::BufferUsage::uniform;
+            color_buffer_description.memory = render::BufferMemory::host_visible;
+            color_buffer_description.mutability =
+                render::BufferMutability::mutable_data;
+            auto color_buffer = device.create_buffer(color_buffer_description, bytes);
+            if (!color_buffer.ok()) {
+                result.status =
+                    color_buffer.status == render::BufferStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                    : color_buffer.status == render::BufferStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(color_buffer.diagnostic);
+                return result;
+            }
+            selected_mesh_pipeline = pipeline;
+            selected_mesh_color_buffer = std::move(color_buffer.buffer);
+        }
+
+        std::optional<WorkspaceViewport::FrameBorderResources> frame_border;
+        if (request.native_frame_border) {
+            if (request.packets.selected_node == apex::scene::invalid_node_id) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_frame_border_selection_missing",
+                    "The recovered viewport frame requires a selected node");
+                return result;
+            }
+            render::PipelineRenderTargets targets;
+            targets.colors = {{*color_format, request.color_samples}};
+            targets.has_depth = true;
+            targets.depth = {
+                render::PipelineRenderTargetFormat::depth32_float,
+                request.color_samples};
+            auto program = render::create_viewport_frame_border_program(
+                device.info().backend, std::move(targets));
+            if (!program.ok()) {
+                result.status =
+                    program.status == render::ViewportFrameBorderStatus::invalid_backend
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    "workspace_viewport_frame_border_program_invalid",
+                    std::string("The recovered viewport frame program is invalid: ") +
+                        render::viewport_frame_border_status_name(program.status)};
+                return result;
+            }
+            const auto active = render::build_viewport_frame_border(
+                request.presentation.width, request.presentation.height, true,
+                device.info().backend);
+            const auto inactive = render::build_viewport_frame_border(
+                request.presentation.width, request.presentation.height, false,
+                device.info().backend);
+            if (!active.ok() || !inactive.ok()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = !active.ok() ? active.diagnostic
+                                                 : inactive.diagnostic;
+                return result;
+            }
+            const auto create_geometry_buffer =
+                [&](std::span<const std::byte> bytes,
+                    render::BufferUsage usage,
+                    std::unique_ptr<render::Buffer>& output) {
+                    render::BufferDescription description;
+                    description.size_bytes = bytes.size();
+                    description.usage = usage;
+                    description.memory = render::BufferMemory::device_local;
+                    description.mutability = render::BufferMutability::immutable;
+                    auto created = device.create_buffer(description, bytes);
+                    if (!created.ok()) {
+                        result.status =
+                            created.status == render::BufferStatus::unsupported
+                                ? WorkspaceViewportStatus::unsupported
+                            : created.status == render::BufferStatus::allocation_failed
+                                ? WorkspaceViewportStatus::allocation_failed
+                                : WorkspaceViewportStatus::invalid;
+                        result.diagnostic = std::move(created.diagnostic);
+                        return false;
+                    }
+                    output = std::move(created.buffer);
+                    return true;
+                };
+            WorkspaceViewport::FrameBorderResources resources;
+            resources.pipeline = std::move(*program.program);
+            resources.matrices = active.matrices;
+            if (!create_geometry_buffer(
+                    std::as_bytes(std::span(active.vertices)),
+                    render::BufferUsage::vertex, resources.active_vertices) ||
+                !create_geometry_buffer(
+                    std::as_bytes(std::span(inactive.vertices)),
+                    render::BufferUsage::vertex, resources.inactive_vertices) ||
+                !create_geometry_buffer(
+                    std::as_bytes(std::span(active.indices)),
+                    render::BufferUsage::index, resources.indices))
+                return result;
+            frame_border = std::move(resources);
+        }
+
+        std::optional<render::PipelineProgram> authoring_overlay_pipeline;
+        std::array<WorkspaceViewport::AiSplinePassResources,
+                   workspace_ai_spline_pass_count>
+            ai_spline_passes;
+        std::unique_ptr<render::Buffer> authoring_grid_buffer;
+        std::unique_ptr<render::Buffer> view_axis_buffer;
+        std::unique_ptr<render::Buffer> selection_axis_buffer;
+        std::optional<apex::scene::Matrix4> selection_axis_world;
+        std::optional<WorkspaceViewport::SkeletonOverlayResources>
+            skeleton_overlay;
+        const bool selection_axis_requested =
+            request.packets.selected_node != apex::scene::invalid_node_id;
+        struct AiSplinePassInput {
+            const WorkspaceAiSplineGeometry *geometry = nullptr;
+            const std::optional<render::PipelineProgram> *pipeline = nullptr;
+            WorkspaceAiSplinePassKind kind = WorkspaceAiSplinePassKind::primary;
+        };
+        const std::array<AiSplinePassInput, workspace_ai_spline_pass_count>
+            ai_spline_inputs = {{
+                {request.ai_spline_geometry, &request.ai_spline_pipeline,
+                 WorkspaceAiSplinePassKind::primary},
+                {request.ai_spline_interval_geometry,
+                 &request.ai_spline_interval_pipeline,
+                 WorkspaceAiSplinePassKind::interval},
+                {request.ai_spline_left_geometry,
+                 &request.ai_spline_left_pipeline,
+                 WorkspaceAiSplinePassKind::left_side},
+                {request.ai_spline_right_geometry,
+                 &request.ai_spline_right_pipeline,
+                 WorkspaceAiSplinePassKind::right_side},
+                {request.ai_spline_selection_geometry,
+                 &request.ai_spline_selection_pipeline,
+                 WorkspaceAiSplinePassKind::selection},
+                {request.ai_spline_temporary_interpolation_geometry,
+                 &request.ai_spline_temporary_interpolation_pipeline,
+                 WorkspaceAiSplinePassKind::temporary_interpolation},
+                {request.ai_spline_temporary_marker_geometry,
+                 &request.ai_spline_temporary_marker_pipeline,
+                 WorkspaceAiSplinePassKind::temporary_markers},
+                {request.ai_spline_camber_geometry,
+                 &request.ai_spline_camber_pipeline,
+                 WorkspaceAiSplinePassKind::camber},
+            }};
+        for (const AiSplinePassInput &input : ai_spline_inputs) {
+            const bool latent_dynamic_pass =
+                (input.kind == WorkspaceAiSplinePassKind::left_side ||
+                 input.kind == WorkspaceAiSplinePassKind::right_side ||
+                 input.kind == WorkspaceAiSplinePassKind::selection ||
+                 input.kind ==
+                     WorkspaceAiSplinePassKind::temporary_interpolation ||
+                 input.kind == WorkspaceAiSplinePassKind::temporary_markers) &&
+                input.geometry == nullptr && input.pipeline->has_value();
+            if ((input.geometry != nullptr && !input.pipeline->has_value()) ||
+                (input.geometry == nullptr && input.pipeline->has_value() &&
+                 !latent_dynamic_pass)) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_configuration_invalid",
+                    "Each AI spline geometry requires a matching pipeline");
+                return result;
+            }
+        }
+        if (request.ai_spline_generation.has_value() &&
+            request.ai_spline_geometry == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_without_geometry",
+                "AI spline generation tracking requires a primary pass");
+            return result;
+        }
+        if (request.ai_spline_generation.has_value() &&
+            !request.ai_spline_generation->valid()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_generation_invalid",
+                "AI spline generation tracking requires a valid owner");
+            return result;
+        }
+        if ((request.ai_spline_interval_geometry != nullptr ||
+             request.ai_spline_left_geometry != nullptr ||
+             request.ai_spline_right_geometry != nullptr ||
+             request.ai_spline_selection_geometry != nullptr ||
+             request.ai_spline_temporary_interpolation_geometry != nullptr ||
+             request.ai_spline_temporary_marker_geometry != nullptr ||
+             request.ai_spline_camber_geometry != nullptr) &&
+            request.ai_spline_geometry == nullptr) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_ai_spline_overlay_primary_missing",
+                "AI spline overlays require the primary spline pass");
+            return result;
+        }
+        const std::size_t authoring_draw_count =
+            static_cast<std::size_t>(request.grid_visible) +
+            static_cast<std::size_t>(request.view_axis_visible) +
+            static_cast<std::size_t>(selection_axis_requested) +
+            static_cast<std::size_t>(
+                skeleton_geometry.has_value() &&
+                !skeleton_geometry->vertices.empty());
+        const std::size_t authoring_vertex_count =
+            (request.grid_visible ? render::authoring_grid_vertex_count : 0U) +
+            (request.view_axis_visible ? render::view_axis_vertex_count : 0U) +
+            (selection_axis_requested ? 6U : 0U) +
+            (skeleton_geometry.has_value()
+                 ? skeleton_geometry->vertices.size()
+                 : 0U);
+        std::size_t ai_draw_count = 0U;
+        std::size_t ai_vertex_count = 0U;
+        for (const AiSplinePassInput &input : ai_spline_inputs) {
+            if (input.geometry == nullptr) continue;
+            if (input.geometry->chunks.size() >
+                    render::max_overlay_line_draws - ai_draw_count ||
+                input.geometry->vertices.size() >
+                    render::max_overlay_line_total_vertices -
+                        ai_vertex_count) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_ai_spline_limit",
+                    "AI spline geometry exceeds the bounded line-render "
+                    "limits");
+                return result;
+            }
+            ai_draw_count += input.geometry->chunks.size();
+            ai_vertex_count += input.geometry->vertices.size();
+        }
+        if (ai_draw_count >
+                render::max_overlay_line_draws - authoring_draw_count ||
+            ai_vertex_count > render::max_overlay_line_total_vertices -
+                                  authoring_vertex_count) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic =
+                diagnostic("workspace_viewport_overlay_budget_exceeded",
+                           "AI spline and authoring overlays exceed the shared "
+                           "render budget");
+            return result;
+        }
+        for (std::size_t pass_index = 0U; pass_index < ai_spline_inputs.size();
+             ++pass_index) {
+            const AiSplinePassInput &input = ai_spline_inputs[pass_index];
+            if (input.geometry == nullptr) {
+                if (input.pipeline->has_value()) {
+                    if (!validateAiSplineDepth(**input.pipeline, input.kind,
+                                               result.diagnostic)) {
+                        result.status = WorkspaceViewportStatus::invalid;
+                        return result;
+                    }
+                    ai_spline_passes[pass_index].pipeline = **input.pipeline;
+                }
+                continue;
+            }
+            const WorkspaceAiSplineGeometry &geometry = *input.geometry;
+            if (!validateAiSplineGeometry(geometry, input.kind,
+                                          request.ai_spline_geometry,
+                                          result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
+                return result;
+            }
+            const render::PipelineProgram &pipeline = **input.pipeline;
+            if (!validateAiSplineDepth(pipeline, input.kind,
+                                       result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
+                return result;
+            }
+            if (!geometry.vertices.empty()) {
+                render::BufferDescription description;
+                description.size_bytes = geometry.vertices.size() *
+                                         sizeof(render::OverlayLineVertex);
+                description.usage = render::BufferUsage::vertex;
+                description.memory = render::BufferMemory::host_visible;
+                description.mutability = render::BufferMutability::immutable;
+                auto buffer = device.create_buffer(
+                    description, std::as_bytes(std::span(geometry.vertices)));
+                if (!buffer.ok()) {
+                    result.status =
+                        buffer.status == render::BufferStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                        : buffer.status ==
+                                render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(buffer.diagnostic);
+                    return result;
+                }
+                std::array<render::OverlayLineDrawRequest,
+                           render::max_overlay_line_draws>
+                    draws{};
+                for (std::size_t index = 0U; index < geometry.chunks.size();
+                     ++index) {
+                    draws[index].pipeline = &pipeline;
+                    draws[index].vertex_buffer = buffer.buffer.get();
+                    draws[index].vertex_offset_bytes =
+                        static_cast<std::uint64_t>(
+                            geometry.chunks[index].first_vertex) *
+                        sizeof(render::OverlayLineVertex);
+                    draws[index].vertex_count =
+                        geometry.chunks[index].vertex_count;
+                    draws[index].scene_position = 0U;
+                }
+                render::IndexedStaticMeshBatchDescription batch;
+                batch.depth_attachment = depth.attachment.get();
+                batch.capture_rgba8 = false;
+                batch.overlay_draws =
+                    std::span<const render::OverlayLineDrawRequest>(draws)
+                        .first(geometry.chunks.size());
+                render::Diagnostic overlay_diagnostic;
+                const auto validation =
+                    render::validate_indexed_static_mesh_batch_description(
+                        *color.texture, batch, overlay_diagnostic);
+                if (validation != render::IndexedStaticMeshBatchStatus::ready) {
+                    result.status =
+                        validation == render::IndexedStaticMeshBatchStatus::
+                                          unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(overlay_diagnostic);
+                    return result;
+                }
+                ai_spline_passes[pass_index].buffer = std::move(buffer.buffer);
+            }
+            ai_spline_passes[pass_index].pipeline = pipeline;
+            ai_spline_passes[pass_index].chunks = geometry.chunks;
+        }
+        if (request.grid_visible &&
+            !request.authoring_overlay_pipeline.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_grid_pipeline_missing",
+                "A visible authoring grid requires an overlay pipeline");
+            return result;
+        }
+        if (request.view_axis_visible &&
+            !request.authoring_overlay_pipeline.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_view_axis_pipeline_missing",
+                "A visible view axis requires an overlay pipeline");
+            return result;
+        }
+        if (request.skeleton_overlay.has_value() &&
+            !request.authoring_overlay_pipeline.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_skeleton_pipeline_missing",
+                "A prepared skeleton overlay requires an overlay pipeline");
+            return result;
+        }
+        if (request.authoring_overlay_pipeline.has_value()) {
+            const auto selected = request.packets.selected_node;
+            if (!request.grid_visible && !request.view_axis_visible &&
+                !selection_axis_requested && !request.skeleton_overlay.has_value()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selection_axis_node_invalid",
+                    "An authoring-overlay pipeline requires a view axis, grid, or selected node");
+                return result;
+            }
+            if (request.skeleton_overlay.has_value() &&
+                !validateSkeletonOverlayDepth(
+                    *request.authoring_overlay_pipeline, result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
+                return result;
+            }
+            if (selection_axis_requested &&
+                static_cast<std::size_t>(selected) >=
+                    document.scene.snapshot.nodes.size()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_selection_axis_node_invalid",
+                    "An authoring-overlay pipeline received an invalid selected node");
+                return result;
+            }
+
+            const auto create_overlay_buffer = [&device, &result](
+                std::span<const std::byte> bytes,
+                render::BufferMutability mutability,
+                std::unique_ptr<render::Buffer>& output) {
+                render::BufferDescription description;
+                description.size_bytes = bytes.size();
+                description.usage = render::BufferUsage::vertex;
+                description.memory = render::BufferMemory::host_visible;
+                description.mutability = mutability;
+                auto buffer = device.create_buffer(description, bytes);
+                if (!buffer.ok()) {
+                    result.status =
+                        buffer.status == render::BufferStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                        : buffer.status == render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(buffer.diagnostic);
+                    return false;
+                }
+                output = std::move(buffer.buffer);
+                return true;
+            };
+
+            const auto grid = render::build_authoring_grid();
+            if (request.grid_visible &&
+                !create_overlay_buffer(
+                    std::as_bytes(std::span(grid)),
+                    render::BufferMutability::immutable,
+                    authoring_grid_buffer))
+                return result;
+
+            const auto view_axis = render::build_view_axis();
+            if (request.view_axis_visible &&
+                !create_overlay_buffer(
+                    std::as_bytes(std::span(view_axis)),
+                    render::BufferMutability::immutable,
+                    view_axis_buffer))
+                return result;
+
+            std::array<render::OverlayLineVertex, 6U> axis_vertices{};
+            if (selection_axis_requested) {
+                selection_axis_world = document.scene.snapshot.nodes[
+                    static_cast<std::size_t>(selected)].transform;
+                const auto axis =
+                    render::build_selection_axis(*selection_axis_world);
+                if (!axis.ok()) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = axis.diagnostic;
+                    return result;
+                }
+                axis_vertices = axis.vertices;
+                if (!create_overlay_buffer(
+                        std::as_bytes(std::span(axis_vertices)),
+                        render::BufferMutability::mutable_data,
+                        selection_axis_buffer))
+                    return result;
+            }
+
+            if (request.skeleton_overlay.has_value()) {
+                WorkspaceViewport::SkeletonOverlayResources resources;
+                resources.visible = request.skeleton_overlay->visible;
+                resources.vertex_count = static_cast<std::uint32_t>(
+                    skeleton_geometry->vertices.size());
+                resources.node_count = document.scene.snapshot.nodes.size();
+                if (!skeleton_geometry->vertices.empty() &&
+                    !create_overlay_buffer(
+                        std::as_bytes(
+                            std::span(skeleton_geometry->vertices)),
+                        render::BufferMutability::mutable_data,
+                        resources.vertex_buffer))
+                    return result;
+                resources.vertices = std::move(skeleton_geometry->vertices);
+                resources.staging_vertices = resources.vertices;
+                resources.position_sources =
+                    std::move(skeleton_geometry->position_sources);
+                skeleton_overlay = std::move(resources);
+            }
+
+            std::array<render::OverlayLineDrawRequest, 4U> overlay_draws{};
+            std::size_t overlay_count = 0U;
+            if (view_axis_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = view_axis_buffer.get();
+                draw.vertex_count =
+                    static_cast<std::uint32_t>(view_axis.size());
+                draw.scene_position = 0U;
+            }
+            if (authoring_grid_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = authoring_grid_buffer.get();
+                draw.vertex_count = static_cast<std::uint32_t>(grid.size());
+            }
+            if (skeleton_overlay.has_value() &&
+                skeleton_overlay->vertex_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = skeleton_overlay->vertex_buffer.get();
+                draw.vertex_count = skeleton_overlay->vertex_count;
+            }
+            if (selection_axis_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = selection_axis_buffer.get();
+                draw.vertex_count =
+                    static_cast<std::uint32_t>(axis_vertices.size());
+            }
+            render::IndexedStaticMeshBatchDescription overlay_batch;
+            overlay_batch.depth_attachment = depth.attachment.get();
+            overlay_batch.capture_rgba8 = false;
+            overlay_batch.overlay_draws =
+                std::span<const render::OverlayLineDrawRequest>(overlay_draws)
+                    .first(overlay_count);
+            render::Diagnostic overlay_diagnostic;
+            const auto overlay_validation =
+                render::validate_indexed_static_mesh_batch_description(
+                    *color.texture, overlay_batch, overlay_diagnostic);
+            if (overlay_validation !=
+                render::IndexedStaticMeshBatchStatus::ready) {
+                result.status =
+                    overlay_validation ==
+                            render::IndexedStaticMeshBatchStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(overlay_diagnostic);
+                return result;
+            }
+            authoring_overlay_pipeline =
+                *request.authoring_overlay_pipeline;
+        }
+
+        result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
+            &device, device.info().backend, request.presentation,
+            std::move(color.texture),
+            std::move(resolved_color), std::move(tone_mapped_color),
+            std::move(fxaa_color), request.hdr_tone_map,
+            request.hdr_exposure_mode, request.sky_enabled, request.fxaa_enabled,
+            std::move(depth.attachment),
+            std::move(execution),
+            std::move(authoring_overlay_pipeline),
+            std::move(ai_spline_passes),
+            request.ai_spline_generation,
+            std::move(authoring_grid_buffer), request.grid_visible,
+            std::move(view_axis_buffer), request.view_axis_visible,
+            std::move(selection_axis_buffer),
+            std::move(selection_axis_world),
+            std::move(selected_mesh_pipeline),
+            std::move(selected_mesh_color_buffer),
+            std::move(shadow_maps), std::move(directional_shadows),
+            std::move(portable_clouds),
+            std::move(portable_grass),
+            std::move(skeleton_overlay),
+            std::move(reflection_capture),
+            std::move(frame_catalog)));
+        result.viewport->frame_border_ = std::move(frame_border);
+        result.status = WorkspaceViewportStatus::ready;
+        return result;
+    } catch (const workspace::WorkspaceError& error) {
+        result.status = WorkspaceViewportStatus::invalid;
+        result.diagnostic = {error.code(), error.what()};
+        return result;
+    } catch (const std::bad_alloc&) {
+        result.status = WorkspaceViewportStatus::allocation_failed;
+        result.diagnostic = diagnostic(
+            "workspace_viewport_allocation_failed",
+            "workspace viewport preparation exceeded available allocation capacity");
+        return result;
+    } catch (const std::exception& error) {
+        result.status = WorkspaceViewportStatus::invalid;
+        result.diagnostic = {"workspace_viewport_prepare_failed", error.what()};
+        return result;
+    }
+}
+
+WorkspaceViewportPrepareResult prepareWorkspaceViewport(
+    render::Device& device, const FbxPreviewDocumentResult& document,
+    const WorkspaceViewportPrepareRequest& request) {
+    if (!document.gpu_renderable()) {
+        WorkspaceViewportPrepareResult result;
+        result.status = document.status == FbxPreviewDocumentStatus::staged
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+        result.diagnostic = diagnostic(
+            document.status == FbxPreviewDocumentStatus::staged
+                ? "fbx_preview_document_staged"
+                : "fbx_preview_document_invalid",
+            document.status == FbxPreviewDocumentStatus::staged
+                ? "Staged FBX source behavior or resources cannot enter a GPU backend"
+                : "FBX preview document is not ready");
+        return result;
+    }
+    return prepareWorkspaceViewport(device, *document.document, request);
+}
+
+}  // namespace apex::app

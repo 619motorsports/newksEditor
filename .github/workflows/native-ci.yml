@@ -1,0 +1,78 @@
+name: Native C++ CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    name: JavaScript tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository fixtures
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run JavaScript tests
+        run: npm run test:ci
+
+  native:
+    name: Native (${{ matrix.name }})
+    needs: javascript
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            preset: ci-linux
+          - name: Windows
+            os: windows-latest
+            preset: ci-windows
+          - name: macOS
+            os: macos-latest
+            preset: ci-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository fixtures
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Install Linux Vulkan software stack
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build libvulkan-dev mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+
+      - name: Select MSVC toolchain
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Show available Vulkan devices
+        if: runner.os == 'Linux'
+        shell: bash
+        run: vulkaninfo --summary || true
+
+      - name: Configure native build
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build native tests
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Run native unit, malformed-input, and backend tests
+        run: ctest --preset ${{ matrix.preset }}

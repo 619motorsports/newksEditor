@@ -1,6 +1,13 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
+# Shader identity tests hash the checked-out source bytes. Keep their line
+# endings stable even when Git is configured to use CRLF on Windows.
+*.comp text eol=lf
+*.frag text eol=lf
+*.hlsl text eol=lf
+*.vert text eol=lf
+
 # Keep the production-sized test assets out of normal Git object storage.
 test/content/**/*.kn5 filter=lfs diff=lfs merge=lfs -text
 test/content/**/*.ksanim filter=lfs diff=lfs merge=lfs -text
