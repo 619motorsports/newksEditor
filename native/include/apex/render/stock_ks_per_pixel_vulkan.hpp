@@ -136,9 +136,10 @@ create_builtin_stock_ks_per_pixel_vulkan_source_program(
     StockKsPerPixelVariant variant);
 
 // Specializes the immutable owner for one production render pass. Supported
-// color targets are RGBA8/BGRA8, linear or sRGB. Base accepts 1x or 4x;
-// alpha-to-coverage requires 4x. An optional depth target must be D32 with the
-// same sample count. Unsupported contracts return target_contract_mismatch.
+// Color targets are linear RGBA16F or RGBA8/BGRA8, linear or sRGB. Base
+// accepts 1x or 4x; alpha-to-coverage requires 4x. An optional depth target
+// must be D32 with the same sample count. Unsupported contracts return
+// target_contract_mismatch.
 [[nodiscard]] StockKsPerPixelVulkanSourceProgramResult
 create_builtin_stock_ks_per_pixel_vulkan_source_program(
     StockKsPerPixelVariant variant, PipelineRenderTargets targets);

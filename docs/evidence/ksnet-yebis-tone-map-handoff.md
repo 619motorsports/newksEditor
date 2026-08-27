@@ -32,6 +32,42 @@ it calls `CameraForwardYebis::applyPostProcessing` at `0x100159a0`.
 
 The function calls `ApplyEffects` after it supplies both resources.
 
+## Stock material scene target
+
+`CameraForwardYebis::initRenderTargets` at `0x1001a140` creates the main
+scene target. Its color format is `eR16G16B16A16_MS`.
+
+`RenderTarget::RenderTarget` at `0x10064b05` applies the configured sample
+count to this target. A one-sample target uses `eR16G16B16A16`.
+
+`kglCreateRenderTarget` at `0x1000ce30` maps both color types to
+`DXGI_FORMAT_R16G16B16A16_FLOAT`. The multisample type also uses the configured
+sample count.
+
+`CameraForwardYebis::renderApplyEffect` binds the float color and depth
+targets. Then it starts the main pass and calls the scene-render callback.
+
+`Node::render` at `0x1003f5dc` traverses the active scene nodes. `Mesh::render`
+at `0x100494ff` binds the geometry and commits the selected material shader.
+
+`MaterialFilter::apply` at `0x10064fa2` calls `Material::apply` at
+`0x1004016e`. This function does not replace the bound scene target.
+
+`KN5IO::loadMaterialsBinary` at `0x1003b9de` reads each serialized shader
+name. It gives that name to `Material::setShader`.
+
+Thus, a `ksPerPixel` material draws with the stock shader into the active
+RGBA16F scene target. The material path does not select an RGBA8 target.
+
+The installed `ksPerPixel_ps.fxo` declares one `float4` output at `o0`. The
+shader does not declare a render-target format or an output conversion.
+
+When multisampling is active, `renderApplyEffect` resolves the scene color at
+`0x1001ae68`. The resolve format is `DXGI_FORMAT_R16G16B16A16_FLOAT`.
+
+When the sample count is one, the resolved color aliases the scene color.
+`applyPostProcessing` then gives the one-sample float image to Yebis.
+
 ## Frame parameters
 
 `CameraForwardYebis::setPostProcessing` at `0x10014d00` supplies the frame

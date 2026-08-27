@@ -107,6 +107,7 @@ classify_d3d12_stock_ks_per_pixel_failure(std::string_view code) noexcept {
     return D3D12StockKsPerPixelFailureKind::invalid_request;
   }
   if (code == "d3d12_stock_native_batch_target_format_unsupported" ||
+      code == "d3d12_stock_native_batch_readback_format_unsupported" ||
       code == "d3d12_stock_native_batch_target_samples_invalid" ||
       code == "d3d12_stock_native_batch_pipeline_unsupported" ||
       code == "indexed_stock_native_batch_type_unsupported" ||

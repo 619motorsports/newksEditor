@@ -120,7 +120,8 @@ bool supported_color_format(PipelineRenderTargetFormat format) noexcept {
     return format == PipelineRenderTargetFormat::rgba8_unorm ||
            format == PipelineRenderTargetFormat::rgba8_srgb ||
            format == PipelineRenderTargetFormat::bgra8_unorm ||
-           format == PipelineRenderTargetFormat::bgra8_srgb;
+           format == PipelineRenderTargetFormat::bgra8_srgb ||
+           format == PipelineRenderTargetFormat::rgba16_float;
 }
 
 bool supported_targets(const PipelineRenderTargets& targets,

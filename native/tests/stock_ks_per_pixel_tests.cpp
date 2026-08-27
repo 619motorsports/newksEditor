@@ -1790,12 +1790,13 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
                 draw_limit_device.sampler_calls == 0U,
             "native draw-count limits reject before backend allocation");
 
-    constexpr std::array<PipelineRenderTargetFormat, 4U>
+    constexpr std::array<PipelineRenderTargetFormat, 5U>
         supported_native_formats = {
             PipelineRenderTargetFormat::rgba8_unorm,
             PipelineRenderTargetFormat::rgba8_srgb,
             PipelineRenderTargetFormat::bgra8_unorm,
-            PipelineRenderTargetFormat::bgra8_srgb};
+            PipelineRenderTargetFormat::bgra8_srgb,
+            PipelineRenderTargetFormat::rgba16_float};
     for (const PipelineRenderTargetFormat format :
          supported_native_formats) {
         FakeShaderDevice format_device(Backend::D3D12);
@@ -1804,12 +1805,12 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
         const auto accepted = prepare_stock_material_execution(
             format_device, format_request);
         require(accepted.ok() && format_device.shader_calls == 4U,
-                "native static scene accepts one-sample RGBA8 and BGRA8 targets");
+                "native static scene accepts one-sample LDR and RGBA16F targets");
     }
     FakeShaderDevice unsupported_format_device(Backend::D3D12);
     auto unsupported_format_request = request;
     unsupported_format_request.targets.colors.front().format =
-        PipelineRenderTargetFormat::rgba16_float;
+        PipelineRenderTargetFormat::unknown;
     const auto unsupported_format = prepare_stock_material_execution(
         unsupported_format_device, unsupported_format_request);
     require(!unsupported_format.ok() &&
@@ -3190,6 +3191,11 @@ void classifies_native_bridge_failures() {
             "d3d12_stock_native_batch_target_format_unsupported") ==
             D3D12StockKsPerPixelFailureKind::unsupported,
         "native batch unsupported target format is unsupported");
+    require(
+        classify_d3d12_stock_ks_per_pixel_failure(
+            "d3d12_stock_native_batch_readback_format_unsupported") ==
+            D3D12StockKsPerPixelFailureKind::unsupported,
+        "native batch unsupported readback format is unsupported");
     require(
         classify_d3d12_stock_ks_per_pixel_failure(
             "d3d12_stock_native_batch_submit_undrained") ==

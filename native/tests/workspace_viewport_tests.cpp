@@ -1903,7 +1903,7 @@ void draws_opt_in_hdr_viewport_before_presentation() {
     }
 }
 
-void rejects_invalid_or_unsupported_viewport_hdr_requests() {
+void rejects_invalid_viewport_hdr_requests() {
     auto value = fixture();
     auto request = request_for(value);
     FakeDevice device;
@@ -1937,40 +1937,69 @@ void rejects_invalid_or_unsupported_viewport_hdr_requests() {
                 invalid_device.texture_calls == 0U,
             "invalid HDR parameters fail before texture allocation");
 
-    request = request_for(value);
+}
+
+void draws_builtin_vulkan_source_through_hdr_tone_map() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.shader_modules = {};
+    request.color_samples = 4U;
     request.hdr_tone_map = HdrToneMapParameters{};
     request.builtin_vulkan_source =
         BuiltinVulkanStockSourceSelector::ks_per_pixel;
-    FakeDevice stock_device;
-    auto stock = apex::app::prepareWorkspaceViewport(
-        stock_device, value.document, request);
-    require(!stock.ok() &&
-                stock.status == apex::app::WorkspaceViewportStatus::unsupported &&
-                stock.diagnostic.code ==
-                    "workspace_viewport_hdr_stock_program_unsupported" &&
-                stock_device.texture_calls == 0U &&
-                stock_device.draw_calls == 0U &&
-                stock_device.tone_map_calls == 0U &&
-                stock_device.present_calls == 0U,
-            "HDR viewport rejects the retained stock shader contract");
+    request.directional_shadows =
+        apex::app::WorkspaceViewportDirectionalShadowOptions{};
+    request.directional_shadows->maps.lighting.map_size = 32U;
+    request.directional_shadows->opaque_pipeline =
+        opaque_shadow_pipeline(value);
 
-    request = request_for(value);
-    request.hdr_tone_map = HdrToneMapParameters{};
-    request.builtin_d3d12_native =
-        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
-    FakeDevice d3d_stock_device(Backend::D3D12);
-    auto d3d_stock = apex::app::prepareWorkspaceViewport(
-        d3d_stock_device, value.document, request);
-    require(!d3d_stock.ok() &&
-                d3d_stock.status ==
-                    apex::app::WorkspaceViewportStatus::unsupported &&
-                d3d_stock.diagnostic.code ==
-                    "workspace_viewport_hdr_stock_program_unsupported" &&
-                d3d_stock_device.texture_calls == 0U &&
-                d3d_stock_device.draw_calls == 0U &&
-                d3d_stock_device.tone_map_calls == 0U &&
-                d3d_stock_device.present_calls == 0U,
-            "HDR viewport rejects the installed D3D12 shader contract");
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    if (!prepared.ok())
+        throw std::runtime_error("HDR stock source preparation: " +
+                                 prepared.diagnostic.code);
+    require(prepared.viewport->preparation().resources != nullptr &&
+                prepared.viewport->preparation().resources
+                        ->stock_vulkan_source_program_count() == 1U,
+            "HDR viewport retains the Vulkan source owner");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    const auto evaluated = apex::app::evaluateWorkspaceViewportLighting({});
+    require(evaluated.ok(), "HDR stock source weather evaluates");
+    const auto native_lighting =
+        apex::app::buildWorkspaceViewportStockVulkanSourceLighting(
+            evaluated.evaluated, request.presentation.width,
+            request.presentation.height);
+    require(native_lighting.has_value(), "HDR stock source lighting builds");
+    frame.frame_constants = evaluated.frame_constants;
+    frame.stock_vulkan_source_frame =
+        apex::app::buildWorkspaceViewportStockVulkanSourceFrame(
+            frame.camera, *native_lighting);
+    Diagnostic diagnostic;
+    const auto status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    if (status != WorkspaceViewportFrameStatus::ready)
+        throw std::runtime_error("HDR stock source draw: " + diagnostic.code);
+    require(device.events == std::vector<std::string>(
+                {"shadow", "shadow", "shadow", "color", "tone_map",
+                 "present"}) &&
+                device.draw_targets.size() == 1U &&
+                device.draw_targets.front()->info().description.format ==
+                    TextureFormat::rgba16_sfloat &&
+                device.resolve_targets.size() == 1U &&
+                device.resolve_targets.front() != nullptr &&
+                device.resolve_targets.front()->info().description.format ==
+                    TextureFormat::rgba16_sfloat &&
+                device.tone_map_sources == device.resolve_targets &&
+                device.tone_map_destinations.size() == 1U &&
+                device.tone_map_destinations.front()->info()
+                        .description.format == request.presentation.format &&
+                device.presented_textures ==
+                    device.tone_map_destinations,
+            "retained Vulkan stock rendering resolves RGBA16F before tone mapping");
 }
 
 void draws_selected_axis_inside_the_scene_batch() {
@@ -6563,7 +6592,8 @@ int main() {
         rejects_invalid_portable_reflection_capture_options_before_allocation();
         draws_four_sample_viewport_through_retained_resolve();
         draws_opt_in_hdr_viewport_before_presentation();
-        rejects_invalid_or_unsupported_viewport_hdr_requests();
+        rejects_invalid_viewport_hdr_requests();
+        draws_builtin_vulkan_source_through_hdr_tone_map();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();

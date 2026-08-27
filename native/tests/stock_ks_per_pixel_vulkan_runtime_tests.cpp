@@ -551,6 +551,107 @@ int run_runtime_probe() {
                 production_draw.rgba8[center + 2U] != std::byte{0},
             "mixed base/AT production-format Vulkan source batch renders");
 
+    TextureDescription hdr_target_description = target_description;
+    hdr_target_description.format = TextureFormat::rgba16_sfloat;
+    hdr_target_description.usage = TextureUsage::sampled |
+                                   TextureUsage::color_attachment |
+                                   TextureUsage::transfer_source;
+    hdr_target_description.access_policy =
+        TextureAccessPolicy::render_then_sample;
+    TextureResult hdr_target = device.create_texture(hdr_target_description);
+    require(hdr_target.ok(), "Vulkan one-sample RGBA16F target creation");
+    PipelineRenderTargets hdr_targets;
+    hdr_targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba16_float, 1U});
+    StockKsPerPixelVulkanSourceProgramResult hdr_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base, hdr_targets);
+    require(hdr_program.ok(), "Vulkan one-sample RGBA16F owner creation");
+    StockKsPerPixelVulkanSourceDrawBinding hdr_binding = source_binding;
+    hdr_binding.program = &*hdr_program.program;
+    IndexedStaticMeshDrawRequest hdr_request = source_request;
+    hdr_request.pipeline = &hdr_program.program->pipeline();
+    hdr_request.stock_ks_per_pixel_vulkan_source = &hdr_binding;
+    const std::array hdr_requests = {hdr_request};
+    IndexedStaticMeshBatchDescription hdr_batch;
+    hdr_batch.draws = hdr_requests;
+    hdr_batch.capture_rgba8 = false;
+    const IndexedStaticMeshBatchResult hdr_draw =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *hdr_target.texture, hdr_batch);
+    require(hdr_draw.ok() && hdr_draw.rgba8.empty(),
+            hdr_draw.diagnostic.code.empty()
+                ? "Vulkan one-sample RGBA16F stock batch"
+                : hdr_draw.diagnostic.code);
+
+    TextureDescription display_description = target_description;
+    TextureResult display_target = device.create_texture(display_description);
+    require(display_target.ok(), "Vulkan HDR display target creation");
+    const HdrToneMapResult one_sample_tone_map =
+        device.tone_map_hdr_texture(*hdr_target.texture,
+                                    *display_target.texture);
+    require(one_sample_tone_map.ok(),
+            one_sample_tone_map.diagnostic.code.empty()
+                ? "Vulkan one-sample stock HDR tone map"
+                : one_sample_tone_map.diagnostic.code);
+
+    TextureDescription hdr_msaa_description = hdr_target_description;
+    hdr_msaa_description.samples = 4U;
+    hdr_msaa_description.usage = TextureUsage::color_attachment |
+                                 TextureUsage::transfer_source;
+    hdr_msaa_description.access_policy = TextureAccessPolicy::fixed_usage;
+    TextureResult hdr_msaa = device.create_texture(hdr_msaa_description);
+    TextureResult hdr_resolve = device.create_texture(hdr_target_description);
+    require(hdr_msaa.ok() && hdr_resolve.ok(),
+            "Vulkan four-sample RGBA16F scene and resolve targets");
+    PipelineRenderTargets hdr_msaa_targets;
+    hdr_msaa_targets.colors.push_back(
+        {PipelineRenderTargetFormat::rgba16_float, 4U});
+    StockKsPerPixelVulkanSourceProgramResult hdr_msaa_base_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::base, hdr_msaa_targets);
+    StockKsPerPixelVulkanSourceProgramResult hdr_msaa_alpha_program =
+        create_builtin_stock_ks_per_pixel_vulkan_source_program(
+            StockKsPerPixelVariant::alpha_to_coverage, hdr_msaa_targets);
+    require(hdr_msaa_base_program.ok() && hdr_msaa_alpha_program.ok(),
+            "Vulkan four-sample RGBA16F owner creation");
+    StockKsPerPixelVulkanSourceDrawBinding hdr_msaa_base_binding =
+        source_binding;
+    hdr_msaa_base_binding.program = &*hdr_msaa_base_program.program;
+    StockKsPerPixelVulkanSourceDrawBinding hdr_msaa_alpha_binding =
+        source_binding;
+    hdr_msaa_alpha_binding.program = &*hdr_msaa_alpha_program.program;
+    IndexedStaticMeshDrawRequest hdr_msaa_base_request = source_request;
+    hdr_msaa_base_request.pipeline =
+        &hdr_msaa_base_program.program->pipeline();
+    hdr_msaa_base_request.stock_ks_per_pixel_vulkan_source =
+        &hdr_msaa_base_binding;
+    IndexedStaticMeshDrawRequest hdr_msaa_alpha_request = alpha_request;
+    hdr_msaa_alpha_request.pipeline =
+        &hdr_msaa_alpha_program.program->pipeline();
+    hdr_msaa_alpha_request.stock_ks_per_pixel_vulkan_source =
+        &hdr_msaa_alpha_binding;
+    const std::array hdr_msaa_requests = {
+        hdr_msaa_base_request, hdr_msaa_alpha_request};
+    IndexedStaticMeshBatchDescription hdr_msaa_batch;
+    hdr_msaa_batch.draws = hdr_msaa_requests;
+    hdr_msaa_batch.resolve_target = hdr_resolve.texture.get();
+    hdr_msaa_batch.capture_rgba8 = false;
+    const IndexedStaticMeshBatchResult hdr_msaa_draw =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *hdr_msaa.texture, hdr_msaa_batch);
+    require(hdr_msaa_draw.ok() && hdr_msaa_draw.rgba8.empty(),
+            hdr_msaa_draw.diagnostic.code.empty()
+                ? "Vulkan four-sample RGBA16F stock batch and resolve"
+                : hdr_msaa_draw.diagnostic.code);
+    const HdrToneMapResult resolved_tone_map =
+        device.tone_map_hdr_texture(*hdr_resolve.texture,
+                                    *display_target.texture);
+    require(resolved_tone_map.ok(),
+            resolved_tone_map.diagnostic.code.empty()
+                ? "Vulkan resolved stock HDR tone map"
+                : resolved_tone_map.diagnostic.code);
+
     device.wait_idle();
     peer_result.device->wait_idle();
     std::cout << "stock ksPerPixel Vulkan ABI probe and source-equivalent runtime draw passed\n";

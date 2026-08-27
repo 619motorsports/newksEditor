@@ -94,6 +94,15 @@ namespace {
                      format == PipelineShaderFormat::dxil;
 }
 
+[[nodiscard]] bool d3d12_native_scene_color_format(
+    PipelineRenderTargetFormat format) noexcept {
+    return format == PipelineRenderTargetFormat::rgba8_unorm ||
+           format == PipelineRenderTargetFormat::rgba8_srgb ||
+           format == PipelineRenderTargetFormat::bgra8_unorm ||
+           format == PipelineRenderTargetFormat::bgra8_srgb ||
+           format == PipelineRenderTargetFormat::rgba16_float;
+}
+
 [[nodiscard]] const StockMaterialShaderModules* find_modules(
     std::span<const StockMaterialShaderModules> sets, std::string_view material,
     std::string_view shader, StockMaterialShaderVariant variant,
@@ -941,14 +950,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         "Installed D3D12 native execution requires an exact selected opaque solid static ksPerPixel variant");
                 if (use_builtin_d3d12_native &&
                     (request.targets.colors.size() != 1U ||
-                     (request.targets.colors.front().format !=
-                          PipelineRenderTargetFormat::rgba8_unorm &&
-                      request.targets.colors.front().format !=
-                          PipelineRenderTargetFormat::rgba8_srgb &&
-                      request.targets.colors.front().format !=
-                          PipelineRenderTargetFormat::bgra8_unorm &&
-                      request.targets.colors.front().format !=
-                          PipelineRenderTargetFormat::bgra8_srgb) ||
+                     !d3d12_native_scene_color_format(
+                         request.targets.colors.front().format) ||
                      request.targets.colors.front().samples !=
                          ((d3d12_native_alpha_to_coverage ||
                            d3d12_native_combined)
@@ -965,8 +968,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         "stock_material_d3d12_native_target_unsupported",
                         (d3d12_native_alpha_to_coverage ||
                          d3d12_native_combined)
-                            ? "The installed D3D12 alpha-to-coverage or combined slice requires an RGBA8/BGRA8 four-sample color and optional matching depth target"
-                            : "The first installed D3D12 batch slice requires an RGBA8/BGRA8 one-sample color and optional matching depth target");
+                            ? "Installed D3D12 alpha-to-coverage and combined programs require a four-sample RGBA8, BGRA8, or RGBA16F color target and optional matching depth target"
+                            : "The installed D3D12 base program requires a one-sample RGBA8, BGRA8, or RGBA16F color target and optional matching depth target");
                 if (modules == nullptr && !use_builtin_source &&
                     !use_builtin_d3d12_native)
                     return fail(

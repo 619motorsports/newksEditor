@@ -2266,14 +2266,6 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "exclusive");
             return result;
         }
-        if (request.hdr_tone_map.has_value() &&
-            (builtin_vulkan_source || builtin_d3d12_native)) {
-            result.status = WorkspaceViewportStatus::unsupported;
-            result.diagnostic = diagnostic(
-                "workspace_viewport_hdr_stock_program_unsupported",
-                "The portable HDR viewport does not support retained stock shader packages");
-            return result;
-        }
         if (request.hdr_tone_map.has_value()) {
             render::Diagnostic parameter_diagnostic;
             if (render::validate_hdr_tone_map_parameters(

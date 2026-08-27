@@ -590,6 +590,102 @@ apex::formats::Kn5Node triangle_mesh() {
           retained_alpha_batch.diagnostic.code.empty()
               ? "native ksPerPixel A2C batch retains its resolve without CPU capture"
               : retained_alpha_batch.diagnostic.code);
+
+  TextureDescription hdr_description = target_description;
+  hdr_description.format = TextureFormat::rgba16_sfloat;
+  hdr_description.usage = TextureUsage::sampled |
+                          TextureUsage::color_attachment |
+                          TextureUsage::transfer_source;
+  hdr_description.access_policy = TextureAccessPolicy::render_then_sample;
+  TextureResult hdr_target =
+      device_result.device->create_texture(hdr_description);
+  require(hdr_target.ok(), "native one-sample RGBA16F target allocation");
+  PipelineProgram hdr_pipeline = native_pipeline();
+  hdr_pipeline.targets.colors[0].format =
+      PipelineRenderTargetFormat::rgba16_float;
+  IndexedStaticMeshDrawRequest hdr_request =
+      mesh_upload.upload->make_request(hdr_pipeline, *camera.frame);
+  hdr_request.shader_authority =
+      IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+  hdr_request.stock_ks_per_pixel_native = &binding;
+  const std::array<IndexedStaticMeshDrawRequest, 1U> hdr_requests = {
+      hdr_request};
+  IndexedStaticMeshBatchDescription hdr_batch;
+  hdr_batch.draws = hdr_requests;
+  hdr_batch.capture_rgba8 = false;
+  const IndexedStaticMeshBatchResult hdr_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *hdr_target.texture, hdr_batch);
+  require(hdr_draw.ok() && hdr_draw.rgba8.empty(),
+          hdr_draw.diagnostic.code.empty()
+              ? "native one-sample RGBA16F WARP batch"
+              : hdr_draw.diagnostic.code);
+  auto hdr_capture_batch = hdr_batch;
+  hdr_capture_batch.capture_rgba8 = true;
+  const IndexedStaticMeshBatchResult hdr_capture =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *hdr_target.texture, hdr_capture_batch);
+  require(!hdr_capture.ok() &&
+              hdr_capture.status == IndexedStaticMeshBatchStatus::unsupported &&
+              hdr_capture.rgba8.empty(),
+          "native RGBA16F batch rejects RGBA8 CPU capture");
+
+  TextureDescription hdr_msaa_description = hdr_description;
+  hdr_msaa_description.samples = 4U;
+  hdr_msaa_description.usage = TextureUsage::color_attachment |
+                               TextureUsage::transfer_source;
+  hdr_msaa_description.access_policy = TextureAccessPolicy::fixed_usage;
+  TextureResult hdr_msaa =
+      device_result.device->create_texture(hdr_msaa_description);
+  TextureResult hdr_resolve =
+      device_result.device->create_texture(hdr_description);
+  require(hdr_msaa.ok() && hdr_resolve.ok(),
+          "native four-sample RGBA16F scene and resolve allocation");
+  PipelineProgram hdr_base_msaa_pipeline = base_multisample_pipeline;
+  hdr_base_msaa_pipeline.targets.colors[0].format =
+      PipelineRenderTargetFormat::rgba16_float;
+  PipelineProgram hdr_alpha_pipeline = alpha_pipeline;
+  hdr_alpha_pipeline.targets.colors[0].format =
+      PipelineRenderTargetFormat::rgba16_float;
+  IndexedStaticMeshDrawRequest hdr_base_msaa_request =
+      mesh_upload.upload->make_request(hdr_base_msaa_pipeline,
+                                       *camera.frame);
+  hdr_base_msaa_request.shader_authority =
+      IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+  hdr_base_msaa_request.stock_ks_per_pixel_native = &binding;
+  IndexedStaticMeshDrawRequest hdr_alpha_request =
+      alpha_mesh_upload.upload->make_request(hdr_alpha_pipeline,
+                                             *camera.frame);
+  hdr_alpha_request.shader_authority =
+      IndexedShaderAuthority::explicit_stock_ks_per_pixel_native;
+  hdr_alpha_request.stock_ks_per_pixel_native = &alpha_binding;
+  const std::array<IndexedStaticMeshDrawRequest, 2U> hdr_msaa_requests = {
+      hdr_base_msaa_request, hdr_alpha_request};
+  IndexedStaticMeshBatchDescription hdr_msaa_batch;
+  hdr_msaa_batch.draws = hdr_msaa_requests;
+  hdr_msaa_batch.resolve_target = hdr_resolve.texture.get();
+  hdr_msaa_batch.capture_rgba8 = false;
+  const IndexedStaticMeshBatchResult hdr_msaa_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *hdr_msaa.texture, hdr_msaa_batch);
+  require(hdr_msaa_draw.ok() && hdr_msaa_draw.rgba8.empty(),
+          hdr_msaa_draw.diagnostic.code.empty()
+              ? "mixed native four-sample RGBA16F WARP batch and resolve"
+              : hdr_msaa_draw.diagnostic.code);
+
+  TextureResult hdr_display =
+      device_result.device->create_texture(target_description);
+  require(hdr_display.ok(), "native HDR tone-map destination allocation");
+  const HdrToneMapResult base_tone_map =
+      device_result.device->tone_map_hdr_texture(
+          *hdr_target.texture, *hdr_display.texture);
+  const HdrToneMapResult resolved_tone_map =
+      device_result.device->tone_map_hdr_texture(
+          *hdr_resolve.texture, *hdr_display.texture);
+  require(base_tone_map.ok() && resolved_tone_map.ok(),
+          resolved_tone_map.diagnostic.code.empty()
+              ? "native WARP RGBA16F targets feed the tone-map pass"
+              : resolved_tone_map.diagnostic.code);
   device_result.device->wait_idle();
   return 0;
 }

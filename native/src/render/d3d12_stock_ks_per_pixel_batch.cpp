@@ -122,6 +122,8 @@ bool target_format_matches(PipelineRenderTargetFormat format,
     return dxgi == DXGI_FORMAT_B8G8R8A8_UNORM;
   case PipelineRenderTargetFormat::bgra8_srgb:
     return dxgi == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  case PipelineRenderTargetFormat::rgba16_float:
+    return dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT;
   default:
     return false;
   }
@@ -279,15 +281,17 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
       D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE / sampler_descriptors_per_draw)
     return invalid("d3d12_stock_native_batch_sampler_heap_limit",
                    "Native batch exceeds the shader-visible sampler heap");
+  const std::uint64_t target_bytes_per_pixel =
+      context.target_format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8U : 4U;
   if (context.target_width == 0U || context.target_height == 0U ||
       context.target_width >
           static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
       context.target_height >
           static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
-      context.target_width > std::numeric_limits<std::uint32_t>::max() / 4U ||
-      static_cast<std::uint64_t>(context.target_width) * context.target_height *
-              4U >
-          max_texture_readback_bytes)
+      static_cast<std::uint64_t>(context.target_width) >
+          max_texture_readback_bytes /
+              static_cast<std::uint64_t>(context.target_height) /
+              target_bytes_per_pixel)
     return invalid("d3d12_stock_native_batch_target_invalid",
                    "Native batch target dimensions exceed bounded limits");
   if (context.target_cleared == nullptr)
@@ -307,9 +311,15 @@ bool record_d3d12_stock_ks_per_pixel_native_batch(
   if (context.target_format != DXGI_FORMAT_R8G8B8A8_UNORM &&
       context.target_format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
       context.target_format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-      context.target_format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+      context.target_format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+      context.target_format != DXGI_FORMAT_R16G16B16A16_FLOAT)
     return invalid("d3d12_stock_native_batch_target_format_unsupported",
-                   "Native batch readback requires an RGBA8 or BGRA8 target");
+                   "Native batch rendering requires an RGBA8, BGRA8, or "
+                   "RGBA16F target");
+  if (context.capture_rgba8 &&
+      context.target_format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+    return invalid("d3d12_stock_native_batch_readback_format_unsupported",
+                   "Native RGBA8 readback does not accept an RGBA16F target");
   const D3D12_RESOURCE_DESC target_description = context.target->GetDesc();
   if (target_description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
       target_description.Format != context.target_format ||

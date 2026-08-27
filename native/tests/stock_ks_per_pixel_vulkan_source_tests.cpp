@@ -150,6 +150,7 @@ void acceptsProductionTargetSpecializations() {
         PipelineRenderTargetFormat::rgba8_srgb,
         PipelineRenderTargetFormat::bgra8_unorm,
         PipelineRenderTargetFormat::bgra8_srgb,
+        PipelineRenderTargetFormat::rgba16_float,
     };
     for (PipelineRenderTargetFormat format : color_formats) {
         PipelineRenderTargets targets;
@@ -195,7 +196,7 @@ void rejectsUnsupportedTargetSpecializations() {
                     StockKsPerPixelVulkanSourceStatus::target_contract_mismatch,
             "AT owner rejects a single-sample target");
 
-    targets.colors[0] = {PipelineRenderTargetFormat::rgba16_float, 4U};
+    targets.colors[0] = {PipelineRenderTargetFormat::unknown, 4U};
     result = create_builtin_stock_ks_per_pixel_vulkan_source_program(
         StockKsPerPixelVariant::base, targets);
     require(!result.ok() &&
