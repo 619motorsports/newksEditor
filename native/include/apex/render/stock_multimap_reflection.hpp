@@ -8,8 +8,13 @@
 namespace apex::render {
 
 // These variants describe the four installed stock packages whose reflection
-// arithmetic has been recovered from DXBC. They do not describe the portable
-// bindings used to transport the cube and semantic controls.
+// arithmetic has been recovered from DXBC. Pixel blob SHA-256 identities:
+// base b5cc236cef21d3d01f7a80510e64b7a9a21bf5727c0f5a0b93b6e2fdf1f18a58,
+// AT 0f354b59932a913f9e5e9b9ccbfda4fdeca15d271d07e5e4522f99821c72e8ab,
+// NMDetail 2e45a59c20284802cda77ae02488d0f44aaa8955492767e75dcd0c29b7631222,
+// AT_NMDetail 51fd6d6c1bc4f18c1d978ddde362d09391fd719fac80ca9b347fdb95e743e4d6.
+// These variants do not describe the portable bindings used to transport the
+// cube and semantic controls.
 enum class StockMultiMapReflectionVariant : std::uint8_t {
     base,
     alpha_tested,

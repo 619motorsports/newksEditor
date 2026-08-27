@@ -1,7 +1,12 @@
 #include "apex/render/device.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/stock_multimap_reflection.hpp"
 
+#include "indexed_multimap_reflection_spirv.hpp"
+
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -40,22 +45,95 @@ std::vector<std::uint8_t> shader_bytes(const std::string_view hex) {
   std::vector<std::uint8_t> bytes(hex.size() / 2U);
   for (std::size_t index = 0U; index < bytes.size(); ++index)
     bytes[index] = static_cast<std::uint8_t>(
-        (hex_digit(hex[index * 2U]) << 4U) |
-        hex_digit(hex[index * 2U + 1U]));
+        (hex_digit(hex[index * 2U]) << 4U) | hex_digit(hex[index * 2U + 1U]));
   return bytes;
 }
 
 std::vector<std::uint8_t> reflection_vertex_shader() {
   // Generated from tests/shaders/indexed_multimap_reflection.vert.
   constexpr std::string_view hex =
-      "03022307000001000b000800270000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00070000000000040000006d61696e000000000d0000001d000000470003000b00000002000000480005000b000000000000000b00000000000000480005000b000000010000000b00000001000000480005000b000000020000000b00000003000000480005000b000000030000000b0000000400000047000300110000000200000048000400110000000000000005000000480005001100000000000000070000001000000048000500110000000000000023000000000000004800040011000000010000000500000048000500110000000100000007000000100000004800050011000000010000002300000040000000470004001d0000001e00000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000150004000800000020000000000000002b0004000800000009000000010000001c0004000a00000006000000090000001e0006000b00000007000000060000000a0000000a000000200004000c000000030000000b0000003b0004000c0000000d00000003000000150004000e00000020000000010000002b0004000e0000000f00000000000000180004001000000007000000040000001e000400110000001000000010000000200004001200000009000000110000003b0004001200000013000000090000002b0004000e000000140000000100000020000400150000000900000010000000170004001b0000000600000003000000200004001c000000010000001b0000003b0004001c0000001d000000010000002b000400060000001f0000000000803f200004002500000003000000070000003600050002000000040000000000000003000000f80002000500000041000500150000001600000013000000140000003d000400100000001700000016000000410005001500000018000000130000000f0000003d00040010000000190000001800000092000500100000001a00000017000000190000003d0004001b0000001e0000001d0000005100050006000000200000001e000000000000005100050006000000210000001e000000010000005100050006000000220000001e000000020000005000070007000000230000002000000021000000220000001f0000009100050007000000240000001a000000230000004100050025000000260000000d0000000f0000003e0003002600000024000000fd00010038000100";
+      "03022307000001000b000800270000000000000011000200010000000b00060001000000"
+      "474c534c2e7374642e343530000000000e00030000000000010000000f00070000000000"
+      "040000006d61696e000000000d0000001d000000470003000b0000000200000048000500"
+      "0b000000000000000b00000000000000480005000b000000010000000b00000001000000"
+      "480005000b000000020000000b00000003000000480005000b000000030000000b000000"
+      "040000004700030011000000020000004800040011000000000000000500000048000500"
+      "110000000000000007000000100000004800050011000000000000002300000000000000"
+      "480004001100000001000000050000004800050011000000010000000700000010000000"
+      "4800050011000000010000002300000040000000470004001d0000001e00000000000000"
+      "130002000200000021000300030000000200000016000300060000002000000017000400"
+      "070000000600000004000000150004000800000020000000000000002b00040008000000"
+      "09000000010000001c0004000a00000006000000090000001e0006000b00000007000000"
+      "060000000a0000000a000000200004000c000000030000000b0000003b0004000c000000"
+      "0d00000003000000150004000e00000020000000010000002b0004000e0000000f000000"
+      "00000000180004001000000007000000040000001e000400110000001000000010000000"
+      "200004001200000009000000110000003b0004001200000013000000090000002b000400"
+      "0e000000140000000100000020000400150000000900000010000000170004001b000000"
+      "0600000003000000200004001c000000010000001b0000003b0004001c0000001d000000"
+      "010000002b000400060000001f0000000000803f20000400250000000300000007000000"
+      "3600050002000000040000000000000003000000f8000200050000004100050015000000"
+      "1600000013000000140000003d0004001000000017000000160000004100050015000000"
+      "18000000130000000f0000003d0004001000000019000000180000009200050010000000"
+      "1a00000017000000190000003d0004001b0000001e0000001d0000005100050006000000"
+      "200000001e000000000000005100050006000000210000001e0000000100000051000500"
+      "06000000220000001e000000020000005000070007000000230000002000000021000000"
+      "220000001f0000009100050007000000240000001a000000230000004100050025000000"
+      "260000000d0000000f0000003e0003002600000024000000fd00010038000100";
   return shader_bytes(hex);
 }
 
 std::vector<std::uint8_t> reflection_fragment_shader() {
   // Generated from tests/shaders/indexed_multimap_reflection.frag.
   constexpr std::string_view hex =
-      "03022307000001000b000800220000000000000011000200010000000b00060001000000474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000040000006d61696e000000000900000010000300040000000700000047000400090000001e00000000000000470004000c0000002100000015000000470004000c000000220000000000000047000400100000002100000016000000470004001000000022000000000000004700030019000000020000004800050019000000000000002300000000000000470004001b0000002100000017000000470004001b0000002200000000000000130002000200000021000300030000000200000016000300060000002000000017000400070000000600000004000000200004000800000003000000070000003b000400080000000900000003000000190009000a00000006000000030000000000000000000000000000000100000000000000200004000b000000000000000a0000003b0004000b0000000c000000000000001a0002000e000000200004000f000000000000000e0000003b0004000f00000010000000000000001b000300120000000a000000170004001400000006000000030000002b00040006000000150000000000803f2b0004000600000016000000000000002c00060014000000170000001500000016000000160000001e0003001900000007000000200004001a00000002000000190000003b0004001a0000001b00000002000000150004001c00000020000000010000002b0004001c0000001d00000000000000200004001e00000002000000070000003600050002000000040000000000000003000000f8000200050000003d0004000a0000000d0000000c0000003d0004000e00000011000000100000005600050012000000130000000d000000110000005700050007000000180000001300000017000000410005001e0000001f0000001b0000001d0000003d00040007000000200000001f00000085000500070000002100000018000000200000003e0003000900000021000000fd00010038000100";
+      "03022307000001000b000800960000000000000011000200010000000b00060001000000"
+      "474c534c2e7374642e343530000000000e00030000000000010000000f00060004000000"
+      "040000006d61696e000000006d000000100003000400000007000000470003000a000000"
+      "02000000480005000a000000000000002300000000000000470004000c00000021000000"
+      "17000000470004000c0000002200000000000000470004003b0000002100000015000000"
+      "470004003b0000002200000000000000470004003f000000210000001600000047000400"
+      "3f0000002200000000000000470004006d0000001e000000000000001300020002000000"
+      "210003000300000002000000160003000600000020000000170004000900000006000000"
+      "040000001e0003000a00000009000000200004000b000000020000000a0000003b000400"
+      "0b0000000c00000002000000150004000d00000020000000010000002b0004000d000000"
+      "0e00000000000000150004000f00000020000000000000002b0004000f00000010000000"
+      "03000000200004001100000002000000060000002b000400060000001600000000000040"
+      "14000200170000002b000400060000001d0000000000c0402b000400060000001e000000"
+      "0000803f2b00040006000000230000000000000017000400260000000600000003000000"
+      "2b0004000f0000002c000000000000002b0004000f00000033000000020000002b000400"
+      "0600000038000000cdcc4c3f190009003900000006000000030000000000000000000000"
+      "000000000100000000000000200004003a00000000000000390000003b0004003a000000"
+      "3b000000000000001a0002003d000000200004003e000000000000003d0000003b000400"
+      "3e0000003f000000000000001b0003004100000039000000200004006c00000003000000"
+      "090000003b0004006c0000006d000000030000002b0004000600000074000000cdcc4c3e"
+      "2c00060026000000750000007400000074000000740000002b000400060000008e000000"
+      "0000003f2b000400060000009100000000006fc12c00060026000000920000001e000000"
+      "23000000230000003600050002000000040000000000000003000000f800020005000000"
+      "4100060011000000120000000c0000000e000000100000003d0004000600000013000000"
+      "12000000b400050017000000180000001300000016000000a90006000600000022000000"
+      "18000000910000008e0000000c0008000600000024000000010000002b00000022000000"
+      "230000001e0000008500050006000000250000001d000000240000003d00040039000000"
+      "3c0000003b0000003d0004003d000000400000003f000000560005004100000042000000"
+      "3c0000004000000058000700090000004500000042000000920000000200000025000000"
+      "4f000800260000004600000045000000450000000000000001000000020000008e000500"
+      "26000000470000004600000038000000f900020051000000f80002005100000041000600"
+      "11000000650000000c0000000e0000002c0000003d000400060000006600000065000000"
+      "4100060011000000690000000c0000000e000000330000003d000400060000006a000000"
+      "690000000c000700060000006b0000000100000025000000660000006a000000b4000500"
+      "170000006f000000130000001e000000f70003007300000000000000fa0004006f000000"
+      "720000007e000000f80002007e0000005000060026000000810000006b0000006b000000"
+      "6b0000000c0008002600000082000000010000002e000000750000004700000081000000"
+      "510005000600000083000000820000000000000051000500060000008400000082000000"
+      "010000005100050006000000850000008200000002000000500007000900000086000000"
+      "8300000084000000850000001e000000f900020073000000f8000200720000008e000500"
+      "2600000078000000470000006b0000008100050026000000790000007500000078000000"
+      "51000500060000007a000000790000000000000051000500060000007b00000079000000"
+      "0100000051000500060000007c000000790000000200000050000700090000007d000000"
+      "7a0000007b0000007c00000016000000f900020073000000f800020073000000f5000700"
+      "0900000095000000860000007e0000007d000000720000003e0003006d00000095000000"
+      "fd00010038000100";
+  static_assert(
+      hex ==
+      apex::render::test::indexed_multimap_reflection_fragment_spirv_hex);
   return shader_bytes(hex);
 }
 
@@ -64,10 +142,10 @@ std::vector<std::uint8_t> d3d_shader(const std::string_view source,
                                      const char *target) {
   Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
   Microsoft::WRL::ComPtr<ID3DBlob> errors;
-  const HRESULT result = D3DCompile(
-      source.data(), source.size(), "indexed_multimap_reflection", nullptr,
-      nullptr, "main", target, D3DCOMPILE_ENABLE_STRICTNESS, 0U, &bytecode,
-      &errors);
+  const HRESULT result =
+      D3DCompile(source.data(), source.size(), "indexed_multimap_reflection",
+                 nullptr, nullptr, "main", target, D3DCOMPILE_ENABLE_STRICTNESS,
+                 0U, &bytecode, &errors);
   if (FAILED(result)) {
     const std::string message =
         errors == nullptr
@@ -121,8 +199,7 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   sampled.height = 1U;
   sampled.format = TextureFormat::rgba8_unorm;
   sampled.usage = TextureUsage::sampled;
-  const TextureUploadPlan sampled_uploads{
-      {{0U, 0U, 1U, 1U, 4U, pixel}}};
+  const TextureUploadPlan sampled_uploads{{{0U, 0U, 1U, 1U, 4U, pixel}}};
   TextureResult sampled_result =
       device.create_texture(sampled, sampled_uploads);
   require(sampled_result.ok(), "reflection draw creates material texture");
@@ -150,21 +227,20 @@ void exercise_reflection_draw(Device &device, const Backend backend,
 
   std::array<std::byte, portable_material_buffer_view_bytes> material{};
   std::array<std::byte, portable_frame_buffer_view_bytes> frame{};
-  std::array<std::byte, portable_multimap_reflection_buffer_view_bytes>
-      reflection{};
-  constexpr std::array<float, 4U> reflection_values = {1.0F, 1.0F, 1.0F,
-                                                       1.0F};
-  std::memcpy(reflection.data(), reflection_values.data(),
-              sizeof(reflection_values));
   const auto make_uniform = [&](const std::span<const std::byte> bytes) {
-    return device.create_buffer(
-        {bytes.size(), BufferUsage::uniform, BufferMemory::host_visible,
-         BufferMutability::immutable},
-        bytes);
+    return device.create_buffer({bytes.size(), BufferUsage::uniform,
+                                 BufferMemory::host_visible,
+                                 BufferMutability::immutable},
+                                bytes);
   };
   BufferResult material_buffer = make_uniform(material);
   BufferResult frame_buffer = make_uniform(frame);
-  BufferResult reflection_buffer = make_uniform(reflection);
+  std::array<std::byte, portable_multimap_reflection_buffer_view_bytes>
+      reflection{};
+  BufferResult reflection_buffer = device.create_buffer(
+      {reflection.size(), BufferUsage::uniform, BufferMemory::host_visible,
+       BufferMutability::mutable_data},
+      reflection);
   require(material_buffer.ok() && frame_buffer.ok() && reflection_buffer.ok(),
           "reflection draw creates padded uniform views");
 
@@ -209,9 +285,26 @@ void exercise_reflection_draw(Device &device, const Backend backend,
         "SamplerState reflectionSampler : register(s22);"
         "cbuffer ReflectionConstants : register(b23) { float4 "
         "fresnelAndAdditive; };"
-        "float4 main() : SV_Target { return "
-        "reflectionCube.Sample(reflectionSampler, float3(1.0, 0.0, 0.0)) * "
-        "fresnelAndAdditive; }";
+        "float4 main() : SV_Target {"
+        "float3 normal = float3(-1.0, 0.0, 0.0);"
+        "float3 view = float3(1.0, 0.0, 0.0);"
+        "float branch = fresnelAndAdditive.w;"
+        "float divisor = branch == 2.0 ? 8.0 : 255.0;"
+        "float mip = 6.0 * saturate(1.0 - 0.5 * 255.0 / divisor);"
+        "float3 reflected = normalize(view - 2.0 * dot(view, normal) * normal);"
+        "float3 cubeDirection = float3(-reflected.x, reflected.y, reflected.z);"
+        "float3 reflectedColor = 0.8 * reflectionCube.SampleLevel("
+        "reflectionSampler, cubeDirection, mip).rgb;"
+        "float grazing = saturate(1.0 + dot(normal, view));"
+        "float exponent = branch == 1.0 || branch == 2.0 "
+        "? fresnelAndAdditive.y : max(fresnelAndAdditive.y, 1.0);"
+        "float anglePower = grazing > 0.0 ? pow(grazing, exponent) : 0.0;"
+        "float fresnel = min(fresnelAndAdditive.x + anglePower, "
+        "fresnelAndAdditive.z);"
+        "float3 lit = float3(0.2, 0.2, 0.2);"
+        "return branch == 1.0 "
+        "? float4(lit + fresnel * reflectedColor, 2.0) "
+        ": float4(lerp(lit, reflectedColor, fresnel), 1.0); }";
     pipeline.shaders = {
         {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
          d3d_shader(vertex_source, "vs_5_0")},
@@ -236,8 +329,7 @@ void exercise_reflection_draw(Device &device, const Backend backend,
       {PipelineResourceKind::sampler, 0U,
        portable_multimap_cube_sampler_binding, "reflectionSampler"},
       {PipelineResourceKind::uniform_buffer, 0U,
-       portable_multimap_reflection_constants_binding,
-       "reflectionConstants"},
+       portable_multimap_reflection_constants_binding, "reflectionConstants"},
   };
 
   DrawPacket packet;
@@ -249,9 +341,8 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   packet.flags.depth_test = false;
   packet.flags.depth_write = false;
   CameraFrame camera;
-  camera.clip_space = backend == Backend::Vulkan
-                          ? CameraClipSpace::vulkan
-                          : CameraClipSpace::d3d12;
+  camera.clip_space = backend == Backend::Vulkan ? CameraClipSpace::vulkan
+                                                 : CameraClipSpace::d3d12;
   IndexedStaticMeshDrawRequest request;
   request.packet = &packet;
   request.pipeline = &pipeline;
@@ -271,16 +362,53 @@ void exercise_reflection_draw(Device &device, const Backend backend,
       {&cube, sampler.sampler.get()},
       {reflection_buffer.buffer.get(), 0U,
        portable_multimap_reflection_buffer_view_bytes}};
-  const IndexedStaticMeshDrawResult result =
-      device.draw_indexed_static_mesh_and_readback(*target.texture, request);
-  if (!result.ok())
-    throw std::runtime_error(
-        "Reflection draw failed: " + result.diagnostic.code + ": " +
-        result.diagnostic.message);
-  const std::size_t center = (4U * 8U + 4U) * 4U;
-  for (std::size_t channel = 0U; channel < pixel.size(); ++channel)
-    require(result.rgba8[center + channel] == pixel[channel],
-            "reflection draw samples the positive-X cube face");
+
+  constexpr std::array<float, 3U> branches = {1.0F, 2.0F, 3.0F};
+  for (const float branch : branches) {
+    const std::array<float, 4U> reflection_values = {0.1F, 5.0F, 0.5F, branch};
+    std::fill(reflection.begin(), reflection.end(), std::byte{});
+    std::memcpy(reflection.data(), reflection_values.data(),
+                sizeof(reflection_values));
+    require(
+        device.update_buffer(*reflection_buffer.buffer, 0U, reflection).ok(),
+        "reflection draw updates its semantic controls");
+
+    const IndexedStaticMeshDrawResult result =
+        device.draw_indexed_static_mesh_and_readback(*target.texture, request);
+    if (!result.ok())
+      throw std::runtime_error(
+          "Reflection draw failed: " + result.diagnostic.code + ": " +
+          result.diagnostic.message);
+
+    StockMultiMapReflectionInput expected_input;
+    expected_input.controls.fresnel_and_additive = reflection_values;
+    expected_input.surface_normal = {-1.0F, 0.0F, 0.0F};
+    expected_input.camera_to_surface = {1.0F, 0.0F, 0.0F};
+    expected_input.maps_specular_exponent = 0.5F;
+    expected_input.ks_specular_exponent = 255.0F;
+    expected_input.maps_reflection = 0.8F;
+    expected_input.lit_rgb = {0.2F, 0.2F, 0.2F};
+    for (std::size_t channel = 0U; channel < 3U; ++channel)
+      expected_input.cube_rgb[channel] =
+          static_cast<float>(std::to_integer<std::uint8_t>(pixel[channel])) /
+          255.0F;
+    const StockMultiMapReflectionResult expected =
+        evaluate_stock_multimap_reflection(expected_input);
+    require(expected.ready && expected.cube_direction[0U] == 1.0F,
+            "reflection oracle resolves the positive-X cube face");
+
+    std::array<float, 4U> expected_rgba = {expected.rgb[0U], expected.rgb[1U],
+                                           expected.rgb[2U], expected.alpha};
+    const std::size_t center = (4U * 8U + 4U) * 4U;
+    for (std::size_t channel = 0U; channel < expected_rgba.size(); ++channel) {
+      const long rounded =
+          std::lround(std::clamp(expected_rgba[channel], 0.0F, 1.0F) * 255.0F);
+      const int actual =
+          std::to_integer<std::uint8_t>(result.rgba8[center + channel]);
+      require(std::abs(actual - static_cast<int>(rounded)) <= 1,
+              "reflection draw matches recovered branch arithmetic");
+    }
+  }
 }
 
 bool exercise_backend(const Backend backend, const DeviceOptions &options) {
