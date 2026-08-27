@@ -312,7 +312,7 @@ void exercise_reflection_draw(Device &device, const Backend backend,
         {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
          d3d_shader(vertex_source, "vs_5_0")},
         {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
-         d3d_shader(fragment_source, "ps_5_0")},
+         d3d_shader(fragment_source, "ps_5_1")},
     };
 #else
     throw std::runtime_error("D3D12 reflection test requires Windows");
@@ -720,7 +720,7 @@ void exercise_d3d12_warp_mip_generation(Device &device) {
       {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
        d3d_shader(vertex_source, "vs_5_0")},
       {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
-       d3d_shader(fragment_source, "ps_5_0")},
+       d3d_shader(fragment_source, "ps_5_1")},
   };
   pipeline.resources = {
       {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},

@@ -1027,7 +1027,8 @@ d3d12_texture_srv_description(const TextureDescription& description,
                                                static_cast<UINT>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)));
     if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_source)) != 0U)
         add(D3D12_RESOURCE_STATE_COPY_SOURCE);
-    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_destination)) != 0U)
+    if ((raw & static_cast<std::uint32_t>(TextureUsage::transfer_destination)) != 0U &&
+        raw == static_cast<std::uint32_t>(TextureUsage::transfer_destination))
         add(D3D12_RESOURCE_STATE_COPY_DEST);
     if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
         add(D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1557,7 +1558,9 @@ using D3DCompileProc = HRESULT(WINAPI *)(LPCVOID, SIZE_T, LPCSTR,
 [[nodiscard]] bool compile_d3d12_bloom_shader(
     LPCSTR entry, LPCSTR target, ComPtr<ID3DBlob>& bytecode,
     Diagnostic& diagnostic) {
-    HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    // ID3DBlob's implementation and vtable live in d3dcompiler_47.dll. Keep
+    // the module loaded for the process lifetime while cached blobs exist.
+    static HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
     if (compiler == nullptr) {
         diagnostic = {"d3d12_hdr_bloom_shader_unavailable",
                       "D3D12 HDR bloom requires d3dcompiler_47.dll"};
@@ -1566,7 +1569,6 @@ using D3DCompileProc = HRESULT(WINAPI *)(LPCVOID, SIZE_T, LPCSTR,
     const auto compile = reinterpret_cast<D3DCompileProc>(
         GetProcAddress(compiler, "D3DCompile"));
     if (compile == nullptr) {
-        FreeLibrary(compiler);
         diagnostic = {"d3d12_hdr_bloom_shader_unavailable",
                       "D3D12 HDR bloom could not locate D3DCompile"};
         return false;
@@ -1582,11 +1584,9 @@ using D3DCompileProc = HRESULT(WINAPI *)(LPCVOID, SIZE_T, LPCSTR,
             message += ": " + std::string(
                 static_cast<const char *>(errors->GetBufferPointer()),
                 errors->GetBufferSize());
-        FreeLibrary(compiler);
         diagnostic = {"d3d12_hdr_bloom_shader_failed", std::move(message)};
         return false;
     }
-    FreeLibrary(compiler);
     return true;
 }
 
@@ -3186,14 +3186,11 @@ struct D3D12BloomImage {
     if (description.access_policy == TextureAccessPolicy::render_then_sample)
         return true;
     const auto raw = static_cast<std::uint32_t>(description.usage);
-    const auto transfer_destination = static_cast<std::uint32_t>(TextureUsage::transfer_destination);
     const auto storage = static_cast<std::uint32_t>(TextureUsage::storage);
     const auto color_attachment = static_cast<std::uint32_t>(TextureUsage::color_attachment);
-    if ((raw & transfer_destination) != 0U && raw != transfer_destination) {
-        diagnostic = {"d3d12_transfer_destination_texture_exclusive",
-                      "D3D12 COPY_DEST cannot be combined with another texture usage"};
-        return false;
-    }
+    // COPY_DEST is a transient upload state. A texture that is sampled after
+    // its upload can declare both capabilities; texture_state() selects the
+    // shader-readable steady state and upload paths perform the transitions.
     if ((raw & storage) != 0U && raw != storage) {
         diagnostic = {"d3d12_storage_texture_exclusive",
                       "D3D12 unordered-access texture state cannot be combined with another texture usage"};

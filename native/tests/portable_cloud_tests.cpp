@@ -450,9 +450,18 @@ bool executeBackend(const Backend backend) {
     const std::array<PortableCloudTextureRun, 1U> runs = {
         PortableCloudTextureRun{0U, 0U, 6U, 1U}};
     PortableCloudParameters clouds;
-    clouds.camera.clip_space = backend == Backend::Vulkan
-                                   ? CameraClipSpace::vulkan
-                                   : CameraClipSpace::d3d12;
+    CameraFrameRequest camera_request;
+    camera_request.eye = {0.0F, 0.0F, 2.0F};
+    camera_request.target = {0.0F, 0.0F, 0.0F};
+    camera_request.fov_radians = 1.5707963267948966F;
+    camera_request.near_plane = 0.1F;
+    camera_request.far_plane = 10.0F;
+    camera_request.clip_space = backend == Backend::Vulkan
+                                    ? CameraClipSpace::vulkan
+                                    : CameraClipSpace::d3d12;
+    const CameraFrameResult camera = build_camera_frame(camera_request);
+    require(camera.ok(), "portable cloud backend camera frame");
+    clouds.camera = *camera.frame;
     clouds.light_direction = {0.0F, -1.0F, 0.0F};
     clouds.cloud_cover = 1.0F;
     clouds.cloud_cutoff = 1.0F;

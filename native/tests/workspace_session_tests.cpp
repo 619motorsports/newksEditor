@@ -63,7 +63,7 @@ std::vector<std::uint8_t> modelBytes(std::string name) {
 }
 
 WorkspaceSessionOpenRequest trackRequest(
-    std::string manifest, std::vector<WorkspaceSessionFile>& files) {
+    const std::string& manifest, std::vector<WorkspaceSessionFile>& files) {
     WorkspaceSessionOpenRequest request;
     request.kind = WorkspaceSessionKind::track;
     request.name = "track workspace";

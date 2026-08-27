@@ -57,7 +57,11 @@ int run_runtime_test(Backend backend) {
         0.0F,   0.0F,   0.0F, 0.75F, 0.0F, 0.0F, 0.0F, 1.0F,  0.5F,   1.0F, 1.0F, 0.0F,
         0.0F,   1.0F,   0.0F, 0.0F,  0.0F, 0.0F, 0.0F, 0.0F,  0.0F,
     };
-    const std::array<std::uint16_t, 3U> indices = {0U, 2U, 1U};
+    // Include both windings so this runtime test exercises depth output on
+    // both viewport conventions without weakening the pipeline's recovered
+    // back-face-culling contract.
+    const std::array<std::uint16_t, 6U> indices = {
+        0U, 2U, 1U, 0U, 1U, 2U};
     BufferResult vertex_buffer =
         device.create_buffer({sizeof(vertices), BufferUsage::vertex, BufferMemory::device_local,
                               BufferMutability::mutable_data},
@@ -79,7 +83,7 @@ int run_runtime_test(Backend backend) {
     DrawPacket packet;
     packet.primitive = DrawPrimitiveKind::skinned_mesh;
     packet.vertex_count = 3U;
-    packet.index_count = 3U;
+    packet.index_count = 6U;
     packet.vertex_stride_floats = 19U;
     packet.flags.depth_test = true;
     packet.flags.depth_write = true;
@@ -157,7 +161,7 @@ int run_runtime_test(Backend backend) {
     DrawPacket alpha_packet;
     alpha_packet.primitive = DrawPrimitiveKind::static_mesh;
     alpha_packet.vertex_count = 3U;
-    alpha_packet.index_count = 3U;
+    alpha_packet.index_count = 6U;
     alpha_packet.vertex_stride_floats = 11U;
     alpha_packet.flags.depth_test = true;
     alpha_packet.flags.depth_write = true;

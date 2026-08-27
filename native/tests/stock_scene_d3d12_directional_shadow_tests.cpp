@@ -190,7 +190,7 @@ float4 main(float3 normal : NORMAL, float3 worldPosition : TEXCOORD1,
                            compile_shader(vertex_source, "vs_5_0")},
       PipelineShaderModule{PipelineShaderStage::fragment,
                            PipelineShaderFormat::dxbc,
-                           compile_shader(fragment_source, "ps_5_0")},
+                           compile_shader(fragment_source, "ps_5_1")},
   };
   result.shader_set = {
       StockMaterialShaderKeyKind::shader_family,

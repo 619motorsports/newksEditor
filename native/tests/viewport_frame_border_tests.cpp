@@ -68,7 +68,8 @@ private:
 
 PipelineRenderTargets targets(std::uint32_t samples = 1U) {
     PipelineRenderTargets value;
-    value.colors = {{PipelineRenderTargetFormat::rgba8_unorm, samples}};
+    value.colors.push_back(
+        {PipelineRenderTargetFormat::rgba8_unorm, samples});
     value.has_depth = true;
     value.depth = {PipelineRenderTargetFormat::depth32_float, samples};
     return value;
