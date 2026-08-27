@@ -479,6 +479,34 @@ struct TextureUpdateResult {
     [[nodiscard]] bool ok() const noexcept { return status == TextureStatus::ready; }
 };
 
+// A bounded fullscreen conversion from a linear RGBA16F scene texture into
+// an owned RGBA8 or BGRA8 display texture. This source-evidenced curve remains
+// an approximation of the selected Yebis shader. Bloom, dither, and automatic
+// exposure remain separate passes.
+struct HdrToneMapParameters {
+    float exposure = 1.0F;
+    float gamma = 1.2F;
+    float saturation = 0.95F;
+    float curve_scale = 2.6581413745880127F;
+    float curve_shoulder = 0.6653175950050354F;
+};
+
+enum class HdrToneMapStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct HdrToneMapResult {
+    HdrToneMapStatus status = HdrToneMapStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == HdrToneMapStatus::ready;
+    }
+};
+
 // A bounded, synchronous clear/readback operation for 2D RGBA8 textures.
 // The returned bytes are tightly packed canonical RGBA8, independent of the
 // backend's native channel order. This is an execution contract only; it is
@@ -1564,6 +1592,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const TextureDescription& description,
     Diagnostic& diagnostic);
 
+[[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_request(
+    const Texture& source, const Texture& destination,
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
+
 [[nodiscard]] DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description,
     Diagnostic& diagnostic);
@@ -1733,6 +1765,19 @@ public:
         return {TextureStatus::unsupported,
                 {"texture_mip_generation_unsupported",
                  "This backend has not enabled whole-texture mip generation"}};
+    }
+
+    [[nodiscard]] virtual HdrToneMapResult tone_map_hdr_texture(
+        Texture& source, Texture& destination,
+        const HdrToneMapParameters& parameters = {}) {
+        Diagnostic diagnostic;
+        const HdrToneMapStatus validation = validate_hdr_tone_map_request(
+            source, destination, parameters, diagnostic);
+        if (validation != HdrToneMapStatus::ready)
+            return {validation, std::move(diagnostic)};
+        return {HdrToneMapStatus::unsupported,
+                {"hdr_tone_map_unsupported",
+                 "This backend has not enabled HDR tone mapping"}};
     }
 
     // Backends opt into persistent D32 attachments independently. Keeping a
@@ -1907,6 +1952,8 @@ struct DeviceResult {
     PresentationTargetStatus status) noexcept;
 [[nodiscard]] const char* presentation_frame_status_name(
     PresentationFrameStatus status) noexcept;
+[[nodiscard]] const char* hdr_tone_map_status_name(
+    HdrToneMapStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

@@ -69,11 +69,84 @@ constants. Then it sends the work to `DrawRectGPU_TonemapHDR`.
 `DrawRectGPU_TonemapHDR` selects the final shader variant. It draws one
 full-screen rectangle into the selected output surface.
 
+## Default shader variant
+
+The default `FUNCTION=-1` setting resolves to `EHDRTONEMAP=10`.
+`TEXSHADERSET::GetHandle_TonemapCombiniation_EHDRTONEMAP` is at `0x100ae060`.
+
+The function builds this variant mask:
+
+| Bit | Control |
+|---:|---|
+| `0x01` | Color matrix |
+| `0x02` | Dither |
+| `0x04` | Vignette |
+| `0x08` | Simulated vignette |
+| `0x10` | Exposure |
+| `0x20` | Pre-color matrix |
+| `0x40` | Gamma |
+
+The default mask is `0x52`. It selects dither, exposure, and gamma.
+The selected technique is `tech_TonemapHDR_Dither_Exposure_Gamma`.
+
+The technique uses vertex program 5 and pixel program 2095. The pixel DXBC
+starts at file offset `0xdd8d00` and has 4,088 bytes. Its SHA-256 value is:
+
+`295e4f592f08c5b6cadc9652b7394d703e7b2f139e63e28b55167014c938a64`
+
+The pixel shader has these texture bindings:
+
+| Binding | Selected default input |
+|---|---|
+| `t0` | Resolved scene color |
+| `t1` | Glare, or a 1×1 zero texture |
+| `t2` | Gray, or film grain when enabled |
+| `t3` | 4×4 full-color dither matrix |
+
+The selected pixel shader has no depth or luminance texture binding.
+Earlier effects consume depth. `CTextureLuminanceManage` performs automatic
+exposure outside this shader.
+
+The selected pixel shader uses `$Globals` at `b0`. The buffer has 4,096 bytes.
+These reflected fields are active:
+
+| Field | Byte offset |
+|---|---:|
+| `afRGBA_Modulate` | 2464 |
+| `afRGBA_Offset` | 2976 |
+| `fParam_GammaCorrection` | 3232 |
+| `fParam_DitherOffsetScale` | 3236 |
+| `fParam_TonemapMaxMappingLuminance` | 3328 |
+
+`DrawRectGPU_TonemapHDR` writes reciprocal gamma. It writes dither scale and
+negative half-scale beside gamma. `SetTonemapEffectParameters` writes the
+mapping vector.
+
+The scene and temporary tone-map targets use RGBA16F by default. The schedule
+is scene render, MSAA resolve, Yebis effects, temporary tone-map, then optional
+FXAA. This path does not prove the final screen format.
+
+## Production WebGL check
+
+The production Electron path loaded the Nissan 370Z LOD D model. It rendered
+three meshes and 2,343 triangles with a four-sample RGBA16F target.
+
+The run used Light Clouds, manual exposure 0.35, sun heading 40, and sun height
+55. The displayed frame hash was `5efc6a1802de083a`.
+
+The comparison at sun height 10 produced `ed5d01a32247b89b`. Both states
+reported WebGL error zero. The browser smoke report contained no exceptions.
+
+This check proves the production WebGL path remains operational. It does not
+prove pixel equality between WebGL, the new native pass, and Yebis.
+
 ## Evidence boundary
 
-This evidence proves the resource handoff, function order, and variant-control
-categories. It does not prove the math in each Yebis shader variant.
+This evidence proves the resource handoff, function order, default variant,
+resource bindings, and active constant fields. Some curve semantics remain
+unknown.
 
 The C++ port must keep the first implementation labeled as an approximation.
-An exact claim requires the selected shader bytecode and its constant-buffer
-layout. A production rendering change also requires a production WebGL check.
+The current curve-only pass omits default glare and dither inputs. An exact
+claim requires the recovered runtime constants and controlled pixel checks.
+A production rendering change also requires a production WebGL check.

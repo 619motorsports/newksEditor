@@ -131,10 +131,9 @@ struct WorkspaceViewportAiSplineGeneration {
 };
 
 // Opt-in portable reflection capture. This applies the recovered stock face
-// parameters through the portable camera builder, but remains a labeled
-// single-mip approximation until native RGBA16F mip generation is implemented.
-// The previous completed cube is sampled during capture; the stock editor
-// instead clears texture slot 10.
+// parameters through the portable camera builder and generates the bounded
+// RGBA16F mip chain. The previous completed cube is sampled during capture.
+// The stock editor instead clears texture slot 10.
 struct WorkspaceViewportPortableReflectionCaptureOptions {
     std::uint32_t size = 512U;
 };

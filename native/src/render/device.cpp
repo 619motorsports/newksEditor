@@ -641,6 +641,94 @@ TextureStatus validate_texture_mip_generation_description(
     return TextureStatus::ready;
 }
 
+HdrToneMapStatus validate_hdr_tone_map_request(
+    const Texture& source, const Texture& destination,
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
+    if (&source == &destination) {
+        diagnostic = {"hdr_tone_map_alias_invalid",
+                      "HDR tone mapping requires different source and destination textures"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (source.backend() != destination.backend()) {
+        diagnostic = {"hdr_tone_map_backend_mismatch",
+                      "HDR tone-map textures must use the same graphics backend"};
+        return HdrToneMapStatus::unsupported;
+    }
+    const TextureDescription& input = source.info().description;
+    const TextureDescription& output = destination.info().description;
+    if (input.width == 0U || input.height == 0U || output.width == 0U ||
+        output.height == 0U) {
+        diagnostic = {"hdr_tone_map_dimensions_invalid",
+                      "HDR tone-map texture dimensions must be non-zero"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (input.format != TextureFormat::rgba16_sfloat) {
+        diagnostic = {"hdr_tone_map_source_format_unsupported",
+                      "HDR tone mapping requires an RGBA16F source texture"};
+        return HdrToneMapStatus::unsupported;
+    }
+    const bool output_format_supported =
+        output.format == TextureFormat::rgba8_unorm ||
+        output.format == TextureFormat::rgba8_srgb ||
+        output.format == TextureFormat::bgra8_unorm ||
+        output.format == TextureFormat::bgra8_srgb;
+    if (!output_format_supported) {
+        diagnostic = {"hdr_tone_map_destination_format_unsupported",
+                      "HDR tone mapping requires an RGBA8 or BGRA8 destination texture"};
+        return HdrToneMapStatus::unsupported;
+    }
+    const auto valid_single_image = [](const TextureDescription& description) {
+        return description.shape == TextureShape::texture_2d &&
+               description.array_layers == 1U &&
+               description.mip_levels == 1U && description.samples == 1U;
+    };
+    if (!valid_single_image(input)) {
+        diagnostic = {"hdr_tone_map_source_shape_invalid",
+                      "HDR tone mapping requires a one-layer, one-mip, single-sample 2D source"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (!valid_single_image(output)) {
+        diagnostic = {"hdr_tone_map_destination_shape_invalid",
+                      "HDR tone mapping requires a one-layer, one-mip, single-sample 2D destination"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (input.width != output.width || input.height != output.height) {
+        diagnostic = {"hdr_tone_map_dimensions_mismatch",
+                      "HDR tone-map source and destination dimensions must match"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    const auto has_usage = [](TextureUsage usage, TextureUsage bit) {
+        return static_cast<std::uint32_t>(usage & bit) != 0U;
+    };
+    if (!has_usage(input.usage, TextureUsage::sampled)) {
+        diagnostic = {"hdr_tone_map_source_usage_invalid",
+                      "HDR tone mapping requires sampled source usage"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (!has_usage(output.usage, TextureUsage::color_attachment) ||
+        !has_usage(output.usage, TextureUsage::transfer_source)) {
+        diagnostic = {"hdr_tone_map_destination_usage_invalid",
+                      "HDR tone mapping requires color-attachment and transfer-source destination usage"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (output.mutability != TextureMutability::mutable_data) {
+        diagnostic = {"hdr_tone_map_destination_mutability_invalid",
+                      "HDR tone mapping requires a mutable destination texture"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    if (!std::isfinite(parameters.exposure) || parameters.exposure < 0.0F ||
+        !std::isfinite(parameters.gamma) || parameters.gamma <= 0.0F ||
+        !std::isfinite(parameters.saturation) || parameters.saturation < 0.0F ||
+        !std::isfinite(parameters.curve_scale) || parameters.curve_scale < 0.0F ||
+        !std::isfinite(parameters.curve_shoulder)) {
+        diagnostic = {"hdr_tone_map_parameters_invalid",
+                      "HDR tone-map parameters must be finite with nonnegative gain values and positive gamma"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    diagnostic = {};
+    return HdrToneMapStatus::ready;
+}
+
 DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description, Diagnostic& diagnostic) {
     if (description.format != DepthAttachmentFormat::d32_float) {
@@ -5034,6 +5122,20 @@ const char* presentation_frame_status_name(
     case PresentationFrameStatus::unsupported:
         return "unsupported";
     case PresentationFrameStatus::execution_failed:
+        return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* hdr_tone_map_status_name(HdrToneMapStatus status) noexcept {
+    switch (status) {
+    case HdrToneMapStatus::ready:
+        return "ready";
+    case HdrToneMapStatus::invalid_request:
+        return "invalid_request";
+    case HdrToneMapStatus::unsupported:
+        return "unsupported";
+    case HdrToneMapStatus::execution_failed:
         return "execution_failed";
     }
     return "unknown";

@@ -22,6 +22,7 @@
 #    include <d3d12.h>
 #    include <dxgi1_6.h>
 #    include <wrl/client.h>
+#    include "generated/d3d12_hdr_tone_map_dxbc.hpp"
 #    include "generated/d3d12_texture_mip_dxbc.hpp"
 #endif
 
@@ -148,6 +149,9 @@ struct D3D12Context {
     ComPtr<ID3D12RootSignature> mip_root_signature;
     std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
         mip_pipelines;
+    ComPtr<ID3D12RootSignature> hdr_tone_map_root_signature;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
+        hdr_tone_map_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -1338,6 +1342,371 @@ d3d12_texture_srv_description(const TextureDescription& description,
         return false;
     }
     texture_resource_state = final_state;
+    diagnostic = {};
+    return true;
+}
+
+[[nodiscard]] bool prepare_d3d12_hdr_tone_map_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT format,
+    ID3D12PipelineState*& pipeline, Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context == nullptr || context->device == nullptr ||
+        format == DXGI_FORMAT_UNKNOWN) {
+        diagnostic = {"d3d12_hdr_tone_map_pipeline_failed",
+                      "D3D12 HDR tone mapping received an invalid device or format"};
+        return false;
+    }
+    if (context->hdr_tone_map_root_signature == nullptr) {
+        D3D12_DESCRIPTOR_RANGE source_range{};
+        source_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        source_range.NumDescriptors = 1U;
+        source_range.BaseShaderRegister = 0U;
+        source_range.RegisterSpace = 0U;
+        source_range.OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER source_parameter{};
+        source_parameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        source_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+        source_parameter.DescriptorTable.pDescriptorRanges = &source_range;
+        source_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_PARAMETER constants_parameter{};
+        constants_parameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        constants_parameter.Constants.ShaderRegister = 0U;
+        constants_parameter.Constants.RegisterSpace = 0U;
+        constants_parameter.Constants.Num32BitValues = 6U;
+        constants_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MipLODBias = 0.0F;
+        sampler.MaxAnisotropy = 1U;
+        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        sampler.MinLOD = 0.0F;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister = 0U;
+        sampler.RegisterSpace = 0U;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        const std::array<D3D12_ROOT_PARAMETER, 2U> parameters = {
+            source_parameter, constants_parameter};
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters =
+            static_cast<UINT>(parameters.size());
+        root_description.pParameters = parameters.data();
+        root_description.NumStaticSamplers = 1U;
+        root_description.pStaticSamplers = &sampler;
+        root_description.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(HDR tone map)", result);
+            diagnostic.code = "d3d12_hdr_tone_map_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->hdr_tone_map_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(HDR tone map)", result);
+            diagnostic.code = "d3d12_hdr_tone_map_pipeline_failed";
+            return false;
+        }
+    }
+
+    for (const auto& cached : context->hdr_tone_map_pipelines) {
+        if (cached.first == format) {
+            pipeline = cached.second.Get();
+            return true;
+        }
+    }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->hdr_tone_map_root_signature.Get();
+    description.VS = {generated::d3d12_hdr_tone_map_vertex_dxbc,
+                      generated::d3d12_hdr_tone_map_vertex_dxbc_size};
+    description.PS = {generated::d3d12_hdr_tone_map_pixel_dxbc,
+                      generated::d3d12_hdr_tone_map_pixel_dxbc_size};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.FrontCounterClockwise = FALSE;
+    description.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    description.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    description.RasterizerState.SlopeScaledDepthBias =
+        D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.RasterizerState.MultisampleEnable = FALSE;
+    description.RasterizerState.AntialiasedLineEnable = FALSE;
+    description.RasterizerState.ForcedSampleCount = 0U;
+    description.RasterizerState.ConservativeRaster =
+        D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    D3D12_RENDER_TARGET_BLEND_DESC& blend =
+        description.BlendState.RenderTarget[0U];
+    blend.BlendEnable = FALSE;
+    blend.LogicOpEnable = FALSE;
+    blend.SrcBlend = D3D12_BLEND_ONE;
+    blend.DestBlend = D3D12_BLEND_ZERO;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    description.DepthStencilState.DepthEnable = FALSE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    description.DepthStencilState.StencilEnable = FALSE;
+    description.DepthStencilState.StencilReadMask =
+        D3D12_DEFAULT_STENCIL_READ_MASK;
+    description.DepthStencilState.StencilWriteMask =
+        D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    description.DepthStencilState.FrontFace = {
+        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
+        D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    description.DepthStencilState.BackFace =
+        description.DepthStencilState.FrontFace;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType =
+        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = format;
+    description.SampleDesc.Count = 1U;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_pipeline_failed";
+        return false;
+    }
+    pipeline = created.Get();
+    context->hdr_tone_map_pipelines.emplace_back(format, std::move(created));
+    return true;
+}
+
+[[nodiscard]] bool execute_d3d12_hdr_tone_map(
+    const std::shared_ptr<D3D12Context>& context, ID3D12Resource* source,
+    D3D12_RESOURCE_STATES& source_state, ID3D12Resource* destination,
+    D3D12_RESOURCE_STATES& destination_state,
+    const TextureDescription& destination_description,
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
+    if (context == nullptr || source == nullptr || destination == nullptr ||
+        context->device == nullptr || context->queue == nullptr) {
+        diagnostic = {"d3d12_hdr_tone_map_execution_failed",
+                      "D3D12 HDR tone mapping received an invalid resource or context"};
+        return false;
+    }
+    const D3D12_RESOURCE_STATES original_source_state = source_state;
+    const D3D12_RESOURCE_STATES original_destination_state = destination_state;
+    const DXGI_FORMAT destination_format =
+        dxgi_texture_format(destination_description.format);
+    ID3D12PipelineState* pipeline = nullptr;
+
+    std::lock_guard command_guard(context->command_mutex);
+    if (!prepare_d3d12_hdr_tone_map_pipeline(context, destination_format,
+                                              pipeline, diagnostic))
+        return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
+    srv_heap_description.NumDescriptors = 1U;
+    srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    HRESULT result = context->device->CreateDescriptorHeap(
+        &srv_heap_description, IID_PPV_ARGS(&srv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_descriptor_failed";
+        return false;
+    }
+    const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT rtv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    if (srv_stride == 0U || rtv_stride == 0U) {
+        diagnostic = {"d3d12_hdr_tone_map_descriptor_failed",
+                      "D3D12 returned a zero descriptor stride for HDR tone mapping"};
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC source_view{};
+    source_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    source_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    source_view.Shader4ComponentMapping =
+        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    source_view.Texture2D.MostDetailedMip = 0U;
+    source_view.Texture2D.MipLevels = 1U;
+    source_view.Texture2D.PlaneSlice = 0U;
+    source_view.Texture2D.ResourceMinLODClamp = 0.0F;
+    const D3D12_CPU_DESCRIPTOR_HANDLE source_descriptor =
+        srv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateShaderResourceView(source, &source_view,
+                                               source_descriptor);
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
+    rtv_heap_description.NumDescriptors = 1U;
+    rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(
+        &rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR tone map RTV)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_descriptor_failed";
+        return false;
+    }
+    D3D12_RENDER_TARGET_VIEW_DESC destination_view{};
+    destination_view.Format = destination_format;
+    destination_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    destination_view.Texture2D.MipSlice = 0U;
+    destination_view.Texture2D.PlaneSlice = 0U;
+    const D3D12_CPU_DESCRIPTOR_HANDLE destination_descriptor =
+        rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateRenderTargetView(destination, &destination_view,
+                                             destination_descriptor);
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandAllocator(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), pipeline,
+        IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandList(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_execution_failed";
+        return false;
+    }
+
+    const auto record_transition = [&](ID3D12Resource* resource,
+                                       D3D12_RESOURCE_STATES before,
+                                       D3D12_RESOURCE_STATES after) {
+        if (before == after) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = after;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    };
+    constexpr D3D12_RESOURCE_STATES shader_source_state =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    constexpr D3D12_RESOURCE_STATES render_target_state =
+        D3D12_RESOURCE_STATE_RENDER_TARGET;
+    record_transition(source, original_source_state, shader_source_state);
+    record_transition(destination, original_destination_state,
+                      render_target_state);
+
+    ID3D12DescriptorHeap* descriptor_heaps[] = {srv_heap.Get()};
+    list->SetDescriptorHeaps(1U, descriptor_heaps);
+    list->SetGraphicsRootSignature(context->hdr_tone_map_root_signature.Get());
+    list->SetPipelineState(pipeline);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1U, &destination_descriptor, FALSE, nullptr);
+    const D3D12_VIEWPORT viewport = {
+        0.0F, 0.0F, static_cast<float>(destination_description.width),
+        static_cast<float>(destination_description.height), 0.0F, 1.0F};
+    const D3D12_RECT scissor = {
+        0L, 0L, static_cast<LONG>(destination_description.width),
+        static_cast<LONG>(destination_description.height)};
+    list->RSSetViewports(1U, &viewport);
+    list->RSSetScissorRects(1U, &scissor);
+    list->SetGraphicsRootDescriptorTable(
+        0U, srv_heap->GetGPUDescriptorHandleForHeapStart());
+    std::array<std::uint32_t, 6U> constants{};
+    const auto set_float = [&](std::size_t index, float value) {
+        static_assert(sizeof(float) == sizeof(std::uint32_t));
+        std::memcpy(&constants[index], &value, sizeof(value));
+    };
+    set_float(0U, parameters.exposure);
+    set_float(1U, parameters.gamma);
+    set_float(2U, parameters.saturation);
+    set_float(3U, parameters.curve_scale);
+    set_float(4U, parameters.curve_shoulder);
+    constants[5U] = destination_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                            destination_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                        ? 1U
+                        : 0U;
+    list->SetGraphicsRoot32BitConstants(
+        1U, static_cast<UINT>(constants.size()), constants.data(), 0U);
+    list->DrawInstanced(3U, 1U, 0U, 0U);
+    record_transition(destination, render_target_state,
+                      original_destination_state);
+    record_transition(source, shader_source_state, original_source_state);
+
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12GraphicsCommandList::Close(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE,
+                                           IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateFence(HDR tone map)", result);
+        diagnostic.code = "d3d12_hdr_tone_map_execution_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event == nullptr) {
+        diagnostic = {"d3d12_hdr_tone_map_execution_failed",
+                      "CreateEventW failed while waiting for HDR tone mapping"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    const bool submitted = true;
+    constexpr UINT64 fence_value = 1U;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+        result = fence->SetEventOnCompletion(fence_value, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = submitted && context->wait_idle();
+        source_state = drained ? original_source_state
+                               : D3D12_RESOURCE_STATE_COMMON;
+        destination_state = drained ? original_destination_state
+                                    : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 HDR tone-map fence", result);
+        diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED ||
+                                  result == DXGI_ERROR_DEVICE_RESET
+                              ? "d3d12_device_removed"
+                              : "d3d12_hdr_tone_map_execution_failed";
+        return false;
+    }
+    source_state = original_source_state;
+    destination_state = original_destination_state;
     diagnostic = {};
     return true;
 }
@@ -4979,6 +5348,11 @@ public:
                            base_mip_initialized_.end(),
                            [](std::uint8_t value) { return value != 0U; });
     }
+    void mark_initialized() noexcept {
+        initialized_ = true;
+        std::fill(base_mip_initialized_.begin(), base_mip_initialized_.end(),
+                  1U);
+    }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
     bool generate_mips(Diagnostic& diagnostic) {
@@ -7518,6 +7892,55 @@ public:
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed,
                                          std::move(diagnostic)};
+    }
+
+    HdrToneMapResult tone_map_hdr_texture(
+        Texture& source, Texture& destination,
+        const HdrToneMapParameters& parameters = {}) override {
+        Diagnostic diagnostic;
+        const HdrToneMapStatus validation = validate_hdr_tone_map_request(
+            source, destination, parameters, diagnostic);
+        if (validation != HdrToneMapStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (source.backend() != Backend::D3D12 ||
+            destination.backend() != Backend::D3D12)
+            return {HdrToneMapStatus::unsupported,
+                    {"hdr_tone_map_backend_mismatch",
+                     "D3D12 HDR tone mapping requires D3D12 textures"}};
+        auto* d3d_source = dynamic_cast<D3D12Texture*>(&source);
+        auto* d3d_destination = dynamic_cast<D3D12Texture*>(&destination);
+        if (d3d_source == nullptr || d3d_destination == nullptr)
+            return {HdrToneMapStatus::unsupported,
+                    {"hdr_tone_map_texture_type_unsupported",
+                     "The D3D12 device received an unknown tone-map texture handle"}};
+        if (d3d_source->context() != context_.get() ||
+            d3d_destination->context() != context_.get())
+            return {HdrToneMapStatus::unsupported,
+                    {"hdr_tone_map_context_mismatch",
+                     "HDR tone-map textures belong to another D3D12 device"}};
+        if (!d3d_source->initialized() || !d3d_source->base_mip_initialized())
+            return {HdrToneMapStatus::invalid_request,
+                    {"hdr_tone_map_source_uninitialized",
+                     "HDR tone mapping requires an initialized source texture"}};
+        const DXGI_FORMAT source_format = dxgi_texture_format(
+            source.info().description.format);
+        const DXGI_FORMAT destination_format = dxgi_texture_format(
+            destination.info().description.format);
+        if (!validate_d3d12_texture_format_support(
+                context_, source_format, 1U, diagnostic,
+                source.info().description.usage))
+            return {HdrToneMapStatus::unsupported, std::move(diagnostic)};
+        if (!validate_d3d12_texture_format_support(
+                context_, destination_format, 1U, diagnostic,
+                destination.info().description.usage))
+            return {HdrToneMapStatus::unsupported, std::move(diagnostic)};
+        if (!execute_d3d12_hdr_tone_map(
+                context_, d3d_source->resource(), *d3d_source->state_pointer(),
+                d3d_destination->resource(), *d3d_destination->state_pointer(),
+                destination.info().description, parameters, diagnostic))
+            return {HdrToneMapStatus::execution_failed, std::move(diagnostic)};
+        d3d_destination->mark_initialized();
+        return {HdrToneMapStatus::ready, {}};
     }
 
     TextureClearReadbackResult clear_texture_and_readback(
