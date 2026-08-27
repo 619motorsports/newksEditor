@@ -54,6 +54,8 @@ struct StockSceneExecutionRequest {
     // backend. Exact packet-family and pass exclusions remain authoritative.
     BuiltinStockMultiMapSourceSelector builtin_multimap_source =
         BuiltinStockMultiMapSourceSelector::disabled;
+    BuiltinStockTyresSourceSelector builtin_stock_tyres_source =
+        BuiltinStockTyresSourceSelector::disabled;
     std::span<const MaterialBindingOverrides> overrides_by_material{};
     // When enabled, resolve the source-evidenced F4 state at this facade
     // boundary. The resolver's complete material table is merged after any

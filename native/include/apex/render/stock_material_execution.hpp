@@ -58,6 +58,11 @@ enum class BuiltinStockMultiMapSourceSelector : std::uint8_t {
     normal_detail,
 };
 
+enum class BuiltinStockTyresSourceSelector : std::uint8_t {
+    disabled,
+    stock_tyres,
+};
+
 enum class BuiltinD3D12StockNativeSelector : std::uint8_t {
     disabled,
     ks_per_pixel_base,
@@ -99,6 +104,11 @@ struct StockMaterialExecutionRequest {
     // authoritative.
     BuiltinStockMultiMapSourceSelector builtin_multimap_source =
         BuiltinStockMultiMapSourceSelector::disabled;
+    // Opt-in source-equivalent execution for exact static ksTyres and
+    // newStefano_ksTyres packets. The package has a dedicated five-texture
+    // semantic contract and preserves the recovered tyre math.
+    BuiltinStockTyresSourceSelector builtin_stock_tyres_source =
+        BuiltinStockTyresSourceSelector::disabled;
     // Opt-in installed-DXBC execution for opaque static ksPerPixel and
     // ksPerPixelAT scenes on D3D12. Matching caller modules remain
     // authoritative. Each validated package owner is cloned into one mutable

@@ -972,6 +972,110 @@ void test_builtin_multimap_source_selector() {
             "the fallback rejects truncated texture-role input before allocation");
 }
 
+Fixture tyre_fixture(Backend backend, std::string shader = "ksTyres") {
+    Fixture result = fixture("ksPerPixelMultiMap_NMDetail", backend);
+    auto& material = result.model.materials.front();
+    material.shader = std::move(shader);
+    result.scene.materials.front().shader = material.shader;
+    result.module_set.key = material.shader;
+    material.resources.clear();
+    result.packets.front().resources.clear();
+    const std::array<const char*, 5U> slots = {
+        "txDiffuse", "txNormal", "txDirty", "txBlur", "txNormalBlur"};
+    for (std::size_t index = 0U; index < slots.size(); ++index) {
+        material.resources.push_back(
+            {slots[index], static_cast<std::uint32_t>(index),
+             std::string("texture_") + std::to_string(index)});
+        result.packets.front().resources.push_back(
+            {slots[index], static_cast<std::uint32_t>(index),
+             static_cast<std::uint32_t>(index),
+             std::string("texture_") + std::to_string(index)});
+    }
+    material.properties = {
+        {"ksAmbient", 0.4F, {}, {}, {}},
+        {"ksDiffuse", 0.8F, {}, {}, {}},
+        {"ksSpecular", 0.3F, {}, {}, {}},
+        {"ksSpecularEXP", 64.0F, {}, {}, {}},
+        {"blurLevel", 0.25F, {}, {}, {}},
+        {"dirtyLevel", 0.5F, {}, {}, {}},
+        {"fresnelC", 0.01F, {}, {}, {}},
+        {"fresnelEXP", 4.0F, {}, {}, {}},
+        {"isAdditive", 1.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.15F, {}, {}, {}},
+    };
+    return result;
+}
+
+void test_builtin_stock_tyres_source_selector() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        for (const std::string& shader : {std::string("ksTyres"),
+                                          std::string("newStefano_ksTyres")}) {
+            Fixture tyres = tyre_fixture(backend, shader);
+            auto request = request_for(tyres);
+            request.shader_modules = {};
+            request.builtin_stock_tyres_source =
+                BuiltinStockTyresSourceSelector::stock_tyres;
+            request.multimap_reflection = true;
+            FakeDevice device(backend);
+            const auto result =
+                prepare_stock_material_execution(device, request);
+            if (!result.ok())
+                throw std::runtime_error(
+                    "built-in stock tyre handoff failed: " +
+                    result.diagnostic.code + " " + result.diagnostic.message);
+            require(result.resources->unique_pipeline_count() == 1U &&
+                        result.resources->requires_multimap_reflection_cube(),
+                    "both tyre aliases select one portable reflected pipeline");
+        }
+    }
+
+    Fixture bounded = tyre_fixture(Backend::Vulkan);
+    auto bounded_request = request_for(bounded);
+    bounded_request.shader_modules = {};
+    bounded_request.builtin_stock_tyres_source =
+        BuiltinStockTyresSourceSelector::stock_tyres;
+    bounded_request.multimap_reflection = true;
+    bounded_request.limits.scene.max_preparation_bytes = 64U * 1024U;
+    FakeDevice bounded_device;
+    const auto bounded_result =
+        prepare_stock_material_execution(bounded_device, bounded_request);
+    require(!bounded_result.ok() &&
+                bounded_result.diagnostic.code ==
+                    "stock_material_preparation_limit" &&
+                bounded_device.buffer_calls == 0U,
+            "stock tyre shader copies are bounded before backend allocation");
+
+    Fixture missing = tyre_fixture(Backend::Vulkan);
+    missing.packets.front().resources.pop_back();
+    auto missing_request = request_for(missing);
+    missing_request.shader_modules = {};
+    missing_request.builtin_stock_tyres_source =
+        BuiltinStockTyresSourceSelector::stock_tyres;
+    missing_request.multimap_reflection = true;
+    FakeDevice missing_device;
+    const auto missing_result =
+        prepare_stock_material_execution(missing_device, missing_request);
+    require(!missing_result.ok() &&
+                missing_result.diagnostic.code ==
+                    "stock_material_resources_incomplete" &&
+                missing_device.buffer_calls == 0U,
+            "truncated tyre resources fail before allocation");
+
+    Fixture no_cube = tyre_fixture(Backend::Vulkan);
+    auto no_cube_request = request_for(no_cube);
+    no_cube_request.shader_modules = {};
+    no_cube_request.builtin_stock_tyres_source =
+        BuiltinStockTyresSourceSelector::stock_tyres;
+    FakeDevice no_cube_device;
+    const auto no_cube_result =
+        prepare_stock_material_execution(no_cube_device, no_cube_request);
+    require(!no_cube_result.ok() &&
+                no_cube_result.diagnostic.code ==
+                    "stock_material_tyres_reflection_required" &&
+                no_cube_device.buffer_calls == 0U,
+            "the tyre package rejects a missing cubemap contract");
+}
+
 } // namespace
 
 int main() {
@@ -983,6 +1087,7 @@ int main() {
         test_multimap_reflection_module_opt_in();
         test_builtin_vulkan_source_selector();
         test_builtin_multimap_source_selector();
+        test_builtin_stock_tyres_source_selector();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

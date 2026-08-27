@@ -223,6 +223,7 @@ add_library(apex_render STATIC
   src/render/stock_material_execution.cpp
   src/render/stock_multimap_source.cpp
   src/render/stock_multimap_reflection.cpp
+  src/render/stock_tyres_source.cpp
   src/render/stock_scene_execution.cpp
   src/render/texture_upload.cpp
   src/render/view_axis.cpp
@@ -431,6 +432,11 @@ target_link_libraries(viewport_frame_border_runtime_tests PRIVATE ApexEditor::Re
 apex_add_native_test(stock_material_execution_tests.cpp stock_material_execution_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_tests.cpp stock_ks_per_pixel_tests ApexEditor::Render)
 apex_add_native_test(stock_multimap_reflection_tests.cpp stock_multimap_reflection_tests ApexEditor::Render)
+apex_add_native_test(stock_tyres_source_tests.cpp stock_tyres_source_tests ApexEditor::Render)
+if(TARGET stock_tyres_source_tests)
+  target_compile_definitions(stock_tyres_source_tests PRIVATE
+    APEX_NATIVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 apex_add_native_test(stock_multimap_source_tests.cpp stock_multimap_source_tests ApexEditor::Render)
 if(TARGET stock_multimap_source_tests)
   target_compile_definitions(stock_multimap_source_tests PRIVATE
@@ -439,6 +445,9 @@ endif()
 add_executable(stock_multimap_source_runtime_tests
   tests/stock_multimap_source_runtime_tests.cpp)
 target_link_libraries(stock_multimap_source_runtime_tests PRIVATE ApexEditor::Render)
+add_executable(stock_tyres_source_runtime_tests
+  tests/stock_tyres_source_runtime_tests.cpp)
+target_link_libraries(stock_tyres_source_runtime_tests PRIVATE ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_vulkan_source_tests.cpp stock_ks_per_pixel_vulkan_source_tests ApexEditor::Render)
 apex_add_native_test(stock_ks_per_pixel_vulkan_source_drift_tests.cpp stock_ks_per_pixel_vulkan_source_drift_tests ApexEditor::Render)
 if(TARGET stock_ks_per_pixel_vulkan_source_drift_tests)
@@ -478,6 +487,7 @@ if(TARGET fxaa_shader_source_drift_tests)
     APEX_NATIVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 apex_add_native_test(material_binding_tests.cpp material_binding_tests ApexEditor::Render)
+apex_add_native_test(tyre_material_resolver_tests.cpp tyre_material_resolver_tests ApexEditor::Render)
 apex_add_native_test(material_profile_tests.cpp material_profile_tests ApexEditor::Render)
 apex_add_native_test(pipeline_tests.cpp pipeline_tests ApexEditor::Render)
 apex_add_native_test(picking_tests.cpp picking_tests ApexEditor::Render)
@@ -594,7 +604,7 @@ if(TEST render_backend_tests)
   endif()
 endif()
 foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests stock_scene_d3d12_directional_shadow_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
-                             directional_shadow_source_tests material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_multimap_reflection_tests stock_multimap_source_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests texture_cube_backend_tests indexed_multimap_reflection_source_drift_tests d3d12_texture_mip_shader_source_drift_tests hdr_tone_map_shader_source_drift_tests hdr_bloom_shader_source_drift_tests hdr_tone_map_tests hdr_luminance_tests portable_sky_tests portable_cloud_tests portable_grass_tests portable_grass_shader_source_drift_tests portable_cloud_shader_source_drift_tests skeleton_overlay_tests fxaa_tests fxaa_shader_source_drift_tests viewport_frame_border_tests)
+                             directional_shadow_source_tests material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_multimap_reflection_tests stock_multimap_source_tests stock_tyres_source_tests tyre_material_resolver_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests texture_cube_backend_tests indexed_multimap_reflection_source_drift_tests d3d12_texture_mip_shader_source_drift_tests hdr_tone_map_shader_source_drift_tests hdr_bloom_shader_source_drift_tests hdr_tone_map_tests hdr_luminance_tests portable_sky_tests portable_cloud_tests portable_grass_tests portable_grass_shader_source_drift_tests portable_cloud_shader_source_drift_tests skeleton_overlay_tests fxaa_tests fxaa_shader_source_drift_tests viewport_frame_border_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()
@@ -666,6 +676,27 @@ if(TARGET stock_multimap_source_runtime_tests)
   endif()
 endif()
 
+if(TARGET stock_tyres_source_runtime_tests)
+  if(APEX_VULKAN_AVAILABLE)
+    add_test(NAME stock_tyres_source_runtime_vulkan
+      COMMAND stock_tyres_source_runtime_tests)
+    set_tests_properties(stock_tyres_source_runtime_vulkan PROPERTIES
+      ENVIRONMENT "APEX_RENDER_BACKEND=vulkan;APEX_RENDER_VALIDATION=1"
+      SKIP_RETURN_CODE 77
+      SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o physical device"
+      LABELS "unit;render")
+  endif()
+  if(WIN32 AND APEX_ENABLE_D3D12)
+    add_test(NAME stock_tyres_source_runtime_d3d12_warp
+      COMMAND stock_tyres_source_runtime_tests)
+    set_tests_properties(stock_tyres_source_runtime_d3d12_warp PROPERTIES
+      ENVIRONMENT "APEX_RENDER_BACKEND=d3d12;APEX_D3D12_ADAPTER=warp;APEX_RENDER_VALIDATION=1"
+      SKIP_RETURN_CODE 77
+      SKIP_REGULAR_EXPRESSION "[Uu]navailable|[Nn]ot available|[Nn]o D3D12 adapter"
+      LABELS "unit;render")
+  endif()
+endif()
+
 if(TARGET render_backend_tests)
   if(APEX_VULKAN_AVAILABLE)
     add_test(NAME render_backend_vulkan COMMAND render_backend_tests)
@@ -704,7 +735,8 @@ if(APEX_ENABLE_SANITIZERS AND NOT MSVC)
       texture_cube_backend_tests
       directional_shadow_source_runtime_vulkan
       viewport_frame_border_runtime_vulkan
-      stock_multimap_source_runtime_vulkan)
+      stock_multimap_source_runtime_vulkan
+      stock_tyres_source_runtime_vulkan)
     if(TEST ${vulkan_runtime_test})
       set_property(TEST ${vulkan_runtime_test} APPEND PROPERTY
         ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")

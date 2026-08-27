@@ -203,6 +203,24 @@ struct KsPerPixelMaterialResolveResult {
     }
 };
 
+enum class KsTyreMaterialResolveStatus : std::uint8_t {
+    ready,
+    invalid_input,
+    unsupported,
+};
+
+struct StockTyresSourceMaterialResolveResult {
+    KsTyreMaterialResolveStatus status =
+        KsTyreMaterialResolveStatus::unsupported;
+    StockTyresSourceMaterialConstants material{};
+    StockTyresSourceConstants constants{};
+    MaterialBindingDiagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == KsTyreMaterialResolveStatus::ready;
+    }
+};
+
 enum class KsPerPixelMultiMapReflectionResolveStatus : std::uint8_t {
     ready,
     invalid_input,
@@ -254,6 +272,14 @@ resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding);
 [[nodiscard]] KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding,
     KsPerPixelMaterialResolveOptions options = {});
+
+// Resolve the two typed 32-byte records required by the bounded portable
+// ksTyres/newStefano_ksTyres handoff. This accepts only those exact shader
+// family aliases and all five source texture roles. It is a source-backed
+// portable projection, not a claim that the installed native package ABI is
+// executable by this record layout.
+[[nodiscard]] StockTyresSourceMaterialResolveResult
+resolve_stock_tyres_source_constants(const MaterialBinding& binding);
 
 // Resolve only the recovered cubemap/Fresnel controls for the four bounded
 // MultiMap families. txCube remains a frame-owned renderer resource and is

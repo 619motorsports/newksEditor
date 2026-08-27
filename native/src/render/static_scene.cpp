@@ -109,6 +109,28 @@ bool finite_multimap_reflection_constants(
                        [](const float value) { return std::isfinite(value); });
 }
 
+bool finite_stock_tyres_material_constants(
+    const StockTyresSourceMaterialConstants& constants) noexcept {
+    const std::array<float, 8U> values = {
+        constants.ambient, constants.diffuse, constants.specular,
+        constants.specular_exponent, constants.emissive[0],
+        constants.emissive[1], constants.emissive[2],
+        constants.alpha_reference};
+    return std::all_of(values.begin(), values.end(),
+                       [](float value) { return std::isfinite(value); });
+}
+
+bool finite_stock_tyres_constants(
+    const StockTyresSourceConstants& constants) noexcept {
+    const std::array<float, 8U> values = {
+        constants.blur_level, constants.dirty_level, constants.fresnel_c,
+        constants.fresnel_exp, constants.is_additive,
+        constants.fresnel_max_level, constants.reserved[0],
+        constants.reserved[1]};
+    return std::all_of(values.begin(), values.end(),
+                       [](float value) { return std::isfinite(value); });
+}
+
 bool finite_stock_shadow_constants(
     const StockShadowCasterMaterialConstants& constants) noexcept {
     for (const float value : constants.lighting)
@@ -642,7 +664,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
           !charge(request.stock_d3d12_native_programs.size(),
                   sizeof(std::shared_ptr<const
                       ValidatedStockKsPerPixelNativeProgram>)))) ||
-        !charge(model.materials.size(), 3U * sizeof(std::size_t)) ||
+        !charge(model.materials.size(), 4U * sizeof(std::size_t)) ||
         !charge(request.packets.size(),
                 4U * sizeof(std::size_t) + 2U * sizeof(const formats::Kn5Node*)) ||
         !charge(request.packets.size(), 4U * sizeof(void*)) ||
@@ -678,6 +700,11 @@ StaticSceneResourceResult prepare_static_scene_resources(
         !charge(std::min(request.packets.size(),
                          limits.max_material_constant_buffers),
                 sizeof(KsPerPixelMaterialConstants)) ||
+        !charge(std::min(request.packets.size(),
+                         limits.max_material_constant_buffers),
+                sizeof(StockTyresSourceMaterialConstants) +
+                    sizeof(StockTyresSourceConstants) +
+                    2U * sizeof(std::unique_ptr<Buffer>)) ||
         !charge(std::min({request.packets.size(), model.materials.size(),
                           limits.max_material_constant_buffers}),
                 sizeof(StockShadowCasterMaterialConstants)) ||
@@ -747,6 +774,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
         model.materials.size(), invalid_resource_index);
     std::vector<std::size_t> multimap_reflection_constant_for_packet(
         request.packets.size(), invalid_resource_index);
+    std::vector<std::size_t> stock_tyres_constant_by_material(
+        model.materials.size(), invalid_resource_index);
+    std::vector<std::size_t> stock_tyres_constant_for_packet(
+        request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> stock_shadow_constant_for_material(
         model.materials.size(), invalid_resource_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
@@ -757,6 +788,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<KsPerPixelMaterialConstants> material_constants;
     std::vector<KsPerPixelMultiMapReflectionConstants>
         multimap_reflection_constants;
+    std::vector<StockTyresSourceMaterialConstants>
+        stock_tyres_material_constants;
+    std::vector<StockTyresSourceConstants> stock_tyres_constants;
     std::vector<StockShadowCasterMaterialConstants> stock_shadow_constants;
     unique_meshes.reserve(request.packets.size());
     representative_packets.reserve(request.packets.size());
@@ -767,6 +801,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                         limits.max_material_constant_buffers));
     multimap_reflection_constants.reserve(std::min(
         request.packets.size(), limits.max_material_constant_buffers));
+    stock_tyres_material_constants.reserve(std::min(
+        request.packets.size(), limits.max_material_constant_buffers));
+    stock_tyres_constants.reserve(std::min(
+        request.packets.size(), limits.max_material_constant_buffers));
     stock_shadow_constants.reserve(std::min(request.packets.size(),
                                             limits.max_material_constant_buffers));
 
@@ -775,6 +813,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t total_shader_bytes = 0U;
     std::uint64_t total_material_constant_bytes = 0U;
     std::uint64_t total_multimap_reflection_constant_bytes = 0U;
+    std::uint64_t total_stock_tyres_material_constant_bytes = 0U;
+    std::uint64_t total_stock_tyres_constant_bytes = 0U;
     std::uint64_t total_shadow_material_constant_bytes = 0U;
     std::uint64_t total_stock_native_constant_bytes = 0U;
     std::uint64_t total_update_bytes = 0U;
@@ -1020,6 +1060,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
              pipeline_declares_directional_shadow_receiver(*pipeline));
         const bool pipeline_has_multimap_reflection =
             !stock_native && pipeline_declares_multimap_reflection(*pipeline);
+        const bool tyres_layout =
+            !stock_native && pipeline_declares_stock_tyres(*pipeline);
         const bool normal_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
@@ -1037,13 +1079,15 @@ StaticSceneResourceResult prepare_static_scene_resources(
             IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         if (stock_native || !pipeline->resources.empty()) {
             const std::size_t expected_resources =
-                (detail_stack_layout || damage_layout) ? 5U
+                (tyres_layout || detail_stack_layout || damage_layout) ? 5U
                                                       : damage_dust_layout ? 6U
                                                       : maps_layout ? 3U : normal_layout ? 2U : 1U;
             if (packet.resources.size() != expected_resources)
                 return fail(StaticSceneResourceStatus::unsupported,
                             "static_scene_material_packet_unsupported",
-                            damage_dust_layout
+                            tyres_layout
+                                ? "The portable tyre path requires txDiffuse, txNormal, txDirty, txBlur, and txNormalBlur packet resources"
+                                : damage_dust_layout
                                 ? "The portable damage-dust path requires txDiffuse, txNormal, txMaps, txDust, txDamage, and txDamageMask"
                                 : damage_layout
                                 ? "The portable damage path requires txDiffuse, txNormal, txMaps, txDamage, and txDamageMask"
@@ -1063,7 +1107,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                 "static_scene_resource_string_limit",
                                 "A static-scene resource string exceeds its byte limit");
                 const bool diffuse = canonical_resource_equals(resource.slot, "txdiffuse");
-                const bool normal = (normal_layout || maps_layout || detail_stack_layout ||
+                const bool normal = (tyres_layout || normal_layout || maps_layout || detail_stack_layout ||
                                      damage_layout || damage_dust_layout) &&
                                     canonical_resource_equals(resource.slot, "txnormal");
                 const bool maps = (maps_layout || detail_stack_layout || damage_layout ||
@@ -1081,11 +1125,20 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                          canonical_resource_equals(resource.slot, "txdamagemask");
                 const bool dust = damage_dust_layout &&
                                   canonical_resource_equals(resource.slot, "txdust");
+                const bool tyre_dirty = tyres_layout &&
+                                        canonical_resource_equals(resource.slot, "txdirty");
+                const bool tyre_blur = tyres_layout &&
+                                       canonical_resource_equals(resource.slot, "txblur");
+                const bool tyre_normal_blur = tyres_layout &&
+                    canonical_resource_equals(resource.slot, "txnormalblur");
                 if (!diffuse && !normal && !maps && !detail && !normal_detail &&
-                    !damage && !damage_mask && !dust)
+                    !damage && !damage_mask && !dust && !tyre_dirty &&
+                    !tyre_blur && !tyre_normal_blur)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_material_packet_unsupported",
-                                damage_dust_layout
+                                tyres_layout
+                                    ? "The portable tyre path accepts only txDiffuse, txNormal, txDirty, txBlur, and txNormalBlur"
+                                : damage_dust_layout
                                     ? "The portable damage-dust path accepts txDiffuse, txNormal, txMaps, txDust, txDamage, and txDamageMask"
                                     : damage_layout
                                     ? "The portable damage path accepts txDiffuse, txNormal, txMaps, txDamage, and txDamageMask"
@@ -1098,7 +1151,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                         : stock_native
                                             ? "Native ksPerPixel accepts only txDiffuse"
                                             : "The portable diffuse path accepts only txDiffuse");
-                std::uint32_t& stored_index = diffuse
+                std::uint32_t& stored_index = tyre_dirty
+                                                  ? textures_for_packet[packet_index].tyre_dirty
+                                              : tyre_blur
+                                                  ? textures_for_packet[packet_index].tyre_blur
+                                              : tyre_normal_blur
+                                                  ? textures_for_packet[packet_index].tyre_normal_blur
+                                              : diffuse
                                                   ? textures_for_packet[packet_index].diffuse
                                                   : normal
                                                       ? textures_for_packet[packet_index].normal
@@ -1120,7 +1179,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                 if (resource.texture_index == invalid_draw_texture_index ||
                     static_cast<std::size_t>(resource.texture_index) >= model.textures.size())
                     return fail(StaticSceneResourceStatus::invalid_request,
-                                diffuse ? "static_scene_diffuse_texture_index_invalid"
+                                tyre_dirty ? "static_scene_tyre_dirty_texture_index_invalid"
+                                : tyre_blur ? "static_scene_tyre_blur_texture_index_invalid"
+                                : tyre_normal_blur ? "static_scene_tyre_normal_blur_texture_index_invalid"
+                                : diffuse ? "static_scene_diffuse_texture_index_invalid"
                                         : normal ? "static_scene_normal_texture_index_invalid"
                                                  : maps ? "static_scene_maps_texture_index_invalid"
                                                         : detail ? "static_scene_detail_texture_index_invalid"
@@ -1128,7 +1190,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                                  : damage ? "static_scene_damage_texture_index_invalid"
                                                                  : damage_mask ? "static_scene_damage_mask_texture_index_invalid"
                                                                                : "static_scene_dust_texture_index_invalid",
-                                diffuse ? "A txDiffuse resource has an invalid global texture index"
+                                tyre_dirty ? "A txDirty resource has an invalid global texture index"
+                                : tyre_blur ? "A txBlur resource has an invalid global texture index"
+                                : tyre_normal_blur ? "A txNormalBlur resource has an invalid global texture index"
+                                : diffuse ? "A txDiffuse resource has an invalid global texture index"
                                         : normal ? "A txNormal resource has an invalid global texture index"
                                                  : maps ? "A txMaps resource has an invalid global texture index"
                                                         : detail ? "A txDetail resource has an invalid global texture index"
@@ -1157,7 +1222,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                     !unique_texture->second.has_value() ||
                     *unique_texture->second != resource.texture_index)
                     return fail(StaticSceneResourceStatus::invalid_request,
-                                diffuse ? "static_scene_diffuse_texture_identity_invalid"
+                                tyre_dirty ? "static_scene_tyre_dirty_texture_identity_invalid"
+                                : tyre_blur ? "static_scene_tyre_blur_texture_identity_invalid"
+                                : tyre_normal_blur ? "static_scene_tyre_normal_blur_texture_identity_invalid"
+                                : diffuse ? "static_scene_diffuse_texture_identity_invalid"
                                         : normal ? "static_scene_normal_texture_identity_invalid"
                                                  : maps ? "static_scene_maps_texture_identity_invalid"
                                                         : detail ? "static_scene_detail_texture_identity_invalid"
@@ -1165,7 +1233,13 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                                  : damage ? "static_scene_damage_texture_identity_invalid"
                                                                  : damage_mask ? "static_scene_damage_mask_texture_identity_invalid"
                                                                                : "static_scene_dust_texture_identity_invalid",
-                                diffuse
+                                tyre_dirty
+                                    ? "A txDirty resource does not match its unique active scoped KN5 texture"
+                                : tyre_blur
+                                    ? "A txBlur resource does not match its unique active scoped KN5 texture"
+                                : tyre_normal_blur
+                                    ? "A txNormalBlur resource does not match its unique active scoped KN5 texture"
+                                : diffuse
                                     ? "A txDiffuse resource does not match its unique active scoped KN5 texture"
                                     : normal
                                         ? "A txNormal resource does not match its unique active scoped KN5 texture"
@@ -1183,8 +1257,12 @@ StaticSceneResourceResult prepare_static_scene_resources(
                 stored_index = resource.texture_index;
             }
             if (textures_for_packet[packet_index].diffuse == invalid_draw_texture_index ||
-                ((normal_layout || maps_layout || detail_stack_layout || damage_layout || damage_dust_layout) &&
+                ((tyres_layout || normal_layout || maps_layout || detail_stack_layout || damage_layout || damage_dust_layout) &&
                  textures_for_packet[packet_index].normal == invalid_draw_texture_index) ||
+                (tyres_layout &&
+                 (textures_for_packet[packet_index].tyre_dirty == invalid_draw_texture_index ||
+                  textures_for_packet[packet_index].tyre_blur == invalid_draw_texture_index ||
+                  textures_for_packet[packet_index].tyre_normal_blur == invalid_draw_texture_index)) ||
                 ((maps_layout || detail_stack_layout || damage_layout || damage_dust_layout) && textures_for_packet[packet_index].maps ==
                                     invalid_draw_texture_index) ||
                 (detail_stack_layout &&
@@ -1199,7 +1277,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
                   textures_for_packet[packet_index].damage_mask == invalid_draw_texture_index)))
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "static_scene_resource_slot_missing",
-                            damage_dust_layout
+                            tyres_layout
+                                ? "The portable tyre resources are incomplete"
+                                : damage_dust_layout
                                 ? "The portable damage-dust resources are incomplete"
                                 : damage_layout
                                 ? "The portable damage resources are incomplete"
@@ -1213,7 +1293,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
         }
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
-            normal_layout || maps_layout || detail_stack_layout || damage_layout || damage_dust_layout)
+            tyres_layout || normal_layout || maps_layout || detail_stack_layout || damage_layout || damage_dust_layout)
             requires_frame_constants = true;
         if (material_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
             material_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
@@ -1257,7 +1337,64 @@ StaticSceneResourceResult prepare_static_scene_resources(
             material_constant_for_packet[packet_index] =
                 material_constant_by_material[material_index];
         }
-        if (pipeline_has_multimap_reflection) {
+        if (tyres_layout) {
+            if (limits.max_material_constant_buffers == 0U ||
+                limits.max_total_stock_tyres_material_constant_bytes == 0U ||
+                limits.max_total_stock_tyres_constant_bytes == 0U)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_tyres_constant_limits_invalid",
+                    "Tyre material and control limits must be nonzero when a tyre pipeline is used");
+            if (request.stock_tyres_material_constants_by_material.size() !=
+                    model.materials.size() ||
+                request.stock_tyres_constants_by_material.size() !=
+                    model.materials.size())
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_stock_tyres_constant_table_invalid",
+                    "The tyre material and control tables must match the final material table");
+            if (stock_tyres_constant_by_material[material_index] ==
+                invalid_resource_index) {
+                if (stock_tyres_constants.size() >=
+                    limits.max_material_constant_buffers)
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_stock_tyres_constant_count_limit",
+                        "Used tyre materials exceed the constant-buffer count limit");
+                if (!checked_add(portable_stock_tyres_material_buffer_view_bytes,
+                                 total_stock_tyres_material_constant_bytes) ||
+                    total_stock_tyres_material_constant_bytes >
+                        limits.max_total_stock_tyres_material_constant_bytes ||
+                    !checked_add(portable_stock_tyres_buffer_view_bytes,
+                                 total_stock_tyres_constant_bytes) ||
+                    total_stock_tyres_constant_bytes >
+                        limits.max_total_stock_tyres_constant_bytes)
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_stock_tyres_constant_aggregate_limit",
+                        "Used tyre constants exceed their aggregate buffer limits");
+                const StockTyresSourceMaterialConstants& material_constants_value =
+                    request.stock_tyres_material_constants_by_material[
+                        material_index];
+                const StockTyresSourceConstants& constants_value =
+                    request.stock_tyres_constants_by_material[material_index];
+                if (!finite_stock_tyres_material_constants(
+                        material_constants_value) ||
+                    !finite_stock_tyres_constants(constants_value))
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_stock_tyres_constant_non_finite",
+                        "A used tyre material or control record contains a non-finite value");
+                stock_tyres_constant_by_material[material_index] =
+                    stock_tyres_constants.size();
+                stock_tyres_material_constants.push_back(
+                    material_constants_value);
+                stock_tyres_constants.push_back(constants_value);
+            }
+            stock_tyres_constant_for_packet[packet_index] =
+                stock_tyres_constant_by_material[material_index];
+        }
+        if (pipeline_has_multimap_reflection && !tyres_layout) {
             if (!maps_layout && !detail_stack_layout)
                 return fail(
                     StaticSceneResourceStatus::unsupported,
@@ -1512,6 +1649,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
             if (packet_textures.normal_detail != invalid_draw_texture_index)
                 normal_detail_texture_indices[
                     static_cast<std::size_t>(packet_textures.normal_detail)] = true;
+            if (packet_textures.tyre_normal_blur != invalid_draw_texture_index)
+                normal_detail_texture_indices[static_cast<std::size_t>(
+                    packet_textures.tyre_normal_blur)] = true;
             if (packet_textures.damage_mask != invalid_draw_texture_index)
                 damage_mask_texture_indices[
                     static_cast<std::size_t>(packet_textures.damage_mask)] = true;
@@ -1523,7 +1663,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
             for (const std::uint32_t raw_index :
                  {packet_textures.diffuse, packet_textures.normal,
                   packet_textures.maps, packet_textures.detail,
-                  packet_textures.normal_detail, packet_textures.dust, packet_textures.damage,
+                  packet_textures.normal_detail, packet_textures.tyre_dirty,
+                  packet_textures.tyre_blur, packet_textures.tyre_normal_blur,
+                  packet_textures.dust, packet_textures.damage,
                   packet_textures.damage_mask}) {
                 if (raw_index == invalid_draw_texture_index) continue;
                 const std::size_t texture_index = static_cast<std::size_t>(raw_index);
@@ -1682,6 +1824,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
         std::move(material_constant_for_packet);
     resources->multimap_reflection_constant_for_packet_ =
         std::move(multimap_reflection_constant_for_packet);
+    resources->stock_tyres_constant_for_packet_ =
+        std::move(stock_tyres_constant_for_packet);
     resources->stock_shadow_constant_for_material_ =
         std::move(stock_shadow_constant_for_material);
     resources->texture_count_ = model.textures.size();
@@ -1696,6 +1840,9 @@ StaticSceneResourceResult prepare_static_scene_resources(
             indices.maps != invalid_draw_texture_index ||
             indices.detail != invalid_draw_texture_index ||
             indices.normal_detail != invalid_draw_texture_index ||
+            indices.tyre_dirty != invalid_draw_texture_index ||
+            indices.tyre_blur != invalid_draw_texture_index ||
+            indices.tyre_normal_blur != invalid_draw_texture_index ||
             indices.dust != invalid_draw_texture_index ||
             indices.damage != invalid_draw_texture_index ||
             indices.damage_mask != invalid_draw_texture_index;
@@ -1737,6 +1884,38 @@ StaticSceneResourceResult prepare_static_scene_resources(
             return {map_buffer_status(buffer.status),
                     std::move(buffer.diagnostic), nullptr};
         resources->owned_multimap_reflection_constants_.push_back(
+            std::move(buffer.buffer));
+    }
+    resources->owned_stock_tyres_material_constants_.reserve(
+        stock_tyres_material_constants.size());
+    for (const StockTyresSourceMaterialConstants& constants :
+         stock_tyres_material_constants) {
+        std::array<std::byte,
+                   portable_stock_tyres_material_buffer_view_bytes> bytes{};
+        std::memcpy(bytes.data(), &constants, sizeof(constants));
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::immutable};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status),
+                    std::move(buffer.diagnostic), nullptr};
+        resources->owned_stock_tyres_material_constants_.push_back(
+            std::move(buffer.buffer));
+    }
+    resources->owned_stock_tyres_constants_.reserve(
+        stock_tyres_constants.size());
+    for (const StockTyresSourceConstants& constants : stock_tyres_constants) {
+        std::array<std::byte, portable_stock_tyres_buffer_view_bytes> bytes{};
+        std::memcpy(bytes.data(), &constants, sizeof(constants));
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::immutable};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status),
+                    std::move(buffer.diagnostic), nullptr};
+        resources->owned_stock_tyres_constants_.push_back(
             std::move(buffer.buffer));
     }
     resources->owned_stock_shadow_constants_.reserve(stock_shadow_constants.size());
@@ -2133,6 +2312,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         packets_.size() != material_constant_for_packet_.size() ||
         packets_.size() !=
             multimap_reflection_constant_for_packet_.size() ||
+        packets_.size() != stock_tyres_constant_for_packet_.size() ||
         packets_.size() != skinned_upload_for_packet_.size() ||
         packets_.size() !=
             stock_vulkan_source_program_for_packet_.size() ||
@@ -2188,9 +2368,10 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                      : "The static-scene texture table must match the final KN5 texture count"}, {}};
     if (texture_authority_ == StaticSceneTextureAuthority::caller_tables) {
         for (const PacketTextureIndices& indices : textures_for_packet_) {
-            const std::array<std::uint32_t, 8U> referenced = {
+            const std::array<std::uint32_t, 11U> referenced = {
                 indices.diffuse, indices.normal, indices.maps, indices.detail,
-                indices.normal_detail, indices.dust, indices.damage,
+                indices.normal_detail, indices.tyre_dirty, indices.tyre_blur,
+                indices.tyre_normal_blur, indices.dust, indices.damage,
                 indices.damage_mask};
             for (const std::uint32_t raw_index : referenced) {
                 if (raw_index == invalid_draw_texture_index) continue;
@@ -2335,7 +2516,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     const bool has_multimap_reflection_sampler =
         frame.multimap_reflection_cube.sampler != nullptr;
     const bool requires_multimap_reflection =
-        !owned_multimap_reflection_constants_.empty();
+        !owned_multimap_reflection_constants_.empty() ||
+        !owned_stock_tyres_constants_.empty();
     if (has_multimap_reflection_texture !=
         has_multimap_reflection_sampler)
         return {IndexedStaticMeshBatchStatus::invalid_request,
@@ -2879,6 +3061,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         if (resource_failure.has_value()) return std::move(*resource_failure);
         const IndexedPortableResourceLayout resource_layout =
             classify_indexed_portable_resource_layout(*draw->pipeline);
+        const bool stock_tyres_layout =
+            pipeline_declares_stock_tyres(*draw->pipeline);
         if (resource_layout ==
             IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame)
             draw->detail_binding = resolve_texture(texture_indices.dust, "dust");
@@ -2891,9 +3075,23 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         if (resource_failure.has_value()) return std::move(*resource_failure);
         draw->damage_mask_binding = resolve_texture(texture_indices.damage_mask, "damage-mask");
         if (resource_failure.has_value()) return std::move(*resource_failure);
+        if (stock_tyres_layout) {
+            draw->tyre_dirty_binding =
+                resolve_texture(texture_indices.tyre_dirty, "tyre-dirty");
+            if (resource_failure.has_value()) return std::move(*resource_failure);
+            draw->tyre_blur_binding =
+                resolve_texture(texture_indices.tyre_blur, "tyre-blur");
+            if (resource_failure.has_value()) return std::move(*resource_failure);
+            draw->tyre_normal_blur_binding = resolve_texture(
+                texture_indices.tyre_normal_blur, "tyre-normal-blur");
+            if (resource_failure.has_value()) return std::move(*resource_failure);
+        }
         if (draw->sampled_binding.texture != nullptr || draw->normal_binding.texture != nullptr ||
             draw->maps_binding.texture != nullptr || draw->detail_binding.texture != nullptr ||
             draw->normal_detail_binding.texture != nullptr ||
+            draw->tyre_dirty_binding.texture != nullptr ||
+            draw->tyre_blur_binding.texture != nullptr ||
+            draw->tyre_normal_blur_binding.texture != nullptr ||
             draw->damage_binding.texture != nullptr ||
             draw->damage_mask_binding.texture != nullptr)
             draw->resource_authority = IndexedResourceAuthority::explicit_bindings;
@@ -2927,13 +3125,35 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                 {owned_multimap_reflection_constants_[reflection_index].get(),
                  0U, portable_multimap_reflection_buffer_view_bytes}};
         }
+        const std::size_t tyre_index =
+            stock_tyres_constant_for_packet_[index];
+        if (tyre_index != invalid_resource_index) {
+            if (tyre_index >= owned_stock_tyres_material_constants_.size() ||
+                tyre_index >= owned_stock_tyres_constants_.size() ||
+                owned_stock_tyres_material_constants_[tyre_index] == nullptr ||
+                owned_stock_tyres_constants_[tyre_index] == nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_owned_stock_tyres_constant_missing",
+                         "A used tyre material has no owned material or control constant buffer"},
+                        {}};
+            draw->resource_authority =
+                IndexedResourceAuthority::explicit_bindings;
+            draw->material_binding = {
+                owned_stock_tyres_material_constants_[tyre_index].get(), 0U,
+                portable_stock_tyres_material_buffer_view_bytes};
+            draw->multimap_reflection_binding = {
+                frame.multimap_reflection_cube,
+                {owned_stock_tyres_constants_[tyre_index].get(), 0U,
+                 portable_stock_tyres_buffer_view_bytes}};
+        }
         if (resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
-            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame) {
+            resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame ||
+            stock_tyres_layout) {
             if (!owns_frame_constants())
                 return {IndexedStaticMeshBatchStatus::invalid_request,
                         {"static_scene_owned_frame_constant_missing",

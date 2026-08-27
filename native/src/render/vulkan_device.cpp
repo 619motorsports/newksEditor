@@ -2240,6 +2240,18 @@ struct VulkanIndexedBatchDraw {
     VkImage normal_image = VK_NULL_HANDLE;
     VkImageView normal_view = VK_NULL_HANDLE;
     VkSampler normal_sampler = VK_NULL_HANDLE;
+    bool has_tyre_dirty_binding = false;
+    VkImage tyre_dirty_image = VK_NULL_HANDLE;
+    VkImageView tyre_dirty_view = VK_NULL_HANDLE;
+    VkSampler tyre_dirty_sampler = VK_NULL_HANDLE;
+    bool has_tyre_blur_binding = false;
+    VkImage tyre_blur_image = VK_NULL_HANDLE;
+    VkImageView tyre_blur_view = VK_NULL_HANDLE;
+    VkSampler tyre_blur_sampler = VK_NULL_HANDLE;
+    bool has_tyre_normal_blur_binding = false;
+    VkImage tyre_normal_blur_image = VK_NULL_HANDLE;
+    VkImageView tyre_normal_blur_view = VK_NULL_HANDLE;
+    VkSampler tyre_normal_blur_sampler = VK_NULL_HANDLE;
     bool has_maps_binding = false;
     VkImage maps_image = VK_NULL_HANDLE;
     VkImageView maps_view = VK_NULL_HANDLE;
@@ -2314,6 +2326,7 @@ struct VulkanTransientSampledDescriptors {
     bool includes_material_buffer = false;
     bool includes_frame_buffer = false;
     bool includes_normal_binding = false;
+    bool includes_stock_tyres = false;
     bool includes_maps_binding = false;
     bool includes_detail_binding = false;
     bool includes_normal_detail_binding = false;
@@ -2332,6 +2345,7 @@ struct VulkanTransientSampledDescriptors {
           includes_material_buffer(std::exchange(other.includes_material_buffer, false)),
           includes_frame_buffer(std::exchange(other.includes_frame_buffer, false)),
           includes_normal_binding(std::exchange(other.includes_normal_binding, false)),
+          includes_stock_tyres(std::exchange(other.includes_stock_tyres, false)),
           includes_maps_binding(std::exchange(other.includes_maps_binding, false)),
           includes_detail_binding(std::exchange(other.includes_detail_binding, false)),
           includes_normal_detail_binding(std::exchange(other.includes_normal_detail_binding, false)),
@@ -2352,6 +2366,7 @@ struct VulkanTransientSampledDescriptors {
         includes_material_buffer = std::exchange(other.includes_material_buffer, false);
         includes_frame_buffer = std::exchange(other.includes_frame_buffer, false);
         includes_normal_binding = std::exchange(other.includes_normal_binding, false);
+        includes_stock_tyres = std::exchange(other.includes_stock_tyres, false);
         includes_maps_binding = std::exchange(other.includes_maps_binding, false);
         includes_detail_binding = std::exchange(other.includes_detail_binding, false);
         includes_normal_detail_binding = std::exchange(other.includes_normal_detail_binding, false);
@@ -2377,6 +2392,7 @@ struct VulkanTransientSampledDescriptors {
         includes_material_buffer = false;
         includes_frame_buffer = false;
         includes_normal_binding = false;
+        includes_stock_tyres = false;
         includes_maps_binding = false;
         includes_detail_binding = false;
         includes_normal_detail_binding = false;
@@ -3301,6 +3317,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                       bool includes_damage_mask_binding,
                                       bool includes_directional_shadow_binding,
                                       bool includes_multimap_reflection_binding,
+                                      bool includes_stock_tyres,
                                       bool includes_alpha_tested_binding,
                                       Diagnostic& diagnostic) {
     descriptors.reset();
@@ -3317,6 +3334,7 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
                                        includes_detail_stack || includes_damage_stack;
     descriptors.includes_normal_binding = includes_normal_binding || includes_maps_binding ||
                                           includes_detail_stack || includes_damage_stack;
+    descriptors.includes_stock_tyres = includes_stock_tyres;
     descriptors.includes_maps_binding = includes_maps_binding || includes_detail_stack ||
                                         includes_damage_stack;
     descriptors.includes_detail_binding = includes_detail_stack;
@@ -3431,7 +3449,8 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(context->physical_device, &properties);
     const std::uint32_t material_sampled_descriptor_count =
-        (includes_damage_stack && includes_detail_stack) ? 7U
+        includes_stock_tyres ? 5U
+        : (includes_damage_stack && includes_detail_stack) ? 7U
         : includes_damage_stack ? 5U : includes_normal_detail_binding ? 5U
         : includes_detail_stack ? 5U : includes_maps_binding ? 3U : includes_normal_binding ? 2U : 1U;
     const std::uint32_t sampled_image_descriptor_count =
@@ -3467,6 +3486,8 @@ bool create_sampled_descriptor_layout(const std::shared_ptr<VulkanContext>& cont
     const std::uint32_t base_binding_count =
         includes_directional_shadow_binding
             ? 21U
+            : includes_stock_tyres
+                  ? 12U
             : (includes_detail_stack && includes_damage_stack)
                   ? 16U
                   : (includes_detail_stack || includes_damage_stack)
@@ -3606,7 +3627,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
                                       Diagnostic& diagnostic) {
     std::size_t descriptor_count = 0U;
     for (const VulkanIndexedBatchDraw& draw : draws) {
-        if (draw.has_sampled_binding || draw.has_normal_binding || draw.has_maps_binding ||
+        if (draw.has_sampled_binding || draw.has_normal_binding || draw.has_tyre_dirty_binding ||
+            draw.has_tyre_blur_binding || draw.has_tyre_normal_blur_binding || draw.has_maps_binding ||
             draw.has_detail_binding || draw.has_normal_detail_binding ||
             draw.has_damage_binding || draw.has_damage_mask_binding ||
             draw.has_material_binding || draw.has_frame_binding ||
@@ -3630,7 +3652,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     const bool includes_detail_descriptors = descriptors.includes_detail_binding ||
                                              descriptors.includes_normal_detail_binding;
     const std::size_t material_sampled_descriptors_per_set =
-        (includes_damage_descriptors && includes_detail_descriptors) ? 7U
+        descriptors.includes_stock_tyres ? 5U
+                                                        : (includes_damage_descriptors && includes_detail_descriptors) ? 7U
                                                         : descriptors.includes_damage_mask_binding
                                                         ? 5U
                                                         : descriptors.includes_damage_binding ? 5U
@@ -3729,7 +3752,8 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
     std::size_t next = 0U;
     for (std::size_t index = 0U; index < draws.size(); ++index) {
         const VulkanIndexedBatchDraw& draw = draws[index];
-        if (!draw.has_sampled_binding && !draw.has_normal_binding && !draw.has_maps_binding &&
+        if (!draw.has_sampled_binding && !draw.has_normal_binding && !draw.has_tyre_dirty_binding &&
+            !draw.has_tyre_blur_binding && !draw.has_tyre_normal_blur_binding && !draw.has_maps_binding &&
             !draw.has_detail_binding && !draw.has_normal_detail_binding &&
             !draw.has_damage_binding && !draw.has_damage_mask_binding &&
             !draw.has_material_binding && !draw.has_frame_binding &&
@@ -3747,6 +3771,21 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
         normal_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkDescriptorImageInfo normal_sampler_info{};
         normal_sampler_info.sampler = draw.normal_sampler;
+        VkDescriptorImageInfo tyre_dirty_image_info{};
+        tyre_dirty_image_info.imageView = draw.tyre_dirty_view;
+        tyre_dirty_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo tyre_dirty_sampler_info{};
+        tyre_dirty_sampler_info.sampler = draw.tyre_dirty_sampler;
+        VkDescriptorImageInfo tyre_blur_image_info{};
+        tyre_blur_image_info.imageView = draw.tyre_blur_view;
+        tyre_blur_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo tyre_blur_sampler_info{};
+        tyre_blur_sampler_info.sampler = draw.tyre_blur_sampler;
+        VkDescriptorImageInfo tyre_normal_blur_image_info{};
+        tyre_normal_blur_image_info.imageView = draw.tyre_normal_blur_view;
+        tyre_normal_blur_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo tyre_normal_blur_sampler_info{};
+        tyre_normal_blur_sampler_info.sampler = draw.tyre_normal_blur_sampler;
         VkDescriptorImageInfo maps_image_info{};
         maps_image_info.imageView = draw.maps_view;
         maps_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3836,6 +3875,30 @@ bool allocate_sampled_descriptor_sets(const std::shared_ptr<VulkanContext>& cont
             writes[write_count].descriptorCount = 1U;
             writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
             writes[write_count].pImageInfo = &normal_sampler_info;
+            ++write_count;
+        }
+        if (draw.has_tyre_dirty_binding) {
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 6U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &tyre_dirty_image_info, nullptr, nullptr};
+            ++write_count;
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 7U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLER, &tyre_dirty_sampler_info, nullptr, nullptr};
+            ++write_count;
+        }
+        if (draw.has_tyre_blur_binding) {
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 8U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &tyre_blur_image_info, nullptr, nullptr};
+            ++write_count;
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 9U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLER, &tyre_blur_sampler_info, nullptr, nullptr};
+            ++write_count;
+        }
+        if (draw.has_tyre_normal_blur_binding) {
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 10U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &tyre_normal_blur_image_info, nullptr, nullptr};
+            ++write_count;
+            writes[write_count] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 11U, 0U, 1U,
+                                    VK_DESCRIPTOR_TYPE_SAMPLER, &tyre_normal_blur_sampler_info, nullptr, nullptr};
             ++write_count;
         }
         if (draw.has_maps_binding) {
@@ -4780,6 +4843,7 @@ bool draw_indexed_batch_and_readback(
     bool has_material_binding = false;
     bool has_frame_binding = false;
     bool has_normal_binding = false;
+    bool has_stock_tyres = false;
     bool has_maps_binding = false;
     bool has_detail_binding = false;
     bool has_normal_detail_binding = false;
@@ -4793,6 +4857,8 @@ bool draw_indexed_batch_and_readback(
         has_material_binding = has_material_binding || draw.has_material_binding;
         has_frame_binding = has_frame_binding || draw.has_frame_binding;
         has_normal_binding = has_normal_binding || draw.has_normal_binding;
+        has_stock_tyres = has_stock_tyres || draw.has_tyre_dirty_binding ||
+                          draw.has_tyre_blur_binding || draw.has_tyre_normal_blur_binding;
         has_maps_binding = has_maps_binding || draw.has_maps_binding;
         has_detail_binding = has_detail_binding || draw.has_detail_binding;
         has_normal_detail_binding = has_normal_detail_binding || draw.has_normal_detail_binding;
@@ -4832,7 +4898,7 @@ bool draw_indexed_batch_and_readback(
     for (const VulkanDepthAttachment* attachment : sampled_shadow_attachments)
         sampled_shadow_original_layouts.push_back(attachment->layout());
     VulkanTransientSampledDescriptors descriptors;
-    if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
+    if ((has_sampled_binding || has_normal_binding || has_stock_tyres || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
          has_material_binding || has_frame_binding ||
          has_directional_shadow_binding || has_multimap_reflection_binding) &&
@@ -4842,6 +4908,7 @@ bool draw_indexed_batch_and_readback(
                                           has_damage_mask_binding,
                                           has_directional_shadow_binding,
                                           has_multimap_reflection_binding,
+                                          has_stock_tyres,
                                           false, diagnostic))
         return false;
     VulkanTransientSelectedDescriptors selected_descriptors;
@@ -5024,7 +5091,7 @@ bool draw_indexed_batch_and_readback(
     }
 
     std::vector<VkDescriptorSet> descriptor_sets;
-    if ((has_sampled_binding || has_normal_binding || has_maps_binding || has_detail_binding ||
+    if ((has_sampled_binding || has_normal_binding || has_stock_tyres || has_maps_binding || has_detail_binding ||
          has_normal_detail_binding || has_damage_binding || has_damage_mask_binding ||
          has_material_binding || has_frame_binding ||
          has_directional_shadow_binding || has_multimap_reflection_binding) &&
@@ -5895,7 +5962,7 @@ bool draw_depth_only_indexed_batch(
     if (has_alpha_tested_binding &&
         !create_sampled_descriptor_layout(context, descriptors, false, false,
                                            false, false, false, false, false,
-                                           false, false, false, true,
+                                           false, false, false, false, true,
                                            diagnostic)) {
         vkDestroyFramebuffer(context->device, framebuffer, nullptr);
         vkDestroyRenderPass(context->device, render_pass, nullptr);
@@ -8215,6 +8282,7 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
     bool frame_declaration = false;
     bool normal_texture_declaration = false;
     bool normal_sampler_declaration = false;
+    const bool stock_tyres_layout = pipeline_declares_stock_tyres(*request.pipeline);
     bool maps_texture_declaration = false;
     bool maps_sampler_declaration = false;
     bool detail_texture_declaration = false;
@@ -8240,17 +8308,17 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         else if (resource.binding == 5U && resource.kind == PipelineResourceKind::sampler)
             normal_sampler_declaration = true;
         else if (resource.binding == 6U && resource.kind == PipelineResourceKind::sampled_texture)
-            maps_texture_declaration = true;
+            maps_texture_declaration = !stock_tyres_layout;
         else if (resource.binding == 7U && resource.kind == PipelineResourceKind::sampler)
-            maps_sampler_declaration = true;
+            maps_sampler_declaration = !stock_tyres_layout;
         else if (resource.binding == 8U && resource.kind == PipelineResourceKind::sampled_texture)
-            detail_texture_declaration = true;
+            detail_texture_declaration = !stock_tyres_layout;
         else if (resource.binding == 9U && resource.kind == PipelineResourceKind::sampler)
-            detail_sampler_declaration = true;
+            detail_sampler_declaration = !stock_tyres_layout;
         else if (resource.binding == 10U && resource.kind == PipelineResourceKind::sampled_texture)
-            normal_detail_texture_declaration = true;
+            normal_detail_texture_declaration = !stock_tyres_layout;
         else if (resource.binding == 11U && resource.kind == PipelineResourceKind::sampler)
-            normal_detail_sampler_declaration = true;
+            normal_detail_sampler_declaration = !stock_tyres_layout;
         else if (resource.binding == 12U && resource.kind == PipelineResourceKind::sampled_texture)
             damage_texture_declaration = true;
         else if (resource.binding == 13U && resource.kind == PipelineResourceKind::sampler)
@@ -8271,6 +8339,22 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         return false;
     }
     const bool normal_declaration = normal_texture_declaration;
+    const bool tyre_declaration = stock_tyres_layout;
+    if (tyre_declaration && (!material_declaration || !frame_declaration)) {
+        diagnostic = {"vulkan_indexed_stock_tyres_layout_unsupported",
+                      "Vulkan stock-tyres resources require material and frame bindings at 2 and 3"};
+        return false;
+    }
+    if (tyre_declaration &&
+        (request.maps_binding.texture != nullptr || request.maps_binding.sampler != nullptr ||
+         request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr ||
+         request.normal_detail_binding.texture != nullptr || request.normal_detail_binding.sampler != nullptr ||
+         request.damage_binding.texture != nullptr || request.damage_binding.sampler != nullptr ||
+         request.damage_mask_binding.texture != nullptr || request.damage_mask_binding.sampler != nullptr)) {
+        diagnostic = {"vulkan_indexed_stock_tyres_binding_alias",
+                      "Stock-tyres resources must use explicit tyre bindings, not maps/detail/damage fields"};
+        return false;
+    }
     if (normal_declaration && (!material_declaration || !frame_declaration)) {
         diagnostic = {"vulkan_indexed_normal_layout_unsupported",
                       "Vulkan indexed normal resources require material and frame bindings at 2 and 3"};
@@ -8437,6 +8521,68 @@ bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
         draw.normal_sampler = normal_sampler->sampler();
     }
 
+    const auto prepare_tyre_binding =
+        [&](const IndexedSampledTextureBinding& binding, const char* role,
+            bool& enabled, VkImage& image, VkImageView& view, VkSampler& output_sampler) {
+            const auto* source_texture = dynamic_cast<const VulkanTexture*>(binding.texture);
+            const auto* source_sampler = dynamic_cast<const VulkanSampler*>(binding.sampler);
+            const std::string prefix = std::string("vulkan_indexed_stock_tyres_") + role;
+            if (source_texture == nullptr || source_sampler == nullptr) {
+                diagnostic = {prefix + "_resource_type_unsupported",
+                              "Vulkan stock-tyres resources must be Vulkan texture and sampler handles"};
+                return false;
+            }
+            if (source_texture->context() != context || source_sampler->context() != context) {
+                diagnostic = {prefix + "_resource_context_mismatch",
+                              "Vulkan stock-tyres resources must belong to the draw device"};
+                return false;
+            }
+            const TextureDescription& source = source_texture->info().description;
+            const std::uint32_t usage = static_cast<std::uint32_t>(source.usage);
+            const std::uint32_t forbidden_usage =
+                static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                static_cast<std::uint32_t>(TextureUsage::storage) |
+                static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+            if ((usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+                (usage & forbidden_usage) != 0U || source.width == 0U || source.height == 0U ||
+                source.mip_levels == 0U || source.array_layers != 1U ||
+                !source_texture->initialized() ||
+                source_texture->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+                source_texture->image() == VK_NULL_HANDLE || source_texture->view() == VK_NULL_HANDLE ||
+                source_sampler->sampler() == VK_NULL_HANDLE) {
+                diagnostic = {prefix + "_resource_invalid",
+                              "Vulkan stock-tyres resources must be initialized sampled-only shader-readable handles"};
+                return false;
+            }
+            Diagnostic sampler_diagnostic;
+            if (validate_sampler_description(source_sampler->info().description, sampler_diagnostic) !=
+                SamplerStatus::ready) {
+                diagnostic = {prefix + "_sampler_invalid", sampler_diagnostic.message};
+                return false;
+            }
+            enabled = true;
+            image = source_texture->image();
+            view = source_texture->view();
+            output_sampler = source_sampler->sampler();
+            return true;
+        };
+    if (tyre_declaration) {
+        if (request.tyre_dirty_binding.texture == nullptr || request.tyre_dirty_binding.sampler == nullptr ||
+            request.tyre_blur_binding.texture == nullptr || request.tyre_blur_binding.sampler == nullptr ||
+            request.tyre_normal_blur_binding.texture == nullptr || request.tyre_normal_blur_binding.sampler == nullptr) {
+            diagnostic = {"vulkan_indexed_stock_tyres_binding_missing",
+                          "Vulkan stock-tyres pipelines require dirty, blur, and normal-blur texture/sampler pairs"};
+            return false;
+        }
+        if (!prepare_tyre_binding(request.tyre_dirty_binding, "dirty", draw.has_tyre_dirty_binding,
+                                  draw.tyre_dirty_image, draw.tyre_dirty_view, draw.tyre_dirty_sampler) ||
+            !prepare_tyre_binding(request.tyre_blur_binding, "blur", draw.has_tyre_blur_binding,
+                                  draw.tyre_blur_image, draw.tyre_blur_view, draw.tyre_blur_sampler) ||
+            !prepare_tyre_binding(request.tyre_normal_blur_binding, "normal_blur",
+                                  draw.has_tyre_normal_blur_binding, draw.tyre_normal_blur_image,
+                                  draw.tyre_normal_blur_view, draw.tyre_normal_blur_sampler))
+            return false;
+    }
     if (maps_declaration) {
         const auto* maps_texture = dynamic_cast<const VulkanTexture*>(request.maps_binding.texture);
         const auto* maps_sampler = dynamic_cast<const VulkanSampler*>(request.maps_binding.sampler);

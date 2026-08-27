@@ -1771,6 +1771,41 @@ bool pipeline_declares_multimap_reflection(
                        [](const bool value) { return value; });
 }
 
+bool pipeline_declares_stock_tyres(
+    const PipelineProgram& pipeline) noexcept {
+    struct ExpectedResource {
+        PipelineResourceKind kind;
+        std::string_view name;
+    };
+    constexpr std::array<ExpectedResource, 12U> expected = {{
+        {PipelineResourceKind::sampled_texture, "txDiffuse"},
+        {PipelineResourceKind::sampler, "samDiffuse"},
+        {PipelineResourceKind::uniform_buffer, "TyreMaterial"},
+        {PipelineResourceKind::uniform_buffer, "TyreFrame"},
+        {PipelineResourceKind::sampled_texture, "txNormal"},
+        {PipelineResourceKind::sampler, "samNormal"},
+        {PipelineResourceKind::sampled_texture, "txDirty"},
+        {PipelineResourceKind::sampler, "samDirty"},
+        {PipelineResourceKind::sampled_texture, "txBlur"},
+        {PipelineResourceKind::sampler, "samBlur"},
+        {PipelineResourceKind::sampled_texture, "txNormalBlur"},
+        {PipelineResourceKind::sampler, "samNormalBlur"},
+    }};
+    std::array<bool, expected.size()> found{};
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.binding > 11U) continue;
+        if (resource.set != 0U) return false;
+        const std::size_t index = resource.binding;
+        if (found[index] || resource.kind != expected[index].kind ||
+            resource.name != expected[index].name)
+            return false;
+        found[index] = true;
+    }
+    return std::all_of(found.begin(), found.end(), [](const bool value) {
+        return value;
+    });
+}
+
 IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     const PipelineProgram& pipeline) noexcept {
     if (pipeline.resources.empty())
@@ -1795,6 +1830,8 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         });
     if (has_reflection_range && !has_reflection)
         return IndexedPortableResourceLayout::unsupported;
+    if (pipeline_declares_stock_tyres(pipeline))
+        return IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame;
     const std::size_t material_resource_count =
         pipeline.resources.size() - (has_receiver ? 5U : 0U) -
         (has_reflection ? 3U : 0U);
@@ -2191,6 +2228,12 @@ bool has_portable_stock_resource_binding(
            request.damage_binding.sampler != nullptr ||
            request.damage_mask_binding.texture != nullptr ||
            request.damage_mask_binding.sampler != nullptr ||
+           request.tyre_dirty_binding.texture != nullptr ||
+           request.tyre_dirty_binding.sampler != nullptr ||
+           request.tyre_blur_binding.texture != nullptr ||
+           request.tyre_blur_binding.sampler != nullptr ||
+           request.tyre_normal_blur_binding.texture != nullptr ||
+           request.tyre_normal_blur_binding.sampler != nullptr ||
            request.material_binding.buffer != nullptr ||
            request.material_binding.offset_bytes != 0U ||
            request.material_binding.range_bytes != 0U ||
@@ -2914,6 +2957,14 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
     const bool has_damage_sampler = request.damage_binding.sampler != nullptr;
     const bool has_damage_mask_texture = request.damage_mask_binding.texture != nullptr;
     const bool has_damage_mask_sampler = request.damage_mask_binding.sampler != nullptr;
+    const bool has_tyre_dirty_texture = request.tyre_dirty_binding.texture != nullptr;
+    const bool has_tyre_dirty_sampler = request.tyre_dirty_binding.sampler != nullptr;
+    const bool has_tyre_blur_texture = request.tyre_blur_binding.texture != nullptr;
+    const bool has_tyre_blur_sampler = request.tyre_blur_binding.sampler != nullptr;
+    const bool has_tyre_normal_blur_texture =
+        request.tyre_normal_blur_binding.texture != nullptr;
+    const bool has_tyre_normal_blur_sampler =
+        request.tyre_normal_blur_binding.sampler != nullptr;
     const bool has_material_buffer = request.material_binding.buffer != nullptr;
     const bool has_material_range = request.material_binding.offset_bytes != 0U ||
                                     request.material_binding.range_bytes != 0U;
@@ -2977,6 +3028,12 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
             request.normal_detail_binding.sampler != nullptr ||
             has_damage_texture || has_damage_sampler || has_damage_mask_texture ||
             has_damage_mask_sampler ||
+            request.tyre_dirty_binding.texture != nullptr ||
+            request.tyre_dirty_binding.sampler != nullptr ||
+            request.tyre_blur_binding.texture != nullptr ||
+            request.tyre_blur_binding.sampler != nullptr ||
+            request.tyre_normal_blur_binding.texture != nullptr ||
+            request.tyre_normal_blur_binding.sampler != nullptr ||
             has_material_buffer || has_material_range ||
             has_frame_buffer || has_frame_range ||
             has_shadow_map || has_shadow_sampler || has_shadow_constants || has_shadow_range ||
@@ -2996,13 +3053,14 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
     } else {
         if (resource_layout == IndexedPortableResourceLayout::unsupported) {
             diagnostic = {"indexed_resource_layout_unsupported",
-                          "The portable material ABI requires the bounded diffuse, normal, txMaps, detail-stack, or damage layout"};
+                          "The portable material ABI requires the bounded diffuse, normal, stock tyre, txMaps, detail-stack, or damage layout"};
             return IndexedStaticMeshDrawStatus::unsupported;
         }
         const bool material_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
@@ -3011,12 +3069,14 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
             resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
         const bool normal_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame ||
+            resource_layout == IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
@@ -3026,7 +3086,9 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
-        if (reflection_declaration && !maps_declaration) {
+        const bool tyre_declaration =
+            resource_layout == IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame;
+        if (reflection_declaration && !maps_declaration && !tyre_declaration) {
             diagnostic = {
                 "indexed_multimap_reflection_layout_unsupported",
                 "The portable MultiMap reflection extension requires the txMaps material layout"};
@@ -3059,6 +3121,22 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
                               : "The diffuse ABI cannot receive a normal texture or sampler"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
+        const bool any_tyre_binding = has_tyre_dirty_texture || has_tyre_dirty_sampler ||
+                                      has_tyre_blur_texture || has_tyre_blur_sampler ||
+                                      has_tyre_normal_blur_texture || has_tyre_normal_blur_sampler;
+        if (!tyre_declaration && any_tyre_binding) {
+            diagnostic = {"indexed_tyre_binding_unexpected",
+                          "A non-tyre material layout cannot receive stock tyre resources"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (tyre_declaration &&
+            (!has_tyre_dirty_texture || !has_tyre_dirty_sampler ||
+             !has_tyre_blur_texture || !has_tyre_blur_sampler ||
+             !has_tyre_normal_blur_texture || !has_tyre_normal_blur_sampler)) {
+            diagnostic = {"indexed_tyre_binding_missing",
+                          "The stock tyre layout requires dirty, blur, and blurred-normal texture/sampler pairs"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
         if (maps_declaration != has_maps_texture || maps_declaration != has_maps_sampler) {
             diagnostic = {maps_declaration ? "indexed_maps_binding_missing"
                                            : "indexed_maps_binding_unexpected",
@@ -3079,6 +3157,74 @@ static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_int
                     ? "The portable MultiMap reflection extension requires one cubemap, sampler, and constants buffer"
                     : "A pipeline without the portable MultiMap reflection extension cannot receive cubemap resources"};
             return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        const auto validate_tyre_binding =
+            [&](const IndexedSampledTextureBinding& binding,
+                const char* role) -> IndexedStaticMeshDrawStatus {
+            const Texture& tyre_texture = *binding.texture;
+            const Sampler& tyre_sampler = *binding.sampler;
+            const std::string prefix = std::string("indexed_tyre_") + role;
+            if (&tyre_texture == &texture) {
+                diagnostic = {prefix + "_feedback_loop",
+                              "The color target cannot also be a stock tyre input texture"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (tyre_texture.backend() != texture.backend() ||
+                tyre_sampler.backend() != texture.backend()) {
+                diagnostic = {prefix + "_backend_mismatch",
+                              "Stock tyre texture, sampler, and color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const TextureDescription& description = tyre_texture.info().description;
+            const std::uint32_t usage = static_cast<std::uint32_t>(description.usage);
+            const std::uint32_t forbidden =
+                static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                static_cast<std::uint32_t>(TextureUsage::storage) |
+                static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+            if ((usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                diagnostic = {prefix + "_texture_usage_invalid",
+                              "A stock tyre input texture requires sampled usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if ((usage & forbidden) != 0U) {
+                diagnostic = {prefix + "_texture_usage_unsupported",
+                              "Stock tyre input textures reject writable or attachment usage"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            if (description.width == 0U || description.height == 0U ||
+                description.mip_levels == 0U || description.array_layers != 1U ||
+                description.samples != 1U || description.shape != TextureShape::texture_2d ||
+                !portable_sampled_color_format(description.format, true) ||
+                (texture_format_is_compressed(description.format) &&
+                 description.mutability != TextureMutability::immutable)) {
+                diagnostic = {prefix + "_texture_description_unsupported",
+                              "Stock tyre inputs require one-layer sampled color texture data"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            Diagnostic sampler_diagnostic;
+            const SamplerStatus sampler_status = validate_sampler_description(
+                tyre_sampler.info().description, sampler_diagnostic);
+            if (sampler_status != SamplerStatus::ready) {
+                diagnostic = {sampler_diagnostic.code.empty()
+                                  ? prefix + "_sampler_invalid"
+                                  : prefix + "_" + sampler_diagnostic.code,
+                              sampler_diagnostic.message};
+                return sampler_status == SamplerStatus::unsupported
+                           ? IndexedStaticMeshDrawStatus::unsupported
+                           : IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            return IndexedStaticMeshDrawStatus::ready;
+        };
+        if (tyre_declaration) {
+            const std::array<std::pair<const IndexedSampledTextureBinding*, const char*>, 3U>
+                tyre_bindings = {{{&request.tyre_dirty_binding, "dirty"},
+                                  {&request.tyre_blur_binding, "blur"},
+                                  {&request.tyre_normal_blur_binding, "normal_blur"}}};
+            for (const auto& [binding, role] : tyre_bindings) {
+                const IndexedStaticMeshDrawStatus status =
+                    validate_tyre_binding(*binding, role);
+                if (status != IndexedStaticMeshDrawStatus::ready) return status;
+            }
         }
         const bool has_detail_texture = request.detail_binding.texture != nullptr;
         const bool has_detail_sampler = request.detail_binding.sampler != nullptr;

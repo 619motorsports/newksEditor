@@ -2,6 +2,7 @@
 
 #include "apex/render/pipeline.hpp"
 #include "apex/render/stock_multimap_source.hpp"
+#include "apex/render/stock_tyres_source.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -38,7 +39,8 @@ namespace {
            key == "ksperpixelmultimap_at" ||
            key == "ksperpixelmultimap_nmdetail" ||
            key == "ksperpixelmultimap_at_nmdetail" ||
-           key == "ksperpixelmultimap_damage_dirt";
+           key == "ksperpixelmultimap_damage_dirt" ||
+           key == "kstyres" || key == "newstefano_kstyres";
 }
 
 [[nodiscard]] bool multimap_reflection_family(std::string_view shader) {
@@ -46,7 +48,8 @@ namespace {
     return key == "ksperpixelmultimap" ||
            key == "ksperpixelmultimap_at" ||
            key == "ksperpixelmultimap_nmdetail" ||
-           key == "ksperpixelmultimap_at_nmdetail";
+           key == "ksperpixelmultimap_at_nmdetail" ||
+           key == "kstyres" || key == "newstefano_kstyres";
 }
 
 [[nodiscard]] bool finite_material(const KsPerPixelMaterialConstants& value) {
@@ -229,10 +232,23 @@ namespace {
         resources.push_back({kind, 0U, binding, std::move(name)});
     };
     add(PipelineResourceKind::sampled_texture, 0U, "txDiffuse");
-    add(PipelineResourceKind::sampler, 1U, "txDiffuseSampler");
-    add(PipelineResourceKind::uniform_buffer, 2U, "ksPerPixelMaterial");
-    add(PipelineResourceKind::uniform_buffer, 3U, "ksPerPixelFrame");
-    if (key == "ksperpixelnm") {
+    const bool tyres = key == "kstyres" || key == "newstefano_kstyres";
+    add(PipelineResourceKind::sampler, 1U,
+        tyres ? "samDiffuse" : "txDiffuseSampler");
+    add(PipelineResourceKind::uniform_buffer, 2U,
+        tyres ? "TyreMaterial" : "ksPerPixelMaterial");
+    add(PipelineResourceKind::uniform_buffer, 3U,
+        tyres ? "TyreFrame" : "ksPerPixelFrame");
+    if (tyres) {
+        add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
+        add(PipelineResourceKind::sampler, 5U, "samNormal");
+        add(PipelineResourceKind::sampled_texture, 6U, "txDirty");
+        add(PipelineResourceKind::sampler, 7U, "samDirty");
+        add(PipelineResourceKind::sampled_texture, 8U, "txBlur");
+        add(PipelineResourceKind::sampler, 9U, "samBlur");
+        add(PipelineResourceKind::sampled_texture, 10U, "txNormalBlur");
+        add(PipelineResourceKind::sampler, 11U, "samNormalBlur");
+    } else if (key == "ksperpixelnm") {
         add(PipelineResourceKind::sampled_texture, 4U, "txNormal");
         add(PipelineResourceKind::sampler, 5U, "txNormalSampler");
     } else if (key == "ksperpixelmultimap" ||
@@ -276,7 +292,8 @@ namespace {
         add(PipelineResourceKind::sampled_texture, 21U, "txCube");
         add(PipelineResourceKind::sampler, 22U, "txCubeSampler");
         add(PipelineResourceKind::uniform_buffer, 23U,
-            "ksPerPixelMultiMapReflection");
+            tyres ? "TyreControls"
+                  : "ksPerPixelMultiMapReflection");
     }
     return resources;
 }
@@ -363,6 +380,8 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
                                           std::size_t max_string, Diagnostic& diagnostic) {
     const std::size_t expected = expected_texture_slots(shader);
     const bool damage = canonical(shader) == "ksperpixelmultimap_damage_dirt";
+    const bool tyres = canonical(shader) == "kstyres" ||
+                       canonical(shader) == "newstefano_kstyres";
     if ((!damage && packet.resources.size() != expected) ||
         (damage && packet.resources.size() != expected &&
          packet.resources.size() != expected + 1U)) {
@@ -381,7 +400,11 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
             diagnostic = diag("stock_material_resource_duplicate", "Draw packet resource slots must be unique");
             return false;
         }
-        const bool allowed = damage
+        const bool allowed = tyres
+                                 ? key == "txdiffuse" || key == "txnormal" ||
+                                       key == "txdirty" || key == "txblur" ||
+                                       key == "txnormalblur"
+                             : damage
                                  ? key == "txdiffuse" || key == "txnormal" || key == "txmaps" ||
                                        key == "txdamage" || key == "txdamagemask" || key == "txdust"
                                  : key == "txdiffuse" || key == "txnormal" || key == "txmaps" ||
@@ -394,7 +417,10 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
     const bool missing_diffuse = seen.count("txdiffuse") == 0U;
     const bool missing_normal = expected >= 2U && seen.count("txnormal") == 0U;
     const bool missing_maps = expected >= 3U && seen.count("txmaps") == 0U;
-    const bool missing_detail = expected == 5U && !damage &&
+    const bool missing_tyres = tyres &&
+        (seen.count("txdirty") == 0U || seen.count("txblur") == 0U ||
+         seen.count("txnormalblur") == 0U);
+    const bool missing_detail = expected == 5U && !damage && !tyres &&
                                 (seen.count("txdetail") == 0U ||
                                  (seen.count("txnormaldetail") == 0U &&
                                   seen.count("txdetailnm") == 0U));
@@ -406,7 +432,8 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
                                        seen.count("txdust") == 0U) ||
                                       (packet.resources.size() == expected &&
                                        seen.count("txdust") != 0U));
-    if (missing_diffuse || missing_normal || missing_maps || missing_detail || missing_damage ||
+    if (missing_diffuse || missing_normal || (!tyres && missing_maps) ||
+        missing_tyres || missing_detail || missing_damage ||
         dust_count_mismatch) {
         diagnostic = diag("stock_material_resources_incomplete", "Draw packet is missing a required stock texture role");
         return false;
@@ -575,6 +602,32 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
             return false;
         }
     }
+    if (request.builtin_stock_tyres_source ==
+        BuiltinStockTyresSourceSelector::stock_tyres) {
+        const std::uint64_t owner_shader_bytes = std::max(
+            std::max(
+                static_cast<std::uint64_t>(stock_tyres_source_shader_bytes(
+                    Backend::Vulkan,
+                    StockTyresSourceVariant::directional_shadow_receiver)),
+                static_cast<std::uint64_t>(stock_tyres_source_shader_bytes(
+                    Backend::D3D12,
+                    StockTyresSourceVariant::directional_shadow_receiver))),
+            std::max(
+                static_cast<std::uint64_t>(stock_tyres_source_shader_bytes(
+                    Backend::Vulkan, StockTyresSourceVariant::base)),
+                static_cast<std::uint64_t>(stock_tyres_source_shader_bytes(
+                    Backend::D3D12, StockTyresSourceVariant::base))));
+        const std::uint64_t copies = peak_pipeline_copy_count + 2U;
+        if ((copies != 0U &&
+             owner_shader_bytes >
+                 std::numeric_limits<std::uint64_t>::max() / copies) ||
+            !charge(owner_shader_bytes * copies, total, limit)) {
+            diagnostic = diag(
+                "stock_material_preparation_limit",
+                "Built-in stock tyre shader copies exceed the preparation limit");
+            return false;
+        }
+    }
     if (request.builtin_d3d12_native !=
         BuiltinD3D12StockNativeSelector::disabled) {
         if (!charge_count(request.builtin_d3d12_native_programs.size(),
@@ -611,6 +664,11 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
         !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
         !charge_count(request.model->materials.size(), sizeof(KsPerPixelMaterialConstants)) ||
+        (request.builtin_stock_tyres_source !=
+             BuiltinStockTyresSourceSelector::disabled &&
+         !charge_count(request.model->materials.size(),
+                       sizeof(StockTyresSourceMaterialConstants) +
+                           sizeof(StockTyresSourceConstants))) ||
         (request.multimap_reflection &&
          !charge_count(request.model->materials.size(),
                        sizeof(KsPerPixelMultiMapReflectionConstants))) ||
@@ -722,6 +780,14 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 StaticSceneResourceStatus::invalid_request,
                 "stock_material_multimap_source_selector_invalid",
                 "The built-in MultiMap source selector is invalid");
+        if (request.builtin_stock_tyres_source !=
+                BuiltinStockTyresSourceSelector::disabled &&
+            request.builtin_stock_tyres_source !=
+                BuiltinStockTyresSourceSelector::stock_tyres)
+            return fail(
+                StaticSceneResourceStatus::invalid_request,
+                "stock_material_tyres_source_selector_invalid",
+                "The built-in stock tyre source selector is invalid");
         if (request.builtin_vulkan_source !=
                 BuiltinVulkanStockSourceSelector::disabled &&
             request.builtin_d3d12_native !=
@@ -769,6 +835,10 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
         std::vector<KsPerPixelMultiMapReflectionConstants>
             multimap_reflection_constants(request.model->materials.size());
+        std::vector<StockTyresSourceMaterialConstants>
+            stock_tyres_material_constants(request.model->materials.size());
+        std::vector<StockTyresSourceConstants>
+            stock_tyres_constants(request.model->materials.size());
         std::vector<StockKsPerPixelMaterialConstants> native_constants(
             request.model->materials.size());
         std::vector<bool> native_constants_ready(
@@ -812,6 +882,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 source, node != nullptr && node->transparent, request.model->textures.size(),
                 overrides, request.limits.material);
             const std::string shader_key = canonical(binding.shader);
+            const bool tyres_family = shader_key == "kstyres" ||
+                                      shader_key == "newstefano_kstyres";
             const bool reflection_enabled =
                 request.multimap_reflection &&
                 multimap_reflection_family(binding.shader);
@@ -821,35 +893,61 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             if (!supported_family(binding.shader))
                 return fail(StaticSceneResourceStatus::unsupported,
                             "stock_material_family_unsupported", "The material shader family is outside the bounded production handoff");
+            if (tyres_family && !reflection_enabled)
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "stock_material_tyres_reflection_required",
+                    "The stock tyre path requires the explicit portable cubemap and control-record extension");
             if (overrides != nullptr && !overrides->resources.empty())
                 return fail(StaticSceneResourceStatus::unsupported,
                             "stock_material_texture_override_unsupported", "Texture overrides require an explicit caller texture authority and are not silently translated");
 
-            const KsPerPixelMaterialResolveResult resolved =
-                resolve_ks_per_pixel_material_constants(binding,
-                    {false, shader_key == "ksperpixelat" ||
-                                shader_key == "ksperpixelmultimap_at" ||
-                                shader_key ==
-                                    "ksperpixelmultimap_at_nmdetail",
-                     reflection_enabled});
-            if (!resolved.ok()) {
-                const StaticSceneResourceStatus status =
-                    resolved.status == KsPerPixelMaterialResolveStatus::unsupported
-                        ? StaticSceneResourceStatus::unsupported
-                        : StaticSceneResourceStatus::invalid_request;
-                return fail(status,
-                            resolved.diagnostic.code.empty() ? "stock_material_constants_invalid"
-                                                              : resolved.diagnostic.code,
-                            resolved.diagnostic.message.empty()
-                                ? "The bounded material constant resolver rejected the material"
-                                : resolved.diagnostic.message);
+            if (tyres_family) {
+                const StockTyresSourceMaterialResolveResult tyre_resolved =
+                    resolve_stock_tyres_source_constants(binding);
+                if (!tyre_resolved.ok())
+                    return fail(
+                        tyre_resolved.status ==
+                                KsTyreMaterialResolveStatus::unsupported
+                            ? StaticSceneResourceStatus::unsupported
+                            : StaticSceneResourceStatus::invalid_request,
+                        tyre_resolved.diagnostic.code.empty()
+                            ? "stock_material_tyres_constants_invalid"
+                            : tyre_resolved.diagnostic.code,
+                        tyre_resolved.diagnostic.message.empty()
+                            ? "The bounded tyre material resolver rejected the material"
+                            : tyre_resolved.diagnostic.message);
+                stock_tyres_material_constants[material_index] =
+                    tyre_resolved.material;
+                stock_tyres_constants[material_index] =
+                    tyre_resolved.constants;
+            } else {
+                const KsPerPixelMaterialResolveResult resolved =
+                    resolve_ks_per_pixel_material_constants(binding,
+                        {false, shader_key == "ksperpixelat" ||
+                                    shader_key == "ksperpixelmultimap_at" ||
+                                    shader_key ==
+                                        "ksperpixelmultimap_at_nmdetail",
+                         reflection_enabled});
+                if (!resolved.ok()) {
+                    const StaticSceneResourceStatus status =
+                        resolved.status == KsPerPixelMaterialResolveStatus::unsupported
+                            ? StaticSceneResourceStatus::unsupported
+                            : StaticSceneResourceStatus::invalid_request;
+                    return fail(status,
+                                resolved.diagnostic.code.empty() ? "stock_material_constants_invalid"
+                                                                  : resolved.diagnostic.code,
+                                resolved.diagnostic.message.empty()
+                                    ? "The bounded material constant resolver rejected the material"
+                                    : resolved.diagnostic.message);
+                }
+                if (!finite_material(resolved.constants))
+                    return fail(StaticSceneResourceStatus::invalid_request,
+                                "stock_material_constants_invalid",
+                                "The bounded material constant resolver produced non-finite values");
+                constants[material_index] = resolved.constants;
             }
-            if (!finite_material(resolved.constants))
-                return fail(StaticSceneResourceStatus::invalid_request,
-                            "stock_material_constants_invalid",
-                            "The bounded material constant resolver produced non-finite values");
-            constants[material_index] = resolved.constants;
-            if (reflection_enabled) {
+            if (reflection_enabled && !tyres_family) {
                 const KsPerPixelMultiMapReflectionResolveResult
                     reflection_resolved =
                         resolve_ks_per_pixel_multimap_reflection_constants(
@@ -947,6 +1045,18 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     !desired_transparent;
                 const bool use_builtin_multimap_source =
                     modules == nullptr && multimap_source_candidate;
+                const bool exact_tyres_source_family =
+                    canonical(source.shader) == shader_key && tyres_family;
+                const bool tyres_source_candidate =
+                    request.builtin_stock_tyres_source ==
+                        BuiltinStockTyresSourceSelector::stock_tyres &&
+                    exact_tyres_source_family &&
+                    packet.primitive == DrawPrimitiveKind::static_mesh &&
+                    shader_variant == StockMaterialShaderVariant::standard &&
+                    reflection_enabled && !request.wireframe &&
+                    !desired_transparent && !packet.flags.blend_enabled;
+                const bool use_builtin_tyres_source =
+                    modules == nullptr && tyres_source_candidate;
                 const bool d3d12_native_combined =
                     request.builtin_d3d12_native ==
                     BuiltinD3D12StockNativeSelector::
@@ -1022,6 +1132,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             : "The installed D3D12 base program requires a one-sample RGBA8, BGRA8, or RGBA16F color target and optional matching depth target");
                 if (modules == nullptr && !use_builtin_source &&
                     !use_builtin_multimap_source &&
+                    !use_builtin_tyres_source &&
                     !use_builtin_d3d12_native)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
@@ -1144,6 +1255,22 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                         seed.status)),
                             "The immutable MultiMap source-equivalent package is unavailable");
                     pipeline_request.shaders = seed.program->shaders;
+                } else if (use_builtin_tyres_source) {
+                    const StockTyresSourceVariant variant =
+                        request.directional_shadow_receiver
+                            ? StockTyresSourceVariant::directional_shadow_receiver
+                            : StockTyresSourceVariant::base;
+                    StockTyresSourceProgramResult seed =
+                        create_builtin_stock_tyres_source_program(
+                            device.info().backend, variant);
+                    if (!seed.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_tyres_source_seed_" +
+                                std::string(stock_tyres_source_status_name(
+                                    seed.status)),
+                            "The immutable stock tyre source-equivalent package is unavailable");
+                    pipeline_request.shaders = seed.program->shaders;
                 } else if (use_builtin_d3d12_native) {
                     const ValidatedStockKsPerPixelNativeProgram& program =
                         *d3d12_native_entry->program;
@@ -1207,6 +1334,27 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                                     stock_multimap_source_status_name(
                                         source_result.status)),
                             "The resolved render state is incompatible with the immutable MultiMap source-equivalent package");
+                    built.program = std::move(*source_result.program);
+                } else if (use_builtin_tyres_source) {
+                    const StockTyresSourceVariant variant =
+                        request.directional_shadow_receiver
+                            ? StockTyresSourceVariant::directional_shadow_receiver
+                            : StockTyresSourceVariant::base;
+                    StockTyresSourcePipelineState state;
+                    state.targets = built.program.targets;
+                    state.raster = built.program.raster;
+                    state.blend = built.program.blend;
+                    state.depth = built.program.depth;
+                    StockTyresSourceProgramResult source_result =
+                        create_builtin_stock_tyres_source_program(
+                            device.info().backend, variant, std::move(state));
+                    if (!source_result.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_tyres_source_" +
+                                std::string(stock_tyres_source_status_name(
+                                    source_result.status)),
+                            "The resolved render state is incompatible with the immutable stock tyre source-equivalent package");
                     built.program = std::move(*source_result.program);
                 }
                 const PipelineValidationResult final_validation =
@@ -1337,6 +1485,18 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         if (request.multimap_reflection)
             scene_request.multimap_reflection_constants_by_material =
                 multimap_reflection_constants;
+        if (request.builtin_stock_tyres_source !=
+                BuiltinStockTyresSourceSelector::disabled ||
+            std::any_of(packets.begin(), packets.end(), [](const DrawPacket& packet) {
+                const std::string shader = canonical(packet.material_profile.shader);
+                return shader == "kstyres" ||
+                       shader == "newstefano_kstyres";
+            })) {
+            scene_request.stock_tyres_material_constants_by_material =
+                stock_tyres_material_constants;
+            scene_request.stock_tyres_constants_by_material =
+                stock_tyres_constants;
+        }
         if (!source_programs.empty()) {
             scene_request.stock_vulkan_source_programs = source_programs;
             scene_request.stock_vulkan_source_program_by_packet =

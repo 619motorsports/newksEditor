@@ -81,6 +81,7 @@ void usage(std::ostream& output) {
               "                       [--hdr [--exposure <value>] [--fxaa]]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--builtin-multimap-nm-detail]\n"
+              "                       [--builtin-stock-tyres]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
               "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
@@ -550,6 +551,7 @@ struct WindowWorkspaceOptions {
     std::optional<float> exposure;
     bool builtinVulkanKsPerPixel = false;
     bool builtinMultimapNmDetail = false;
+    bool builtinStockTyres = false;
     std::optional<std::filesystem::path> d3d12KsPerPixelPackage;
     std::optional<std::filesystem::path> d3d12KsPerPixelAtPackage;
     std::vector<WindowShaderSpec> shaders;
@@ -1348,6 +1350,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --builtin-multimap-nm-detail option");
             result.builtinMultimapNmDetail = true;
+        } else if (option == "--builtin-stock-tyres") {
+            if (result.builtinStockTyres)
+                throw std::runtime_error(
+                    "duplicate --builtin-stock-tyres option");
+            result.builtinStockTyres = true;
         } else if (option == "--d3d12-ks-per-pixel-package") {
             if (result.d3d12KsPerPixelPackage.has_value())
                 throw std::runtime_error(
@@ -1464,6 +1471,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     if (!has_model_source &&
         (result.builtinVulkanKsPerPixel ||
          result.builtinMultimapNmDetail ||
+         result.builtinStockTyres ||
          has_d3d12_native_package(result) ||
          !result.shaders.empty() ||
          has_directional_shadow_modules(result) ||
@@ -2020,7 +2028,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 "ksPerPixelAT");
     }
     if (options.shaders.empty() && !options.builtinVulkanKsPerPixel &&
-        !options.builtinMultimapNmDetail &&
+        !options.builtinMultimapNmDetail && !options.builtinStockTyres &&
         !has_d3d12_native_package(options))
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
@@ -2421,6 +2429,13 @@ int run_window(int argc, char** argv) {
                 apex::render::BuiltinStockMultiMapSourceSelector::normal_detail;
             request.color_samples = 4U;
         }
+        if (workspace_options.builtinStockTyres) {
+            request.builtin_stock_tyres_source =
+                apex::render::BuiltinStockTyresSourceSelector::stock_tyres;
+            request.multimap_reflection = true;
+            request.portable_reflection_capture =
+                apex::app::WorkspaceViewportPortableReflectionCaptureOptions{};
+        }
         if (has_d3d12_native_package(workspace_options)) {
             if (workspace_options.d3d12KsPerPixelPackage.has_value() &&
                 workspace_options.d3d12KsPerPixelAtPackage.has_value())
@@ -2618,15 +2633,20 @@ int run_window(int argc, char** argv) {
         }
         if (loaded_workspace.directionalShadows.has_value()) {
             request.directional_shadow_receiver =
-                !loaded_workspace.descriptors.empty();
+                !loaded_workspace.descriptors.empty() ||
+                workspace_options.builtinStockTyres;
             request.directional_shadows = loaded_workspace.directionalShadows;
         } else if (workspace_options.builtinVulkanKsPerPixel ||
+                   workspace_options.builtinStockTyres ||
                    has_d3d12_native_package(workspace_options)) {
             request.directional_shadows =
                 apex::app::WorkspaceViewportDirectionalShadowOptions{};
+            request.directional_shadow_receiver =
+                workspace_options.builtinStockTyres;
         }
         if (request.directional_shadows.has_value() &&
             (workspace_options.builtinVulkanKsPerPixel ||
+             workspace_options.builtinStockTyres ||
              has_d3d12_native_package(workspace_options))) {
             request.directional_shadows->builtin_source =
                 apex::render::BuiltinDirectionalShadowSourceSelector::

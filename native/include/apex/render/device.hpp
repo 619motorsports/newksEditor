@@ -738,6 +738,51 @@ struct StockShadowCasterMaterialBinding {
     std::uint32_t range_bytes = 0U;
 };
 
+// Source-equivalent stock ksTyres material values. These are the portable
+// 32-byte records consumed by the dedicated tyre package; they are not a
+// claim about the installed native cbMaterial layout.
+struct StockTyresSourceMaterialConstants {
+    float ambient = 0.35F;
+    float diffuse = 0.80F;
+    float specular = 0.20F;
+    float specular_exponent = 30.0F;
+    std::array<float, 3U> emissive{};
+    float alpha_reference = 0.0F;
+};
+
+static_assert(sizeof(StockTyresSourceMaterialConstants) == 32U);
+static_assert(std::is_trivially_copyable_v<StockTyresSourceMaterialConstants>);
+
+inline constexpr std::uint32_t portable_stock_tyres_source_material_buffer_view_bytes = 256U;
+inline constexpr std::uint32_t portable_stock_tyres_material_buffer_view_bytes =
+    portable_stock_tyres_source_material_buffer_view_bytes;
+
+// Source-equivalent stock ksTyres controls. The first six scalar values match
+// the recovered cbTyre offsets; the final two values are reserved padding.
+struct StockTyresSourceConstants {
+    float blur_level = 0.0F;
+    float dirty_level = 0.0F;
+    float fresnel_c = 0.0F;
+    float fresnel_exp = 5.0F;
+    float is_additive = 0.0F;
+    float fresnel_max_level = 0.05F;
+    std::array<float, 2U> reserved{};
+};
+
+static_assert(sizeof(StockTyresSourceConstants) == 32U);
+static_assert(std::is_trivially_copyable_v<StockTyresSourceConstants>);
+
+inline constexpr std::uint32_t portable_stock_tyres_source_buffer_view_bytes = 256U;
+inline constexpr std::uint32_t portable_stock_tyres_buffer_view_bytes =
+    portable_stock_tyres_source_buffer_view_bytes;
+
+inline constexpr std::uint32_t stock_tyres_dirty_texture_binding = 6U;
+inline constexpr std::uint32_t stock_tyres_dirty_sampler_binding = 7U;
+inline constexpr std::uint32_t stock_tyres_blur_texture_binding = 8U;
+inline constexpr std::uint32_t stock_tyres_blur_sampler_binding = 9U;
+inline constexpr std::uint32_t stock_tyres_normal_blur_texture_binding = 10U;
+inline constexpr std::uint32_t stock_tyres_normal_blur_sampler_binding = 11U;
+
 inline constexpr std::size_t indexed_directional_shadow_cascade_count = 3U;
 
 // Portable receiver packing. This is source-evidenced behavior carried by a
@@ -875,6 +920,10 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
     // Exact bounded ksPerPixelNM ABI: diffuse at bindings 0/1, material and
     // frame uniforms at 2/3, and tangent-space normal texture at bindings 4/5.
     diffuse_normal_with_constants_and_frame,
+    // Dedicated source-equivalent stock ksTyres layout: diffuse at 0/1,
+    // material and frame records at 2/3, normal at 4/5, dirt at 6/7, blur at
+    // 8/9, and blurred normal at 10/11.
+    stock_tyres_with_constants_and_frame,
     // Exact bounded txMaps extension: the ksPerPixelNM bindings above plus
     // the linear maps texture and sampler at bindings 6/7.
     diffuse_normal_maps_with_constants_and_frame,
@@ -894,6 +943,12 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
 // Classify the only portable resource layouts that the indexed executor can
 // run. Binding names do not affect the ABI. Sets, bindings, and kinds do.
 [[nodiscard]] IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
+    const PipelineProgram& pipeline) noexcept;
+
+// Recognize the dedicated tyre semantic names and its complete 0..11
+// descriptor structure. The names distinguish tyre resources from the
+// existing maps/detail layouts, which intentionally reuse the same bindings.
+[[nodiscard]] bool pipeline_declares_stock_tyres(
     const PipelineProgram& pipeline) noexcept;
 
 // A complete receiver extension is three sampled D32 images at bindings
@@ -994,6 +1049,12 @@ struct IndexedStaticMeshDrawRequest {
         stock_ks_per_pixel_vulkan_abi_probe = nullptr;
     const StockKsPerPixelVulkanSourceDrawBinding*
         stock_ks_per_pixel_vulkan_source = nullptr;
+    // Dedicated source-equivalent stock tyre resources at bindings 6/7,
+    // 8/9, and 10/11. These remain separate from maps/detail bindings even
+    // though the numeric slots are reused by other portable layouts.
+    IndexedSampledTextureBinding tyre_dirty_binding{};
+    IndexedSampledTextureBinding tyre_blur_binding{};
+    IndexedSampledTextureBinding tyre_normal_blur_binding{};
 };
 
 // A recovered selected-mesh draw reuses one static 44-byte-stride mesh. The

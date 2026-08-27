@@ -173,6 +173,11 @@ void add_default(std::map<std::string, MaterialPropertyValue>& properties,
     return canonical_shader == "ksperpixelmultimap_damage_dirt";
 }
 
+[[nodiscard]] bool is_tyres_family(std::string_view canonical_shader) noexcept {
+    return canonical_shader == "kstyres" ||
+           canonical_shader == "newstefano_kstyres";
+}
+
 [[nodiscard]] std::vector<std::string> required_slots(std::string_view shader) {
     const std::string key = canonical(shader);
     if (key == "kstyres" || key == "newstefano_kstyres")
@@ -669,6 +674,88 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     }
 
     result.status = KsPerPixelMaterialResolveStatus::ready;
+    return result;
+}
+
+StockTyresSourceMaterialResolveResult resolve_stock_tyres_source_constants(
+    const MaterialBinding& binding) {
+    StockTyresSourceMaterialResolveResult result;
+    const std::string shader = canonical(binding.shader);
+    if (!is_tyres_family(shader)) {
+        result.diagnostic = {
+            "stock_tyres_source_shader_unsupported", "shader",
+            "The bounded tyre source resolver accepts only ksTyres and newStefano_ksTyres"};
+        return result;
+    }
+
+    constexpr std::array<std::string_view, 5U> required = {
+        "txdiffuse", "txnormal", "txdirty", "txblur", "txnormalblur"};
+    for (const std::string_view slot : required) {
+        const MaterialTextureBinding* texture = find_material_texture(binding, slot);
+        if (texture == nullptr || !texture->required ||
+            (texture->kind != MaterialTextureKind::embedded &&
+             texture->kind != MaterialTextureKind::solid_color)) {
+            result.diagnostic = {
+                "stock_tyres_source_resources_incomplete", "resources",
+                "The bounded tyre source resolver requires txDiffuse, txNormal, txDirty, txBlur, and txNormalBlur"};
+            return result;
+        }
+    }
+    if (binding.textures.size() != required.size()) {
+        result.diagnostic = {
+            "stock_tyres_source_resources_unsupported", "resources",
+            "The bounded tyre source resolver accepts exactly the five tyre texture roles"};
+        return result;
+    }
+    if (binding.status != MaterialBindingStatus::complete) {
+        result.diagnostic = {
+            "stock_tyres_source_resources_incomplete", "resources",
+            "The bounded tyre source resolver requires a complete five-texture material binding"};
+        return result;
+    }
+
+    const std::array<float, 4U> emissive = resolve_emissive(binding);
+    result.material = {
+        material_scalar(binding, "ksAmbient", 0.35F),
+        material_scalar(binding, "ksDiffuse", 0.80F),
+        material_scalar(binding, "ksSpecular", 0.20F),
+        material_scalar(binding, "ksSpecularEXP", 30.0F),
+        {emissive[0], emissive[1], emissive[2]},
+        material_scalar(binding, "ksAlphaRef", 0.0F),
+    };
+    result.constants = {
+        material_scalar(binding, "blurLevel", 0.0F),
+        material_scalar(binding, "dirtyLevel", 0.0F),
+        material_scalar(binding, "fresnelC", 0.0F),
+        material_scalar(binding, "fresnelEXP", 5.0F),
+        material_scalar(binding, "isAdditive", 0.0F),
+        material_scalar(binding, "fresnelMaxLevel", 0.05F),
+        {0.0F, 0.0F},
+    };
+
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](const float value) { return std::isfinite(value); });
+    };
+    const std::array<float, 8U> material_values = {
+        result.material.ambient, result.material.diffuse,
+        result.material.specular, result.material.specular_exponent,
+        result.material.emissive[0], result.material.emissive[1],
+        result.material.emissive[2], result.material.alpha_reference};
+    const std::array<float, 8U> tyre_values = {
+        result.constants.blur_level, result.constants.dirty_level,
+        result.constants.fresnel_c, result.constants.fresnel_exp,
+        result.constants.is_additive, result.constants.fresnel_max_level,
+        result.constants.reserved[0], result.constants.reserved[1]};
+    if (!finite(material_values) || !finite(tyre_values)) {
+        result.status = KsTyreMaterialResolveStatus::invalid_input;
+        result.diagnostic = {
+            "stock_tyres_source_constants_non_finite", "constants",
+            "Resolved tyre source constants must contain only finite values"};
+        return result;
+    }
+
+    result.status = KsTyreMaterialResolveStatus::ready;
     return result;
 }
 

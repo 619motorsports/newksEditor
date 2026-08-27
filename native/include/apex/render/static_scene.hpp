@@ -43,6 +43,10 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_multimap_reflection_constant_bytes =
         1ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_stock_tyres_material_constant_bytes =
+        1ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_stock_tyres_constant_bytes =
+        1ULL * 1024ULL * 1024ULL;
     // A selected Vulkan source-equivalent draw owns five aligned native
     // records. This limit is separate from the portable material table.
     std::uint64_t max_total_stock_vulkan_source_constant_bytes =
@@ -117,6 +121,14 @@ struct StaticScenePrepareRequest {
     // pipeline that declares bindings 21-23 requires the complete table.
     std::span<const KsPerPixelMultiMapReflectionConstants>
         multimap_reflection_constants_by_material{};
+    // Dedicated portable tyre records in final material order. A pipeline
+    // with the exact stock-tyre semantic layout requires both complete
+    // tables. Preparation copies each used record into its own aligned GPU
+    // allocation; it never aliases generic MultiMap material constants.
+    std::span<const StockTyresSourceMaterialConstants>
+        stock_tyres_material_constants_by_material{};
+    std::span<const StockTyresSourceConstants>
+        stock_tyres_constants_by_material{};
     // Explicit resolved ksShadowGenAT material records, indexed by final
     // material ID. The source host record is 32 bytes; preparation owns one
     // 256-byte aligned uniform allocation for each used alpha caster.
@@ -292,7 +304,8 @@ public:
         return owned_multimap_reflection_constants_.size();
     }
     [[nodiscard]] bool requires_multimap_reflection_cube() const noexcept {
-        return !owned_multimap_reflection_constants_.empty();
+        return !owned_multimap_reflection_constants_.empty() ||
+               !owned_stock_tyres_constants_.empty();
     }
     [[nodiscard]] std::size_t owned_stock_shadow_constant_count() const noexcept {
         return owned_stock_shadow_constants_.size();
@@ -338,6 +351,9 @@ private:
         std::uint32_t maps = invalid_draw_texture_index;
         std::uint32_t detail = invalid_draw_texture_index;
         std::uint32_t normal_detail = invalid_draw_texture_index;
+        std::uint32_t tyre_dirty = invalid_draw_texture_index;
+        std::uint32_t tyre_blur = invalid_draw_texture_index;
+        std::uint32_t tyre_normal_blur = invalid_draw_texture_index;
         // txDust uses the same portable binding pair as detail, but only for
         // the mutually exclusive damage-dust layout.
         std::uint32_t dust = invalid_draw_texture_index;
@@ -370,11 +386,15 @@ private:
     std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
     std::vector<std::size_t> multimap_reflection_constant_for_packet_;
+    std::vector<std::size_t> stock_tyres_constant_for_packet_;
     std::vector<std::size_t> stock_shadow_constant_for_material_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
     std::vector<std::unique_ptr<Buffer>>
         owned_multimap_reflection_constants_;
+    std::vector<std::unique_ptr<Buffer>>
+        owned_stock_tyres_material_constants_;
+    std::vector<std::unique_ptr<Buffer>> owned_stock_tyres_constants_;
     std::vector<std::unique_ptr<Buffer>> owned_stock_shadow_constants_;
     std::unique_ptr<Buffer> owned_frame_constants_;
     std::unique_ptr<Buffer> owned_directional_shadow_constants_;

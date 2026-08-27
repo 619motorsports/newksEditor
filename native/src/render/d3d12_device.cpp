@@ -309,6 +309,12 @@ struct D3D12MaterialDescriptorBinding {
     D3D12_GPU_DESCRIPTOR_HANDLE frame_cbv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE normal_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE normal_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_dirty_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_dirty_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_blur_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_blur_sampler_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_normal_blur_srv_gpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE tyre_normal_blur_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE maps_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE maps_sampler_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE detail_srv_gpu{};
@@ -329,6 +335,9 @@ struct D3D12MaterialDescriptorBinding {
     bool constant_enabled = false;
     bool frame_enabled = false;
     bool normal_enabled = false;
+    bool tyre_dirty_enabled = false;
+    bool tyre_blur_enabled = false;
+    bool tyre_normal_blur_enabled = false;
     bool maps_enabled = false;
     bool detail_enabled = false;
     bool normal_detail_enabled = false;
@@ -374,6 +383,7 @@ struct D3D12MaterialDescriptorBinding {
 }
 
 [[nodiscard]] bool d3d12_pipeline_has_maps_texture(const PipelineProgram& pipeline) noexcept {
+    if (pipeline_declares_stock_tyres(pipeline)) return false;
     bool texture = false;
     bool sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
@@ -388,6 +398,7 @@ struct D3D12MaterialDescriptorBinding {
 }
 
 [[nodiscard]] bool d3d12_pipeline_has_detail_texture(const PipelineProgram& pipeline) noexcept {
+    if (pipeline_declares_stock_tyres(pipeline)) return false;
     bool texture = false;
     bool sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
@@ -402,6 +413,7 @@ struct D3D12MaterialDescriptorBinding {
 }
 
 [[nodiscard]] bool d3d12_pipeline_has_normal_detail_texture(const PipelineProgram& pipeline) noexcept {
+    if (pipeline_declares_stock_tyres(pipeline)) return false;
     bool texture = false;
     bool sampler = false;
     for (const PipelineResourceBinding& resource : pipeline.resources) {
@@ -460,6 +472,9 @@ struct D3D12MaterialDescriptorBinding {
     UINT cbv_index,
     UINT frame_cbv_index,
     UINT normal_srv_index,
+    UINT tyre_dirty_srv_index,
+    UINT tyre_blur_srv_index,
+    UINT tyre_normal_blur_srv_index,
     UINT maps_srv_index,
     UINT detail_srv_index,
     UINT normal_detail_srv_index,
@@ -4133,6 +4148,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
         const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
         const bool has_normal_texture = d3d12_pipeline_has_normal_texture(*request.pipeline);
+        const bool has_stock_tyres = pipeline_declares_stock_tyres(*request.pipeline);
         const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
         const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
         const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
@@ -4144,6 +4160,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         srv_heap_description.NumDescriptors = 1U + static_cast<UINT>(has_material_constants) +
                                               static_cast<UINT>(has_frame_constants) +
                                               static_cast<UINT>(has_normal_texture) +
+                                              3U * static_cast<UINT>(has_stock_tyres) +
                                               static_cast<UINT>(has_maps_texture) +
                                               static_cast<UINT>(has_detail_texture) +
                                               static_cast<UINT>(has_normal_detail_texture) +
@@ -4154,6 +4171,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                               2U * static_cast<UINT>(has_multimap_reflection);
         const UINT shadow_base = 1U + static_cast<UINT>(has_material_constants) +
                                  static_cast<UINT>(has_frame_constants) + static_cast<UINT>(has_normal_texture) +
+                                 3U * static_cast<UINT>(has_stock_tyres) +
                                  static_cast<UINT>(has_maps_texture) + static_cast<UINT>(has_detail_texture) +
                                  static_cast<UINT>(has_normal_detail_texture) + static_cast<UINT>(has_damage_texture) +
                                  static_cast<UINT>(has_damage_mask_texture);
@@ -4175,21 +4193,39 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants)
                                                  : 0U,
-                                             has_maps_texture
+                                             has_stock_tyres
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture)
+                                                 : 0U,
+                                             has_stock_tyres
+                                                 ? 2U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture)
+                                                 : 0U,
+                                             has_stock_tyres
+                                                 ? 3U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture)
+                                                 : 0U,
+                                             has_maps_texture
+                                                 ? 1U + static_cast<UINT>(has_material_constants) +
+                                                       static_cast<UINT>(has_frame_constants) +
+                                                       static_cast<UINT>(has_normal_texture) +
+                                                       3U * static_cast<UINT>(has_stock_tyres)
                                                  : 0U,
                                              has_detail_texture
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture) +
+                                                       3U * static_cast<UINT>(has_stock_tyres) +
                                                        static_cast<UINT>(has_maps_texture)
                                                  : 0U,
                                              has_normal_detail_texture
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture) +
+                                                       3U * static_cast<UINT>(has_stock_tyres) +
                                                        static_cast<UINT>(has_maps_texture) +
                                                        static_cast<UINT>(has_detail_texture)
                                                  : 0U,
@@ -4197,6 +4233,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture) +
+                                                       3U * static_cast<UINT>(has_stock_tyres) +
                                                        static_cast<UINT>(has_maps_texture) +
                                                        static_cast<UINT>(has_detail_texture) +
                                                        static_cast<UINT>(has_normal_detail_texture)
@@ -4205,6 +4242,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                                  ? 1U + static_cast<UINT>(has_material_constants) +
                                                        static_cast<UINT>(has_frame_constants) +
                                                        static_cast<UINT>(has_normal_texture) +
+                                                       3U * static_cast<UINT>(has_stock_tyres) +
                                                        static_cast<UINT>(has_maps_texture) +
                                                        static_cast<UINT>(has_detail_texture) +
                                                        static_cast<UINT>(has_normal_detail_texture) +
@@ -4237,6 +4275,18 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     D3D12_ROOT_PARAMETER normal_srv_parameter{};
     D3D12_DESCRIPTOR_RANGE normal_sampler_range{};
     D3D12_ROOT_PARAMETER normal_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_dirty_srv_range{};
+    D3D12_ROOT_PARAMETER tyre_dirty_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_dirty_sampler_range{};
+    D3D12_ROOT_PARAMETER tyre_dirty_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_blur_srv_range{};
+    D3D12_ROOT_PARAMETER tyre_blur_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_blur_sampler_range{};
+    D3D12_ROOT_PARAMETER tyre_blur_sampler_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_normal_blur_srv_range{};
+    D3D12_ROOT_PARAMETER tyre_normal_blur_srv_parameter{};
+    D3D12_DESCRIPTOR_RANGE tyre_normal_blur_sampler_range{};
+    D3D12_ROOT_PARAMETER tyre_normal_blur_sampler_parameter{};
     D3D12_DESCRIPTOR_RANGE maps_srv_range{};
     D3D12_ROOT_PARAMETER maps_srv_parameter{};
     D3D12_DESCRIPTOR_RANGE maps_sampler_range{};
@@ -4355,6 +4405,44 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             normal_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_sampler_range;
             normal_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             root_parameters[root_parameter_count++] = normal_sampler_parameter;
+        }
+        if (has_stock_tyres) {
+            tyre_dirty_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 6U, 0U,
+                                     D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_dirty_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_dirty_srv_parameter.DescriptorTable = {1U, &tyre_dirty_srv_range};
+            tyre_dirty_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_dirty_srv_parameter;
+            tyre_dirty_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 7U, 0U,
+                                        D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_dirty_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_dirty_sampler_parameter.DescriptorTable = {1U, &tyre_dirty_sampler_range};
+            tyre_dirty_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_dirty_sampler_parameter;
+            tyre_blur_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 8U, 0U,
+                                   D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_blur_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_blur_srv_parameter.DescriptorTable = {1U, &tyre_blur_srv_range};
+            tyre_blur_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_blur_srv_parameter;
+            tyre_blur_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 9U, 0U,
+                                       D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_blur_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_blur_sampler_parameter.DescriptorTable = {1U, &tyre_blur_sampler_range};
+            tyre_blur_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_blur_sampler_parameter;
+            tyre_normal_blur_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 10U, 0U,
+                                          D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_normal_blur_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_normal_blur_srv_parameter.DescriptorTable = {1U, &tyre_normal_blur_srv_range};
+            tyre_normal_blur_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_normal_blur_srv_parameter;
+            tyre_normal_blur_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 11U, 0U,
+                                              D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+            tyre_normal_blur_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            tyre_normal_blur_sampler_parameter.DescriptorTable = {1U, &tyre_normal_blur_sampler_range};
+            tyre_normal_blur_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            root_parameters[root_parameter_count++] = tyre_normal_blur_sampler_parameter;
         }
         if (d3d12_pipeline_has_maps_texture(*request.pipeline)) {
             maps_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -4766,6 +4854,17 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
                                            static_cast<UINT>(material_binding.frame_enabled);
             list->SetGraphicsRootDescriptorTable(normal_root_index, material_binding.normal_srv_gpu);
             list->SetGraphicsRootDescriptorTable(normal_root_index + 1U, material_binding.normal_sampler_gpu);
+        }
+        if (material_binding.tyre_dirty_enabled) {
+            const UINT tyre_root_index = constant_root_index +
+                                         static_cast<UINT>(material_binding.frame_enabled) +
+                                         2U * static_cast<UINT>(material_binding.normal_enabled);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index, material_binding.tyre_dirty_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index + 1U, material_binding.tyre_dirty_sampler_gpu);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index + 2U, material_binding.tyre_blur_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index + 3U, material_binding.tyre_blur_sampler_gpu);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index + 4U, material_binding.tyre_normal_blur_srv_gpu);
+            list->SetGraphicsRootDescriptorTable(tyre_root_index + 5U, material_binding.tyre_normal_blur_sampler_gpu);
         }
         if (material_binding.maps_enabled) {
             const UINT maps_root_index = constant_root_index +
@@ -5432,6 +5531,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     bool has_material_constants = false;
     bool has_frame_constants = false;
     bool has_normal_texture = false;
+    bool has_stock_tyres = false;
     bool has_maps_texture = false;
     bool has_detail_texture = false;
     bool has_normal_detail_texture = false;
@@ -5451,6 +5551,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                   d3d12_pipeline_has_frame_constants(*request.pipeline);
             has_normal_texture = has_normal_texture ||
                                  d3d12_pipeline_has_normal_texture(*request.pipeline);
+            has_stock_tyres = has_stock_tyres || pipeline_declares_stock_tyres(*request.pipeline);
             has_maps_texture = has_maps_texture ||
                                d3d12_pipeline_has_maps_texture(*request.pipeline);
             has_detail_texture = has_detail_texture ||
@@ -5471,6 +5572,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         1U + static_cast<std::size_t>(has_material_constants) +
         static_cast<std::size_t>(has_frame_constants) +
         static_cast<std::size_t>(has_normal_texture) +
+        3U * static_cast<std::size_t>(has_stock_tyres) +
         static_cast<std::size_t>(has_maps_texture) +
         static_cast<std::size_t>(has_detail_texture) +
         static_cast<std::size_t>(has_normal_detail_texture) +
@@ -5481,6 +5583,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     const std::size_t shadow_descriptor_base =
         1U + static_cast<std::size_t>(has_material_constants) +
         static_cast<std::size_t>(has_frame_constants) + static_cast<std::size_t>(has_normal_texture) +
+        3U * static_cast<std::size_t>(has_stock_tyres) +
         static_cast<std::size_t>(has_maps_texture) + static_cast<std::size_t>(has_detail_texture) +
         static_cast<std::size_t>(has_normal_detail_texture) + static_cast<std::size_t>(has_damage_texture) +
         static_cast<std::size_t>(has_damage_mask_texture);
@@ -5527,18 +5630,33 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_material_constants ? 1U : 0U) +
                                                                    (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U)),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) + 1U),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
+                                                                   (has_normal_texture ? 1U : 0U) + 2U),
+                                                 static_cast<UINT>(descriptor_index +
+                                                                   (has_material_constants ? 1U : 0U) +
+                                                                   (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
+                                                                   3U * static_cast<UINT>(has_stock_tyres) +
                                                                    (has_maps_texture ? 1U : 0U)),
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_material_constants ? 1U : 0U) +
                                                                    (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
+                                                                   3U * static_cast<UINT>(has_stock_tyres) +
                                                                    (has_maps_texture ? 1U : 0U) +
                                                                    (has_detail_texture ? 1U : 0U)),
                                                  static_cast<UINT>(descriptor_index +
                                                                    (has_material_constants ? 1U : 0U) +
                                                                    (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
+                                                                   3U * static_cast<UINT>(has_stock_tyres) +
                                                                    (has_maps_texture ? 1U : 0U) +
                                                                    (has_detail_texture ? 1U : 0U) +
                                                                    (has_normal_detail_texture ? 1U : 0U)),
@@ -5546,6 +5664,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_material_constants ? 1U : 0U) +
                                                                    (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
+                                                                   3U * static_cast<UINT>(has_stock_tyres) +
                                                                    (has_maps_texture ? 1U : 0U) +
                                                                    (has_detail_texture ? 1U : 0U) +
                                                                    (has_normal_detail_texture ? 1U : 0U) +
@@ -5554,6 +5673,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
                                                                    (has_material_constants ? 1U : 0U) +
                                                                    (has_frame_constants ? 1U : 0U) +
                                                                    (has_normal_texture ? 1U : 0U) +
+                                                                   3U * static_cast<UINT>(has_stock_tyres) +
                                                                    (has_maps_texture ? 1U : 0U) +
                                                                    (has_detail_texture ? 1U : 0U) +
                                                                    (has_normal_detail_texture ? 1U : 0U) +
@@ -5883,6 +6003,18 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_ROOT_PARAMETER normal_srv_parameter{};
         D3D12_DESCRIPTOR_RANGE normal_sampler_range{};
         D3D12_ROOT_PARAMETER normal_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_dirty_srv_range{};
+        D3D12_ROOT_PARAMETER tyre_dirty_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_dirty_sampler_range{};
+        D3D12_ROOT_PARAMETER tyre_dirty_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_blur_srv_range{};
+        D3D12_ROOT_PARAMETER tyre_blur_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_blur_sampler_range{};
+        D3D12_ROOT_PARAMETER tyre_blur_sampler_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_normal_blur_srv_range{};
+        D3D12_ROOT_PARAMETER tyre_normal_blur_srv_parameter{};
+        D3D12_DESCRIPTOR_RANGE tyre_normal_blur_sampler_range{};
+        D3D12_ROOT_PARAMETER tyre_normal_blur_sampler_parameter{};
         D3D12_DESCRIPTOR_RANGE maps_srv_range{};
         D3D12_ROOT_PARAMETER maps_srv_parameter{};
         D3D12_DESCRIPTOR_RANGE maps_sampler_range{};
@@ -5998,6 +6130,44 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 normal_sampler_parameter.DescriptorTable.pDescriptorRanges = &normal_sampler_range;
                 normal_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
                 root_parameters[root_parameter_count++] = normal_sampler_parameter;
+            }
+            if (pipeline_declares_stock_tyres(program)) {
+                tyre_dirty_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 6U, 0U,
+                                         D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_dirty_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_dirty_srv_parameter.DescriptorTable = {1U, &tyre_dirty_srv_range};
+                tyre_dirty_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_dirty_srv_parameter;
+                tyre_dirty_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 7U, 0U,
+                                            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_dirty_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_dirty_sampler_parameter.DescriptorTable = {1U, &tyre_dirty_sampler_range};
+                tyre_dirty_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_dirty_sampler_parameter;
+                tyre_blur_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 8U, 0U,
+                                       D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_blur_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_blur_srv_parameter.DescriptorTable = {1U, &tyre_blur_srv_range};
+                tyre_blur_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_blur_srv_parameter;
+                tyre_blur_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 9U, 0U,
+                                           D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_blur_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_blur_sampler_parameter.DescriptorTable = {1U, &tyre_blur_sampler_range};
+                tyre_blur_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_blur_sampler_parameter;
+                tyre_normal_blur_srv_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1U, 10U, 0U,
+                                              D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_normal_blur_srv_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_normal_blur_srv_parameter.DescriptorTable = {1U, &tyre_normal_blur_srv_range};
+                tyre_normal_blur_srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_normal_blur_srv_parameter;
+                tyre_normal_blur_sampler_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1U, 11U, 0U,
+                                                  D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
+                tyre_normal_blur_sampler_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                tyre_normal_blur_sampler_parameter.DescriptorTable = {1U, &tyre_normal_blur_sampler_range};
+                tyre_normal_blur_sampler_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                root_parameters[root_parameter_count++] = tyre_normal_blur_sampler_parameter;
             }
             if (d3d12_pipeline_has_maps_texture(program)) {
                 maps_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -7000,6 +7170,23 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 list->SetGraphicsRootDescriptorTable(normal_root_index, material_bindings[index].normal_srv_gpu);
                 list->SetGraphicsRootDescriptorTable(normal_root_index + 1U,
                                                       material_bindings[index].normal_sampler_gpu);
+            }
+            if (material_bindings[index].tyre_dirty_enabled) {
+                const UINT tyre_root_index = constant_root_index +
+                                             static_cast<UINT>(material_bindings[index].frame_enabled) +
+                                             2U * static_cast<UINT>(material_bindings[index].normal_enabled);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index,
+                                                      material_bindings[index].tyre_dirty_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index + 1U,
+                                                      material_bindings[index].tyre_dirty_sampler_gpu);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index + 2U,
+                                                      material_bindings[index].tyre_blur_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index + 3U,
+                                                      material_bindings[index].tyre_blur_sampler_gpu);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index + 4U,
+                                                      material_bindings[index].tyre_normal_blur_srv_gpu);
+                list->SetGraphicsRootDescriptorTable(tyre_root_index + 5U,
+                                                      material_bindings[index].tyre_normal_blur_sampler_gpu);
             }
             if (material_bindings[index].maps_enabled) {
                 const UINT maps_root_index = constant_root_index +
@@ -8478,6 +8665,9 @@ bool prepare_d3d12_material_binding(
     if (request.pipeline->resources.empty()) {
         if (request.sampled_binding.texture != nullptr || request.sampled_binding.sampler != nullptr ||
             request.normal_binding.texture != nullptr || request.normal_binding.sampler != nullptr ||
+            request.tyre_dirty_binding.texture != nullptr || request.tyre_dirty_binding.sampler != nullptr ||
+            request.tyre_blur_binding.texture != nullptr || request.tyre_blur_binding.sampler != nullptr ||
+            request.tyre_normal_blur_binding.texture != nullptr || request.tyre_normal_blur_binding.sampler != nullptr ||
             request.maps_binding.texture != nullptr || request.maps_binding.sampler != nullptr ||
             request.detail_binding.texture != nullptr || request.detail_binding.sampler != nullptr ||
             request.normal_detail_binding.texture != nullptr || request.normal_detail_binding.sampler != nullptr ||
@@ -8518,6 +8708,7 @@ bool prepare_d3d12_material_binding(
     const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
     const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
     const bool has_normal_texture = d3d12_pipeline_has_normal_texture(*request.pipeline);
+    const bool has_stock_tyres = pipeline_declares_stock_tyres(*request.pipeline);
     const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
     const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
     const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
@@ -8528,6 +8719,12 @@ bool prepare_d3d12_material_binding(
         d3d12_pipeline_has_multimap_reflection(*request.pipeline);
     const D3D12Texture* normal_texture = nullptr;
     const D3D12Sampler* normal_sampler = nullptr;
+    const D3D12Texture* tyre_dirty_texture = nullptr;
+    const D3D12Sampler* tyre_dirty_sampler = nullptr;
+    const D3D12Texture* tyre_blur_texture = nullptr;
+    const D3D12Sampler* tyre_blur_sampler = nullptr;
+    const D3D12Texture* tyre_normal_blur_texture = nullptr;
+    const D3D12Sampler* tyre_normal_blur_sampler = nullptr;
     const D3D12Texture* maps_texture = nullptr;
     const D3D12Sampler* maps_sampler = nullptr;
     const D3D12Texture* detail_texture = nullptr;
@@ -8562,6 +8759,41 @@ bool prepare_d3d12_material_binding(
                       "The D3D12 diffuse ABI cannot receive a normal texture or sampler"};
         return false;
     }
+    const auto resolve_tyre_binding =
+        [&](const IndexedSampledTextureBinding& binding, const char* role,
+            const D3D12Texture*& output_texture, const D3D12Sampler*& output_sampler) {
+            if (!has_stock_tyres) {
+                if (binding.texture != nullptr || binding.sampler != nullptr) {
+                    diagnostic = {std::string("indexed_stock_tyres_") + role + "_binding_unexpected",
+                                  "A non-tyre D3D12 pipeline cannot receive stock-tyres resources"};
+                    return false;
+                }
+                return true;
+            }
+            if (binding.texture == nullptr || binding.sampler == nullptr) {
+                diagnostic = {std::string("indexed_stock_tyres_") + role + "_binding_missing",
+                              "D3D12 stock-tyres bindings require both a texture and sampler"};
+                return false;
+            }
+            output_texture = dynamic_cast<const D3D12Texture*>(binding.texture);
+            output_sampler = dynamic_cast<const D3D12Sampler*>(binding.sampler);
+            if (output_texture == nullptr || output_sampler == nullptr ||
+                output_texture->context() != context.get() || output_sampler->context() != context.get() ||
+                output_texture->resource() == nullptr || !output_texture->initialized() ||
+                (static_cast<UINT>(output_texture->state()) &
+                 static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) == 0U ||
+                output_sampler->gpu_descriptor().ptr == 0U) {
+                diagnostic = {std::string("indexed_stock_tyres_") + role + "_resource_invalid",
+                              "D3D12 stock-tyres resources must be initialized pixel-shader-readable handles"};
+                return false;
+            }
+            return true;
+        };
+    if (!resolve_tyre_binding(request.tyre_dirty_binding, "dirty", tyre_dirty_texture, tyre_dirty_sampler) ||
+        !resolve_tyre_binding(request.tyre_blur_binding, "blur", tyre_blur_texture, tyre_blur_sampler) ||
+        !resolve_tyre_binding(request.tyre_normal_blur_binding, "normal_blur",
+                              tyre_normal_blur_texture, tyre_normal_blur_sampler))
+        return false;
     if (has_maps_texture) {
         if (request.maps_binding.texture == nullptr || request.maps_binding.sampler == nullptr) {
             diagnostic = {"indexed_maps_binding_missing",
@@ -8976,6 +9208,10 @@ bool prepare_d3d12_material_binding(
         (has_material_constants && cbv_index >= heap_description.NumDescriptors) ||
         (has_frame_constants && frame_cbv_index >= heap_description.NumDescriptors) ||
         (has_normal_texture && normal_srv_index >= heap_description.NumDescriptors) ||
+        (has_stock_tyres &&
+         (tyre_dirty_srv_index >= heap_description.NumDescriptors ||
+          tyre_blur_srv_index >= heap_description.NumDescriptors ||
+          tyre_normal_blur_srv_index >= heap_description.NumDescriptors)) ||
         (has_maps_texture && maps_srv_index >= heap_description.NumDescriptors) ||
         (has_detail_texture && detail_srv_index >= heap_description.NumDescriptors) ||
         (has_normal_detail_texture && normal_detail_srv_index >= heap_description.NumDescriptors) ||
@@ -9113,6 +9349,35 @@ bool prepare_d3d12_material_binding(
             return false;
         }
     }
+    DXGI_FORMAT tyre_dirty_format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT tyre_blur_format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT tyre_normal_blur_format = DXGI_FORMAT_UNKNOWN;
+    if (has_stock_tyres) {
+        const auto validate_tyre_format =
+            [&](const D3D12Texture& source_texture, const char* role,
+                DXGI_FORMAT& output_format) {
+                const TextureDescription& source = source_texture.info().description;
+                output_format = dxgi_texture_format(source.format);
+                const std::uint32_t usage = static_cast<std::uint32_t>(source.usage);
+                const std::uint32_t forbidden =
+                    static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+                    static_cast<std::uint32_t>(TextureUsage::storage) |
+                    static_cast<std::uint32_t>(TextureUsage::transfer_destination);
+                if (output_format == DXGI_FORMAT_UNKNOWN || source.width == 0U || source.height == 0U ||
+                    source.mip_levels == 0U || source.array_layers != 1U ||
+                    (usage & static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+                    (usage & forbidden) != 0U) {
+                    diagnostic = {std::string("indexed_stock_tyres_") + role + "_texture_format_unsupported",
+                                  "D3D12 stock-tyres textures require nonempty one-layer sampled image data"};
+                    return false;
+                }
+                return true;
+            };
+        if (!validate_tyre_format(*tyre_dirty_texture, "dirty", tyre_dirty_format) ||
+            !validate_tyre_format(*tyre_blur_texture, "blur", tyre_blur_format) ||
+            !validate_tyre_format(*tyre_normal_blur_texture, "normal_blur", tyre_normal_blur_format))
+            return false;
+    }
     DXGI_FORMAT damage_format = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT damage_mask_format = DXGI_FORMAT_UNKNOWN;
     if (has_damage_texture) {
@@ -9163,6 +9428,9 @@ bool prepare_d3d12_material_binding(
         static_cast<UINT64>(cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(frame_cbv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(normal_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(tyre_dirty_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(tyre_blur_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
+        static_cast<UINT64>(tyre_normal_blur_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(maps_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
         static_cast<UINT64>(normal_detail_srv_index) > std::numeric_limits<UINT64>::max() / descriptor_size ||
@@ -9182,6 +9450,9 @@ bool prepare_d3d12_material_binding(
     const UINT64 cbv_offset = static_cast<UINT64>(cbv_index) * descriptor_size;
     const UINT64 frame_cbv_offset = static_cast<UINT64>(frame_cbv_index) * descriptor_size;
     const UINT64 normal_srv_offset = static_cast<UINT64>(normal_srv_index) * descriptor_size;
+    const UINT64 tyre_dirty_srv_offset = static_cast<UINT64>(tyre_dirty_srv_index) * descriptor_size;
+    const UINT64 tyre_blur_srv_offset = static_cast<UINT64>(tyre_blur_srv_index) * descriptor_size;
+    const UINT64 tyre_normal_blur_srv_offset = static_cast<UINT64>(tyre_normal_blur_srv_index) * descriptor_size;
     const UINT64 maps_srv_offset = static_cast<UINT64>(maps_srv_index) * descriptor_size;
     const UINT64 detail_srv_offset = static_cast<UINT64>(detail_srv_index) * descriptor_size;
     const UINT64 normal_detail_srv_offset = static_cast<UINT64>(normal_detail_srv_index) * descriptor_size;
@@ -9197,6 +9468,9 @@ bool prepare_d3d12_material_binding(
         cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         frame_cbv_offset > std::numeric_limits<SIZE_T>::max() ||
         normal_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        tyre_dirty_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        tyre_blur_srv_offset > std::numeric_limits<SIZE_T>::max() ||
+        tyre_normal_blur_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         maps_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
         normal_detail_srv_offset > std::numeric_limits<SIZE_T>::max() ||
@@ -9253,6 +9527,46 @@ bool prepare_d3d12_material_binding(
         output.normal_sampler_gpu = normal_sampler->gpu_descriptor();
         output.normal_enabled = true;
     }
+    const auto create_tyre_srv =
+        [&](const D3D12Texture& source_texture, const D3D12Sampler& source_sampler,
+            UINT64 offset, D3D12_GPU_DESCRIPTOR_HANDLE& output_srv,
+            D3D12_GPU_DESCRIPTOR_HANDLE& output_sampler, bool& enabled) {
+            D3D12_CPU_DESCRIPTOR_HANDLE source_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
+            if (source_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(offset)) {
+                diagnostic = {"indexed_stock_tyres_descriptor_offset_overflow",
+                              "D3D12 stock-tyres SRV descriptor CPU handle overflows"};
+                return false;
+            }
+            source_cpu.ptr += static_cast<SIZE_T>(offset);
+            D3D12_GPU_DESCRIPTOR_HANDLE source_gpu = srv_heap->GetGPUDescriptorHandleForHeapStart();
+            if (source_gpu.ptr > std::numeric_limits<UINT64>::max() - offset) {
+                diagnostic = {"indexed_stock_tyres_descriptor_offset_overflow",
+                              "D3D12 stock-tyres SRV descriptor GPU handle overflows"};
+                return false;
+            }
+            source_gpu.ptr += offset;
+            const TextureDescription& source_description = source_texture.info().description;
+            const D3D12_SHADER_RESOURCE_VIEW_DESC source_srv =
+                d3d12_texture_srv_description(source_description,
+                                              dxgi_texture_format(source_description.format));
+            context->device->CreateShaderResourceView(source_texture.resource(), &source_srv, source_cpu);
+            output_srv = source_gpu;
+            output_sampler = source_sampler.gpu_descriptor();
+            enabled = true;
+            return true;
+        };
+    if (has_stock_tyres &&
+        (!create_tyre_srv(*tyre_dirty_texture, *tyre_dirty_sampler, tyre_dirty_srv_offset,
+                          output.tyre_dirty_srv_gpu, output.tyre_dirty_sampler_gpu,
+                          output.tyre_dirty_enabled) ||
+         !create_tyre_srv(*tyre_blur_texture, *tyre_blur_sampler, tyre_blur_srv_offset,
+                          output.tyre_blur_srv_gpu, output.tyre_blur_sampler_gpu,
+                          output.tyre_blur_enabled) ||
+         !create_tyre_srv(*tyre_normal_blur_texture, *tyre_normal_blur_sampler,
+                          tyre_normal_blur_srv_offset, output.tyre_normal_blur_srv_gpu,
+                          output.tyre_normal_blur_sampler_gpu,
+                          output.tyre_normal_blur_enabled)))
+        return false;
     if (has_maps_texture) {
         D3D12_CPU_DESCRIPTOR_HANDLE maps_cpu = srv_heap->GetCPUDescriptorHandleForHeapStart();
         if (maps_cpu.ptr > std::numeric_limits<SIZE_T>::max() - static_cast<SIZE_T>(maps_srv_offset)) {

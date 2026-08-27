@@ -3601,6 +3601,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             request.builtin_d3d12_native_sampler_settings;
         scene_request.builtin_multimap_source =
             request.builtin_multimap_source;
+        scene_request.builtin_stock_tyres_source =
+            request.builtin_stock_tyres_source;
         scene_request.overrides_by_material = material_overrides;
         scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
         scene_request.damage_broken_visible = request.damage_broken_visible;

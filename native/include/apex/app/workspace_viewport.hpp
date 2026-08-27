@@ -365,6 +365,8 @@ struct WorkspaceViewportPrepareRequest {
     // bounded MultiMap families. Each frame must then supply the renderer-
     // owned cube and sampler through WorkspaceViewportFrameRequest.
     bool multimap_reflection = false;
+    render::BuiltinStockTyresSourceSelector builtin_stock_tyres_source =
+        render::BuiltinStockTyresSourceSelector::disabled;
     // When present, the viewport owns and refreshes the portable reflection
     // binding. Caller-supplied frame bindings are then rejected.
     std::optional<WorkspaceViewportPortableReflectionCaptureOptions>

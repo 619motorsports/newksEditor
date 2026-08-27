@@ -1486,6 +1486,96 @@ void validates_portable_multimap_reflection_contract() {
             "reflection extension cannot attach to a non-maps material layout");
 }
 
+void validates_stock_tyres_resource_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.name = "stock-tyres-source-contract";
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "samDiffuse"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "TyreMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "TyreFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "txNormal"},
+        {PipelineResourceKind::sampler, 0U, 5U, "samNormal"},
+        {PipelineResourceKind::sampled_texture, 0U, stock_tyres_dirty_texture_binding, "txDirty"},
+        {PipelineResourceKind::sampler, 0U, stock_tyres_dirty_sampler_binding, "samDirty"},
+        {PipelineResourceKind::sampled_texture, 0U, stock_tyres_blur_texture_binding, "txBlur"},
+        {PipelineResourceKind::sampler, 0U, stock_tyres_blur_sampler_binding, "samBlur"},
+        {PipelineResourceKind::sampled_texture, 0U, stock_tyres_normal_blur_texture_binding, "txNormalBlur"},
+        {PipelineResourceKind::sampler, 0U, stock_tyres_normal_blur_sampler_binding, "samNormalBlur"},
+        {PipelineResourceKind::sampled_texture, 0U, 16U, "txShadow0"},
+        {PipelineResourceKind::sampled_texture, 0U, 17U, "txShadow1"},
+        {PipelineResourceKind::sampled_texture, 0U, 18U, "txShadow2"},
+        {PipelineResourceKind::sampler, 0U, 19U, "shadowSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 20U, "ShadowReceiver"},
+        {PipelineResourceKind::sampled_texture, 0U, 21U, "txCube"},
+        {PipelineResourceKind::sampler, 0U, 22U, "samCube"},
+        {PipelineResourceKind::uniform_buffer, 0U, 23U, "ReflectionConstants"},
+    };
+    require(pipeline_declares_stock_tyres(pipeline),
+            "stock tyre semantic resource layout recognized");
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::stock_tyres_with_constants_and_frame,
+            "stock tyre layout classified independently of shadow/reflection extensions");
+    PipelineProgram wrong_name = pipeline;
+    wrong_name.resources[6U].name = "mapsTexture";
+    require(!pipeline_declares_stock_tyres(wrong_name) &&
+                classify_indexed_portable_resource_layout(wrong_name) ==
+                    IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame,
+            "tyre semantic names do not steal the existing detail-stack layout");
+    pipeline.resources.resize(12U);
+
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeTexture dirty(Backend::Vulkan, sampled_description());
+    FakeTexture blur(Backend::Vulkan, sampled_description());
+    FakeTexture normal_blur(Backend::Vulkan, sampled_description());
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    FakeSampler normal_sampler(Backend::Vulkan);
+    FakeSampler dirty_sampler(Backend::Vulkan);
+    FakeSampler blur_sampler(Backend::Vulkan);
+    FakeSampler normal_blur_sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan, {132U, BufferUsage::vertex,
+                                          BufferMemory::device_local,
+                                          BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan, {6U, BufferUsage::index,
+                                         BufferMemory::device_local,
+                                         BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan, {256U, BufferUsage::uniform,
+                                          BufferMemory::host_visible,
+                                          BufferMutability::mutable_data});
+    FakeBuffer frame(Backend::Vulkan, {256U, BufferUsage::uniform,
+                                       BufferMemory::host_visible,
+                                       BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.normal_binding = {&normal, &normal_sampler};
+    request.tyre_dirty_binding = {&dirty, &dirty_sampler};
+    request.tyre_blur_binding = {&blur, &blur_sampler};
+    request.tyre_normal_blur_binding = {&normal_blur, &normal_blur_sampler};
+    request.material_binding = {&material, 0U,
+                                portable_stock_tyres_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "complete stock tyre texture and constant bindings accepted");
+
+    request.tyre_blur_binding = {};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_tyre_binding_missing",
+            "missing stock tyre blur binding rejected");
+    request.tyre_blur_binding = {&blur, &blur_sampler};
+    request.maps_binding = {&blur, &blur_sampler};
+    require(validate_indexed_static_mesh_draw_request(target, request, diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code == "indexed_maps_binding_unexpected",
+            "generic maps binding cannot overlap the dedicated stock tyre layout");
+}
+
 void validates_portable_detail_stack_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -3388,6 +3478,7 @@ int main() {
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
         validates_portable_multimap_reflection_contract();
+        validates_stock_tyres_resource_contract();
         validates_portable_detail_stack_contract();
         validates_portable_damage_stack_contract();
         validates_portable_damage_dust_alpha_contract();
