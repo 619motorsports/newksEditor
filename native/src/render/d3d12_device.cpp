@@ -23,6 +23,7 @@
 #    define NOMINMAX
 #    include <windows.h>
 #    include <d3d12.h>
+#    include <d3d12sdklayers.h>
 #    include <d3dcompiler.h>
 #    include <dxgi1_6.h>
 #    include <wrl/client.h>
@@ -70,6 +71,39 @@ Diagnostic hresult_error(const char* operation, HRESULT result) {
                     std::snprintf(buffer, sizeof(buffer), "%08lX", static_cast<unsigned long>(result));
                     return std::string(buffer);
                 }()};
+}
+
+[[nodiscard]] UINT64 d3d12_debug_message_count(ID3D12Device* device) {
+    ComPtr<ID3D12InfoQueue> queue;
+    if (device == nullptr ||
+        FAILED(device->QueryInterface(IID_PPV_ARGS(&queue))) || !queue)
+        return 0U;
+    return queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+}
+
+void append_d3d12_debug_messages(ID3D12Device* device, UINT64 first,
+                                 Diagnostic& diagnostic) {
+    ComPtr<ID3D12InfoQueue> queue;
+    if (device == nullptr ||
+        FAILED(device->QueryInterface(IID_PPV_ARGS(&queue))) || !queue)
+        return;
+    const UINT64 count = queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    constexpr UINT64 maximum_messages = 4U;
+    const UINT64 begin = count > first + maximum_messages
+                             ? count - maximum_messages
+                             : first;
+    for (UINT64 index = begin; index < count; ++index) {
+        SIZE_T bytes = 0U;
+        if (FAILED(queue->GetMessage(index, nullptr, &bytes)) || bytes == 0U)
+            continue;
+        std::vector<std::byte> storage(bytes);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(queue->GetMessage(index, message, &bytes)) ||
+            message->pDescription == nullptr)
+            continue;
+        diagnostic.message += "\nD3D12 debug: ";
+        diagnostic.message += message->pDescription;
+    }
 }
 
 struct Adapter {
@@ -5159,7 +5193,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     description.InputLayout = {input, static_cast<UINT>(std::size(input))};
     description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     description.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-    description.RasterizerState.FrontCounterClockwise = FALSE;
+    // CameraFrame's D3D12 projection retains positive Y, so the portable
+    // billboard winding is counter-clockwise after viewport transformation.
+    description.RasterizerState.FrontCounterClockwise = TRUE;
     description.RasterizerState.DepthClipEnable = TRUE;
     description.DepthStencilState.DepthEnable = FALSE;
     description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -6185,10 +6221,14 @@ bool draw_indexed_static_mesh_batch_and_readback(
         pipeline_description.SampleMask = std::numeric_limits<UINT>::max();
         pipeline_description.SampleDesc.Count = description.samples;
         pipeline_description.SampleDesc.Quality = target_sample_quality;
+        const UINT64 first_debug_message =
+            d3d12_debug_message_count(context->device.Get());
         result = context->device->CreateGraphicsPipelineState(&pipeline_description, IID_PPV_ARGS(&pipelines[index]));
         if (FAILED(result)) {
             diagnostic = hresult_error("CreateGraphicsPipelineState(indexed batch)", result);
             diagnostic.code = "indexed_static_mesh_batch_pipeline_failed";
+            append_d3d12_debug_messages(context->device.Get(),
+                                        first_debug_message, diagnostic);
             return false;
         }
     }

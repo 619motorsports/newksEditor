@@ -2,6 +2,7 @@
 
 #include "../src/render/generated/hdr_bloom_spirv.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -61,7 +62,11 @@ void verify_d3d12_runtime_source() {
         std::string(APEX_NATIVE_SOURCE_DIR) +
         "/src/render/d3d12_device.cpp");
     const std::string source(source_bytes.begin(), source_bytes.end());
-    const std::string device(device_bytes.begin(), device_bytes.end());
+    std::string device(device_bytes.begin(), device_bytes.end());
+    // Git can materialize C++ sources with CRLF on Windows. The embedded HLSL
+    // identity is based on shader bytes, so normalize only the container text
+    // before extracting and comparing its raw-string body.
+    device.erase(std::remove(device.begin(), device.end(), '\r'), device.end());
     constexpr std::string_view begin_marker =
         "constexpr char kD3d12BloomShader[] = R\"HLSL(\n";
     constexpr std::string_view end_marker = ")HLSL\";";

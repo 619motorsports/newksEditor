@@ -2509,7 +2509,9 @@ bool contract_backend(apex::render::Backend backend) {
                 *target.texture, selected_batch);
         require(selected_result.ok() &&
                     selected_result.rgba8.size() == 32U * 32U * 4U,
-                "selected-mesh ordered batch execution");
+                std::string("selected-mesh ordered batch execution: ") +
+                    selected_result.diagnostic.code + ": " +
+                    selected_result.diagnostic.message);
         require(selected_result.rgba8[center] == std::byte{255} &&
                     selected_result.rgba8[center + 1U] == std::byte{0} &&
                     selected_result.rgba8[center + 2U] == std::byte{255} &&
