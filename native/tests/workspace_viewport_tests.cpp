@@ -2087,6 +2087,9 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     request.render.include_reflections = true;
     request.render.explicit_reflection_root = 1U;
     request.sky_enabled = true;
+    request.skeleton_overlay =
+        apex::app::WorkspaceViewportSkeletonOverlayOptions{};
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
     request.portable_reflection_capture =
         apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
 
@@ -2146,7 +2149,9 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
                 WorkspaceViewportFrameStatus::ready &&
                 device.draw_calls == 7U && device.mip_calls == 1U &&
                 device.present_calls == 1U &&
-                device.mip_targets.front() == device.draw_targets.front(),
+                device.mip_targets.front() == device.draw_targets.front() &&
+                device.overlay_counts ==
+                    std::vector<std::size_t>({0U, 0U, 0U, 0U, 0U, 0U, 1U}),
             "six completed faces generate mips before the main frame and presentation");
 
     std::vector<std::string> expected_events;
@@ -2964,6 +2969,154 @@ void draws_builtin_vulkan_source_through_hdr_tone_map() {
                 device.presented_textures ==
                     device.tone_map_destinations,
             "retained Vulkan stock rendering resolves RGBA16F before tone mapping");
+}
+
+void prepares_retains_and_toggles_recovered_skeleton_overlay() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        auto& nodes = value.document.scene.snapshot.nodes;
+        nodes[0U].transform[12U] = 10.0F;
+        nodes[1U].transform[12U] = 1.0F;
+        nodes[1U].transform[13U] = 2.0F;
+        nodes[1U].transform[14U] = 3.0F;
+        nodes[2U].transform[12U] = 4.0F;
+        nodes[2U].transform[13U] = 5.0F;
+        nodes[2U].transform[14U] = 6.0F;
+
+        auto request = request_for(value);
+        request.hdr_tone_map = HdrToneMapParameters{};
+        request.packets.selected_node = 1U;
+        request.skeleton_overlay =
+            apex::app::WorkspaceViewportSkeletonOverlayOptions{};
+        request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+        request.authoring_overlay_pipeline->targets.colors[0U].format =
+            PipelineRenderTargetFormat::rgba16_float;
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        if (!prepared.ok()) {
+            throw std::runtime_error("skeleton viewport preparation: " +
+                                     prepared.diagnostic.code);
+        }
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera.clip_space = backend == Backend::Vulkan
+                                      ? CameraClipSpace::vulkan
+                                      : CameraClipSpace::d3d12;
+        frame.camera.view_projection[5U] = 0.75F;
+        frame.frame_constants = KsPerPixelFrameConstants{};
+        Diagnostic diagnostic;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.overlay_counts ==
+                        std::vector<std::size_t>({2U}) &&
+                    device.overlay_scene_positions ==
+                        std::vector<std::uint32_t>({
+                            std::numeric_limits<std::uint32_t>::max(),
+                            std::numeric_limits<std::uint32_t>::max()}) &&
+                    !device.overlay_depth_tests[0U] &&
+                    !device.overlay_depth_writes[0U] &&
+                    device.overlay_matrices[0U].world ==
+                        apex::scene::identity_matrix &&
+                    device.overlay_matrices[0U].view_projection ==
+                        frame.camera.view_projection,
+                "retained skeleton draws before selection with recovered depth state");
+
+        const auto* skeleton_buffer =
+            dynamic_cast<const FakeBuffer*>(device.overlay_buffers[0U]);
+        require(skeleton_buffer != nullptr &&
+                    skeleton_buffer->info().description.mutability ==
+                        BufferMutability::immutable &&
+                    device.overlay_vertex_counts[0U] == 14U &&
+                    skeleton_buffer->bytes().size() ==
+                        14U * sizeof(OverlayLineVertex),
+                "skeleton geometry is retained in one immutable backend buffer");
+        std::array<OverlayLineVertex, 14U> vertices{};
+        std::memcpy(vertices.data(), skeleton_buffer->bytes().data(),
+                    skeleton_buffer->bytes().size());
+        require(vertices[0U].position ==
+                        std::array<float, 3U>{10.03F, 0.0F, 0.0F} &&
+                    vertices[0U].color ==
+                        apex::render::skeleton_overlay_marker_color &&
+                    vertices[12U].position ==
+                        std::array<float, 3U>{1.0F, 2.0F, 3.0F} &&
+                    vertices[13U].position ==
+                        std::array<float, 3U>{4.0F, 5.0F, 6.0F} &&
+                    vertices[12U].color ==
+                        apex::render::skeleton_overlay_selected_connector_color &&
+                    vertices[13U].color ==
+                        apex::render::skeleton_overlay_selected_connector_color,
+                "viewport preserves recovered world positions and selected connector color");
+
+        frame.skeleton_overlay_visible = false;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.overlay_counts ==
+                        std::vector<std::size_t>({2U, 1U}),
+                "frame override hides the retained skeleton without rebuilding it");
+    }
+}
+
+void rejects_malformed_skeleton_viewport_inputs_before_allocation() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.skeleton_overlay =
+        apex::app::WorkspaceViewportSkeletonOverlayOptions{};
+    request.authoring_overlay_pipeline = authoring_overlay_pipeline(value);
+
+    value.document.scene.snapshot.nodes[1U].transform[0U] =
+        std::numeric_limits<float>::quiet_NaN();
+    FakeDevice non_finite_device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        non_finite_device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_skeleton_transform_non_finite" &&
+                non_finite_device.texture_calls == 0U &&
+                non_finite_device.depth_calls == 0U &&
+                non_finite_device.buffer_calls == 0U,
+            "non-finite skeleton matrices fail before GPU allocation");
+
+    value.document.scene.snapshot.nodes[1U].transform[0U] = 1.0F;
+    value.document.scene.snapshot.nodes[0U].children[0U] = 99U;
+    FakeDevice truncated_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        truncated_device, value.document, request);
+    require(!prepared.ok() &&
+                prepared.diagnostic.code ==
+                    "workspace_viewport_skeleton_child_truncated" &&
+                truncated_device.texture_calls == 0U &&
+                truncated_device.depth_calls == 0U &&
+                truncated_device.buffer_calls == 0U,
+            "truncated skeleton hierarchy fails before GPU allocation");
+
+    auto ordinary_value = fixture();
+    auto ordinary_request = request_for(ordinary_value);
+    FakeDevice ordinary_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        ordinary_device, ordinary_value.document, ordinary_request);
+    require(prepared.ok(), "ordinary viewport prepares without skeleton resources");
+    FakeTarget target(ordinary_request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.skeleton_overlay_visible = true;
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(
+                ordinary_device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_skeleton_unprepared" &&
+                ordinary_device.draw_calls == 0U,
+            "frame override cannot enable an unprepared skeleton overlay");
 }
 
 void draws_selected_axis_inside_the_scene_batch() {
@@ -7580,6 +7733,8 @@ int main() {
         reallocates_fxaa_targets_after_viewport_resize();
         rejects_invalid_viewport_hdr_requests();
         draws_builtin_vulkan_source_through_hdr_tone_map();
+        prepares_retains_and_toggles_recovered_skeleton_overlay();
+        rejects_malformed_skeleton_viewport_inputs_before_allocation();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();

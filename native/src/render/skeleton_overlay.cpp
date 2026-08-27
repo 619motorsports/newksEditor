@@ -56,36 +56,36 @@ struct WalkFrame {
 }
 
 void emit_vertex(std::vector<OverlayLineVertex>& output,
-                 const std::array<float, 3U>& position) {
-    output.push_back({position, skeleton_overlay_color});
+                 const std::array<float, 3U>& position,
+                 const std::array<float, 3U>& color) {
+    output.push_back({position, color});
 }
 
 void emit_marker(std::vector<OverlayLineVertex>& output,
                  const std::array<float, 3U>& position) {
     std::array<float, 3U> endpoint = position;
     endpoint[0U] = position[0U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
     endpoint[0U] = position[0U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
 
     endpoint = position;
     endpoint[1U] = position[1U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
     endpoint[1U] = position[1U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
 
     endpoint = position;
     endpoint[2U] = position[2U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
     endpoint[2U] = position[2U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
 }
 
-} // namespace
-
-SkeletonOverlayResult build_skeleton_overlay(
+SkeletonOverlayResult build_skeleton_overlay_impl(
     const std::span<const SkeletonOverlayNode> nodes,
     const std::uint32_t root,
+    const std::uint32_t selected_node,
     const SkeletonOverlayLimits limits) {
     if (nodes.data() == nullptr && !nodes.empty()) {
         return failure(SkeletonOverlayStatus::invalid_request,
@@ -102,6 +102,12 @@ SkeletonOverlayResult build_skeleton_overlay(
         return failure(SkeletonOverlayStatus::invalid_request,
                        "skeleton_overlay_root_invalid",
                        "The skeleton root must identify a supplied node");
+    }
+    if (selected_node != invalid_skeleton_overlay_node &&
+        selected_node >= nodes.size()) {
+        return failure(SkeletonOverlayStatus::invalid_request,
+                       "skeleton_overlay_selected_node_invalid",
+                       "The selected skeleton node must identify a supplied node");
     }
     if (nodes.size() > limits.max_nodes) {
         return failure(SkeletonOverlayStatus::node_count_exceeded,
@@ -230,8 +236,14 @@ SkeletonOverlayResult build_skeleton_overlay(
         const std::uint32_t child_id = node.children[frame.next_child++];
         const SkeletonOverlayNode& child = nodes[child_id];
         if (connector_allowed(child.kind)) {
-            emit_vertex(result.vertices, node.world_translation);
-            emit_vertex(result.vertices, child.world_translation);
+            const auto& connector_color =
+                frame.node == selected_node
+                    ? skeleton_overlay_selected_connector_color
+                    : skeleton_overlay_connector_color;
+            emit_vertex(result.vertices, node.world_translation,
+                        connector_color);
+            emit_vertex(result.vertices, child.world_translation,
+                        connector_color);
         }
         // All children recurse, including mesh and skinned-mesh nodes. Only
         // their connector was filtered above, matching the native walk.
@@ -239,6 +251,24 @@ SkeletonOverlayResult build_skeleton_overlay(
                          0U});
     }
     return result;
+}
+
+} // namespace
+
+SkeletonOverlayResult build_skeleton_overlay(
+    const std::span<const SkeletonOverlayNode> nodes,
+    const std::uint32_t root,
+    const SkeletonOverlayLimits limits) {
+    return build_skeleton_overlay_impl(
+        nodes, root, invalid_skeleton_overlay_node, limits);
+}
+
+SkeletonOverlayResult build_skeleton_overlay(
+    const std::span<const SkeletonOverlayNode> nodes,
+    const std::uint32_t root,
+    const std::uint32_t selected_node,
+    const SkeletonOverlayLimits limits) {
+    return build_skeleton_overlay_impl(nodes, root, selected_node, limits);
 }
 
 } // namespace apex::render

@@ -1124,11 +1124,45 @@ if(NOT detached_overlay_result STREQUAL "1")
     "detached overlay modules returned ${detached_overlay_result}: ${detached_overlay_error}")
 endif()
 string(FIND "${detached_overlay_error}"
-  "authoring-overlay shader modules require --selected-node, --grid, --view-axis, or --ai-spline"
+  "authoring-overlay shader modules require --selected-node, --grid, --view-axis, --skeleton, or --ai-spline"
   detached_overlay_position)
 if(detached_overlay_position EQUAL -1)
   message(FATAL_ERROR
     "detached overlay modules were not diagnosed: ${detached_overlay_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}" --skeleton
+  RESULT_VARIABLE skeleton_without_modules_result
+  ERROR_VARIABLE skeleton_without_modules_error
+)
+if(NOT skeleton_without_modules_result STREQUAL "1")
+  message(FATAL_ERROR
+    "skeleton without modules returned ${skeleton_without_modules_result}: ${skeleton_without_modules_error}")
+endif()
+string(FIND "${skeleton_without_modules_error}"
+  "--skeleton requires authoring-overlay shader modules"
+  skeleton_without_modules_position)
+if(skeleton_without_modules_position EQUAL -1)
+  message(FATAL_ERROR
+    "skeleton without modules was not diagnosed: ${skeleton_without_modules_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --model "${model}"
+          --skeleton --skeleton
+  RESULT_VARIABLE duplicate_skeleton_result
+  ERROR_VARIABLE duplicate_skeleton_error
+)
+if(NOT duplicate_skeleton_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate skeleton returned ${duplicate_skeleton_result}: ${duplicate_skeleton_error}")
+endif()
+string(FIND "${duplicate_skeleton_error}"
+  "duplicate --skeleton option" duplicate_skeleton_position)
+if(duplicate_skeleton_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate skeleton was not diagnosed: ${duplicate_skeleton_error}")
 endif()
 
 execute_process(

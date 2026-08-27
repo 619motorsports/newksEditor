@@ -74,7 +74,7 @@ void usage(std::ostream& output) {
               "                       [--ai-spline-edit-point <index> <x> <y> <z> ...] [--ai-spline-unlock-edit]\n"
               "                       [--ai-spline-save-on-exit <file>]\n"
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
-              "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
+              "                       [--show-hidden] [--wireframe] [--grid] [--view-axis] [--skeleton]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
               "                       [--cloud-assets <directory>]\n"
               "                       [--hdr [--exposure <value>] [--fxaa]]\n"
@@ -534,6 +534,7 @@ struct WindowWorkspaceOptions {
     bool wireframe = false;
     bool gridVisible = false;
     bool viewAxisVisible = false;
+    bool skeletonVisible = false;
     std::string weather;
     bool weatherSpecified = false;
     std::optional<std::filesystem::path> cloudAssets;
@@ -1290,6 +1291,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.viewAxisVisible)
                 throw std::runtime_error("duplicate --view-axis option");
             result.viewAxisVisible = true;
+        } else if (option == "--skeleton") {
+            if (result.skeletonVisible)
+                throw std::runtime_error("duplicate --skeleton option");
+            result.skeletonVisible = true;
         } else if (option == "--weather") {
             if (result.weatherSpecified)
                 throw std::runtime_error("duplicate --weather option");
@@ -1463,15 +1468,19 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             "authoring-overlay vertex and fragment modules must be supplied together");
     if (result.authoringOverlayVertex.has_value() &&
         !result.selectedNode.has_value() && !result.gridVisible &&
-        !result.viewAxisVisible && !result.aiSpline.has_value())
+        !result.viewAxisVisible && !result.skeletonVisible &&
+        !result.aiSpline.has_value())
         throw std::runtime_error(
-            "authoring-overlay shader modules require --selected-node, --grid, --view-axis, or --ai-spline");
+            "authoring-overlay shader modules require --selected-node, --grid, --view-axis, --skeleton, or --ai-spline");
     if (result.gridVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--grid requires authoring-overlay shader modules");
     if (result.viewAxisVisible && !result.authoringOverlayVertex.has_value())
         throw std::runtime_error(
             "--view-axis requires authoring-overlay shader modules");
+    if (result.skeletonVisible && !result.authoringOverlayVertex.has_value())
+        throw std::runtime_error(
+            "--skeleton requires authoring-overlay shader modules");
     if (result.selectedMeshVertex.has_value() !=
         result.selectedMeshFragment.has_value())
         throw std::runtime_error(
@@ -2430,8 +2439,12 @@ int run_window(int argc, char** argv) {
         request.wireframe = loaded_workspace.selection.wireframe;
         request.grid_visible = workspace_options.gridVisible;
         request.view_axis_visible = workspace_options.viewAxisVisible;
+        if (workspace_options.skeletonVisible)
+            request.skeleton_overlay =
+                apex::app::WorkspaceViewportSkeletonOverlayOptions{};
         const bool authoring_overlay_requested =
             workspace_options.gridVisible || workspace_options.viewAxisVisible ||
+            workspace_options.skeletonVisible ||
             workspace_options.selectedNode.has_value();
         if (loaded_workspace.authoringOverlayModules.has_value() &&
             authoring_overlay_requested) {
@@ -2448,8 +2461,11 @@ int run_window(int argc, char** argv) {
                  apex::render::PipelineVertexAttributeFormat::float32x3,
                  1U, 12U},
             };
-            pipeline.targets.colors = {{pipeline_color_format(
-                request.presentation.format), request.color_samples}};
+            pipeline.targets.colors = {{
+                request.hdr_tone_map.has_value()
+                    ? apex::render::PipelineRenderTargetFormat::rgba16_float
+                    : pipeline_color_format(request.presentation.format),
+                request.color_samples}};
             pipeline.targets.has_depth = true;
             pipeline.targets.depth = {
                 apex::render::PipelineRenderTargetFormat::depth32_float,
@@ -2481,9 +2497,11 @@ int run_window(int argc, char** argv) {
                  apex::render::PipelineVertexAttributeFormat::float32x3, 1U,
                  12U},
             };
-            pipeline.targets.colors = {
-                {pipeline_color_format(request.presentation.format),
-                 request.color_samples}};
+            pipeline.targets.colors = {{
+                request.hdr_tone_map.has_value()
+                    ? apex::render::PipelineRenderTargetFormat::rgba16_float
+                    : pipeline_color_format(request.presentation.format),
+                request.color_samples}};
             pipeline.targets.has_depth = true;
             pipeline.targets.depth = {
                 apex::render::PipelineRenderTargetFormat::depth32_float,
@@ -2566,9 +2584,11 @@ int run_window(int argc, char** argv) {
                  apex::render::PipelineVertexAttributeFormat::float32x3, 0U,
                  0U},
             };
-            pipeline.targets.colors = {
-                {pipeline_color_format(request.presentation.format),
-                 request.color_samples}};
+            pipeline.targets.colors = {{
+                request.hdr_tone_map.has_value()
+                    ? apex::render::PipelineRenderTargetFormat::rgba16_float
+                    : pipeline_color_format(request.presentation.format),
+                request.color_samples}};
             pipeline.targets.has_depth = true;
             pipeline.targets.depth = {
                 apex::render::PipelineRenderTargetFormat::depth32_float,

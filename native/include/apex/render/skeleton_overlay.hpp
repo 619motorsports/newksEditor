@@ -5,14 +5,21 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
 namespace apex::render {
 
 inline constexpr float skeleton_overlay_marker_half_extent = 0.03F;
-inline constexpr std::array<float, 3U> skeleton_overlay_color = {
+inline constexpr std::array<float, 3U> skeleton_overlay_marker_color = {
     1.0F, 1.0F, 1.0F};
+inline constexpr std::array<float, 3U> skeleton_overlay_connector_color = {
+    1.0F, 0.0F, 1.0F};
+inline constexpr std::array<float, 3U>
+    skeleton_overlay_selected_connector_color = {1.0F, 1.0F, 0.0F};
+inline constexpr std::uint32_t invalid_skeleton_overlay_node =
+    std::numeric_limits<std::uint32_t>::max();
 inline constexpr std::size_t skeleton_overlay_marker_vertex_count = 6U;
 
 // The native renderer emits markers for nodes that have children. Mesh and
@@ -74,6 +81,14 @@ struct SkeletonOverlayResult {
 [[nodiscard]] SkeletonOverlayResult build_skeleton_overlay(
     std::span<const SkeletonOverlayNode> nodes,
     std::uint32_t root,
+    SkeletonOverlayLimits limits = {});
+
+// This overload applies the recovered selected-node connector color. The
+// current node controls the color of all connectors to its plain children.
+[[nodiscard]] SkeletonOverlayResult build_skeleton_overlay(
+    std::span<const SkeletonOverlayNode> nodes,
+    std::uint32_t root,
+    std::uint32_t selected_node,
     SkeletonOverlayLimits limits = {});
 
 } // namespace apex::render

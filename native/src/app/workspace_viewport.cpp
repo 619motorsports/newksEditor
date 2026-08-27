@@ -149,6 +149,111 @@ buildStockNativeFrame(
     });
 }
 
+[[nodiscard]] render::SkeletonOverlayResult buildWorkspaceSkeletonOverlay(
+    const apex::scene::SceneSnapshot& scene,
+    const apex::scene::NodeId selected_node,
+    render::SkeletonOverlayLimits limits) {
+    const auto reject = [](const char* code, const char* message) {
+        return render::SkeletonOverlayResult{
+            render::SkeletonOverlayStatus::invalid_request,
+            {code, message}, {}};
+    };
+    if (scene.nodes.empty() || scene.root == apex::scene::invalid_node_id ||
+        static_cast<std::size_t>(scene.root) >= scene.nodes.size()) {
+        return reject("workspace_viewport_skeleton_root_invalid",
+                      "The skeleton scene root must identify a supplied node");
+    }
+    if (scene.nodes[scene.root].parent != apex::scene::invalid_node_id) {
+        return reject("workspace_viewport_skeleton_root_parent_invalid",
+                      "The portable scene root must omit its engine-owned parent");
+    }
+
+    std::vector<render::SkeletonOverlayNode> nodes(scene.nodes.size());
+    std::vector<apex::scene::NodeId> expected_parents(
+        scene.nodes.size(), apex::scene::invalid_node_id);
+    for (std::size_t index = 0U; index < scene.nodes.size(); ++index) {
+        const auto& source = scene.nodes[index];
+        if (source.id != index) {
+            return reject("workspace_viewport_skeleton_node_id_invalid",
+                          "Skeleton scene node identifiers must be dense and ordered");
+        }
+        if (!std::all_of(source.transform.begin(), source.transform.end(),
+                         [](float value) { return std::isfinite(value); })) {
+            return reject("workspace_viewport_skeleton_transform_non_finite",
+                          "Skeleton world transforms must contain only finite values");
+        }
+        auto& node = nodes[index];
+        node.world_translation = {
+            source.transform[12U], source.transform[13U], source.transform[14U]};
+        node.children = source.children;
+        node.declared_child_count = source.children.size();
+        switch (source.kind) {
+        case apex::scene::NodeKind::node:
+            node.kind = render::SkeletonOverlayNodeKind::plain;
+            break;
+        case apex::scene::NodeKind::mesh:
+            node.kind = render::SkeletonOverlayNodeKind::mesh;
+            break;
+        case apex::scene::NodeKind::skinned_mesh:
+            node.kind = render::SkeletonOverlayNodeKind::skinned_mesh;
+            break;
+        default:
+            return reject("workspace_viewport_skeleton_node_kind_invalid",
+                          "Skeleton scene node kind is not recognized");
+        }
+        for (const auto child : source.children) {
+            if (static_cast<std::size_t>(child) >= scene.nodes.size()) {
+                return reject("workspace_viewport_skeleton_child_truncated",
+                              "A skeleton child falls outside the scene snapshot");
+            }
+            if (child == scene.root ||
+                expected_parents[child] != apex::scene::invalid_node_id) {
+                return reject("workspace_viewport_skeleton_hierarchy_invalid",
+                              "The skeleton scene must be a single ordered tree");
+            }
+            expected_parents[child] = static_cast<apex::scene::NodeId>(index);
+            if (scene.nodes[child].parent != index) {
+                return reject("workspace_viewport_skeleton_parent_mismatch",
+                              "A skeleton child does not reference its supplied parent");
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> reached(scene.nodes.size(), 0U);
+    std::vector<apex::scene::NodeId> stack = {scene.root};
+    reached[scene.root] = 1U;
+    std::size_t reached_count = 0U;
+    while (!stack.empty()) {
+        const auto node = stack.back();
+        stack.pop_back();
+        ++reached_count;
+        for (const auto child : scene.nodes[node].children) {
+            if (reached[child] != 0U) {
+                return reject("workspace_viewport_skeleton_hierarchy_invalid",
+                              "The skeleton scene must not contain cycles or duplicate nodes");
+            }
+            reached[child] = 1U;
+            stack.push_back(child);
+        }
+    }
+    if (reached_count != scene.nodes.size()) {
+        return reject("workspace_viewport_skeleton_hierarchy_disconnected",
+                      "Every skeleton scene node must be reachable from the root");
+    }
+    for (std::size_t index = 0U; index < scene.nodes.size(); ++index) {
+        if (index != scene.root &&
+            expected_parents[index] == apex::scene::invalid_node_id) {
+            return reject("workspace_viewport_skeleton_hierarchy_disconnected",
+                          "Every non-root skeleton node must have one parent");
+        }
+    }
+
+    if (limits.declared_node_count == 0U)
+        limits.declared_node_count = scene.nodes.size();
+    return render::build_skeleton_overlay(
+        nodes, scene.root, selected_node, limits);
+}
+
 [[nodiscard]] bool validatePortableGrassFrameOptions(
     const WorkspaceViewportPortableGrassFrameOptions& options,
     render::Diagnostic& output_diagnostic) noexcept {
@@ -518,6 +623,18 @@ validateAiSplineDepth(const render::PipelineProgram &pipeline,
                        "the recovered spline-pass behavior");
     }
     return valid;
+}
+
+[[nodiscard]] bool validateSkeletonOverlayDepth(
+    const render::PipelineProgram& pipeline,
+    render::Diagnostic& output_diagnostic) {
+    if (pipeline.depth.test_enabled || pipeline.depth.write_enabled) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_depth_invalid",
+            "The recovered skeleton pass requires depth test and writes disabled");
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] bool finite_input_delta(const float value) noexcept {
@@ -1162,6 +1279,7 @@ WorkspaceViewport::WorkspaceViewport(
         directional_shadows,
     std::optional<WorkspaceViewport::PortableCloudResources> portable_clouds,
     std::optional<WorkspaceViewport::PortableGrassResources> portable_grass,
+    std::optional<WorkspaceViewport::SkeletonOverlayResources> skeleton_overlay,
     std::optional<PortableReflectionCaptureResources> reflection_capture,
     std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
@@ -1188,6 +1306,7 @@ WorkspaceViewport::WorkspaceViewport(
       directional_shadows_(std::move(directional_shadows)),
       portable_clouds_(std::move(portable_clouds)),
       portable_grass_(std::move(portable_grass)),
+      skeleton_overlay_(std::move(skeleton_overlay)),
       reflection_capture_(std::move(reflection_capture)),
       frame_catalog_(std::move(frame_catalog)) {}
 
@@ -1723,6 +1842,24 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                        "A frame cannot show a view axis that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
+    const bool skeleton_overlay_visible =
+        request.skeleton_overlay_visible.value_or(
+            skeleton_overlay_.has_value() && skeleton_overlay_->visible);
+    if (request.skeleton_overlay_visible.has_value() &&
+        !skeleton_overlay_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_unprepared",
+            "A frame cannot override a skeleton overlay that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (skeleton_overlay_visible &&
+        (!skeleton_overlay_.has_value() ||
+         !authoring_overlay_pipeline_.has_value())) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_skeleton_unprepared",
+            "A frame cannot show a skeleton overlay that was not prepared");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
     if (request.selection_axis_world.has_value() &&
         (authoring_overlay_pipeline_ == std::nullopt ||
          selection_axis_buffer_ == nullptr ||
@@ -2160,8 +2297,18 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         std::span<const render::OverlayLineDrawRequest>(view_axis_draws)
             .first(view_axis_draw_count);
 
-    std::array<render::OverlayLineDrawRequest, 2U> overlay_draws{};
+    std::array<render::OverlayLineDrawRequest, 3U> overlay_draws{};
     std::size_t overlay_count = 0U;
+    if (skeleton_overlay_visible &&
+        skeleton_overlay_->vertex_buffer != nullptr &&
+        skeleton_overlay_->vertex_count != 0U) {
+        auto& skeleton = overlay_draws[overlay_count++];
+        skeleton.pipeline = &*authoring_overlay_pipeline_;
+        skeleton.vertex_buffer = skeleton_overlay_->vertex_buffer.get();
+        skeleton.vertex_count = skeleton_overlay_->vertex_count;
+        skeleton.matrices.world = apex::scene::identity_matrix;
+        skeleton.matrices.view_projection = request.camera.view_projection;
+    }
     if (grid_visible) {
         auto &grid = overlay_draws[overlay_count++];
         grid.pipeline = &*authoring_overlay_pipeline_;
@@ -2740,6 +2887,26 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "workspace_viewport_document_invalid",
                 "workspace document has no valid model and scene roots");
             return result;
+        }
+
+        std::optional<render::SkeletonOverlayResult> skeleton_geometry;
+        if (request.skeleton_overlay.has_value()) {
+            skeleton_geometry = buildWorkspaceSkeletonOverlay(
+                document.scene.snapshot, request.packets.selected_node,
+                request.skeleton_overlay->limits);
+            if (!skeleton_geometry->ok()) {
+                result.status =
+                    skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::node_count_exceeded ||
+                        skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::edge_count_exceeded ||
+                        skeleton_geometry->status ==
+                            render::SkeletonOverlayStatus::vertex_count_exceeded
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = skeleton_geometry->diagnostic;
+                return result;
+            }
         }
 
         render::RenderPlanOptions render_options = request.render;
@@ -3744,6 +3911,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         std::unique_ptr<render::Buffer> view_axis_buffer;
         std::unique_ptr<render::Buffer> selection_axis_buffer;
         std::optional<apex::scene::Matrix4> selection_axis_world;
+        std::optional<WorkspaceViewport::SkeletonOverlayResources>
+            skeleton_overlay;
         const bool selection_axis_requested =
             request.packets.selected_node != apex::scene::invalid_node_id;
         struct AiSplinePassInput {
@@ -3829,11 +3998,17 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         const std::size_t authoring_draw_count =
             static_cast<std::size_t>(request.grid_visible) +
             static_cast<std::size_t>(request.view_axis_visible) +
-            static_cast<std::size_t>(selection_axis_requested);
+            static_cast<std::size_t>(selection_axis_requested) +
+            static_cast<std::size_t>(
+                skeleton_geometry.has_value() &&
+                !skeleton_geometry->vertices.empty());
         const std::size_t authoring_vertex_count =
             (request.grid_visible ? render::authoring_grid_vertex_count : 0U) +
             (request.view_axis_visible ? render::view_axis_vertex_count : 0U) +
-            (selection_axis_requested ? 6U : 0U);
+            (selection_axis_requested ? 6U : 0U) +
+            (skeleton_geometry.has_value()
+                 ? skeleton_geometry->vertices.size()
+                 : 0U);
         std::size_t ai_draw_count = 0U;
         std::size_t ai_vertex_count = 0U;
         for (const AiSplinePassInput &input : ai_spline_inputs) {
@@ -3928,6 +4103,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 }
                 render::IndexedStaticMeshBatchDescription batch;
                 batch.depth_attachment = depth.attachment.get();
+                batch.capture_rgba8 = false;
                 batch.overlay_draws =
                     std::span<const render::OverlayLineDrawRequest>(draws)
                         .first(geometry.chunks.size());
@@ -3965,14 +4141,28 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "A visible view axis requires an overlay pipeline");
             return result;
         }
+        if (request.skeleton_overlay.has_value() &&
+            !request.authoring_overlay_pipeline.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_skeleton_pipeline_missing",
+                "A prepared skeleton overlay requires an overlay pipeline");
+            return result;
+        }
         if (request.authoring_overlay_pipeline.has_value()) {
             const auto selected = request.packets.selected_node;
             if (!request.grid_visible && !request.view_axis_visible &&
-                !selection_axis_requested) {
+                !selection_axis_requested && !request.skeleton_overlay.has_value()) {
                 result.status = WorkspaceViewportStatus::invalid;
                 result.diagnostic = diagnostic(
                     "workspace_viewport_selection_axis_node_invalid",
                     "An authoring-overlay pipeline requires a view axis, grid, or selected node");
+                return result;
+            }
+            if (request.skeleton_overlay.has_value() &&
+                !validateSkeletonOverlayDepth(
+                    *request.authoring_overlay_pipeline, result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
                 return result;
             }
             if (selection_axis_requested &&
@@ -4044,7 +4234,22 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                     return result;
             }
 
-            std::array<render::OverlayLineDrawRequest, 3U> overlay_draws{};
+            if (request.skeleton_overlay.has_value()) {
+                WorkspaceViewport::SkeletonOverlayResources resources;
+                resources.visible = request.skeleton_overlay->visible;
+                resources.vertex_count = static_cast<std::uint32_t>(
+                    skeleton_geometry->vertices.size());
+                if (!skeleton_geometry->vertices.empty() &&
+                    !create_overlay_buffer(
+                        std::as_bytes(
+                            std::span(skeleton_geometry->vertices)),
+                        render::BufferMutability::immutable,
+                        resources.vertex_buffer))
+                    return result;
+                skeleton_overlay = std::move(resources);
+            }
+
+            std::array<render::OverlayLineDrawRequest, 4U> overlay_draws{};
             std::size_t overlay_count = 0U;
             if (view_axis_buffer != nullptr) {
                 auto& draw = overlay_draws[overlay_count++];
@@ -4060,6 +4265,13 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 draw.vertex_buffer = authoring_grid_buffer.get();
                 draw.vertex_count = static_cast<std::uint32_t>(grid.size());
             }
+            if (skeleton_overlay.has_value() &&
+                skeleton_overlay->vertex_buffer != nullptr) {
+                auto& draw = overlay_draws[overlay_count++];
+                draw.pipeline = &*request.authoring_overlay_pipeline;
+                draw.vertex_buffer = skeleton_overlay->vertex_buffer.get();
+                draw.vertex_count = skeleton_overlay->vertex_count;
+            }
             if (selection_axis_buffer != nullptr) {
                 auto& draw = overlay_draws[overlay_count++];
                 draw.pipeline = &*request.authoring_overlay_pipeline;
@@ -4069,6 +4281,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             }
             render::IndexedStaticMeshBatchDescription overlay_batch;
             overlay_batch.depth_attachment = depth.attachment.get();
+            overlay_batch.capture_rgba8 = false;
             overlay_batch.overlay_draws =
                 std::span<const render::OverlayLineDrawRequest>(overlay_draws)
                     .first(overlay_count);
@@ -4110,6 +4323,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(shadow_maps), std::move(directional_shadows),
             std::move(portable_clouds),
             std::move(portable_grass),
+            std::move(skeleton_overlay),
             std::move(reflection_capture),
             std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;

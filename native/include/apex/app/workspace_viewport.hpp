@@ -8,6 +8,7 @@
 #include "apex/render/directional_shadow.hpp"
 #include "apex/render/external_texture_authority.hpp"
 #include "apex/render/selection_axis.hpp"
+#include "apex/render/skeleton_overlay.hpp"
 #include "apex/render/stock_scene_execution.hpp"
 
 #include <array>
@@ -176,6 +177,14 @@ struct WorkspaceViewportPortableGrassOptions {
     WorkspaceViewportPortableGrassFrameOptions frame{};
 };
 
+// Presence prepares the recovered editor skeleton pass from the immutable
+// scene snapshot. The adapter maps snapshot.root to the installed graph's
+// parented traversal entry without adding an inferred engine node.
+struct WorkspaceViewportSkeletonOverlayOptions {
+    bool visible = true;
+    render::SkeletonOverlayLimits limits{};
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced
@@ -190,6 +199,7 @@ struct WorkspaceViewportPrepareRequest {
     bool sky_enabled = false;
     std::optional<WorkspaceViewportPortableCloudOptions> portable_clouds;
     std::optional<WorkspaceViewportPortableGrassOptions> portable_grass;
+    std::optional<WorkspaceViewportSkeletonOverlayOptions> skeleton_overlay;
     // Apply the recovered post-tone-map FXAA pass. This requires HDR tone
     // mapping and keeps the default LDR path unchanged.
     bool fxaa_enabled = false;
@@ -378,6 +388,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared view-axis state. A true value requires view-axis
     // resources to have been requested during viewport preparation.
     std::optional<bool> view_axis_visible;
+    // Override the prepared skeleton state. A true value requires retained
+    // skeleton geometry and the authoring overlay pipeline.
+    std::optional<bool> skeleton_overlay_visible;
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
@@ -582,6 +595,12 @@ private:
         std::chrono::steady_clock::time_point start_time{};
     };
 
+    struct SkeletonOverlayResources {
+        bool visible = true;
+        std::unique_ptr<render::Buffer> vertex_buffer;
+        std::uint32_t vertex_count = 0U;
+    };
+
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
                                     const AiSplineUpdateRequest& request,
@@ -619,6 +638,7 @@ private:
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<PortableCloudResources> portable_clouds,
         std::optional<PortableGrassResources> portable_grass,
+        std::optional<SkeletonOverlayResources> skeleton_overlay,
         std::optional<PortableReflectionCaptureResources> reflection_capture,
         std::optional<FrameCatalog> frame_catalog);
 
@@ -653,6 +673,7 @@ private:
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
     std::optional<PortableCloudResources> portable_clouds_;
     std::optional<PortableGrassResources> portable_grass_;
+    std::optional<SkeletonOverlayResources> skeleton_overlay_;
     std::optional<PortableReflectionCaptureResources> reflection_capture_;
     std::optional<FrameCatalog> frame_catalog_;
 

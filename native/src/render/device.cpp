@@ -3911,6 +3911,7 @@ IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
     const TextureDescription& target = texture.info().description;
     const auto expected_format = [&] {
         switch (target.format) {
+        case TextureFormat::rgba16_sfloat: return PipelineRenderTargetFormat::rgba16_float;
         case TextureFormat::rgba8_unorm: return PipelineRenderTargetFormat::rgba8_unorm;
         case TextureFormat::rgba8_srgb: return PipelineRenderTargetFormat::rgba8_srgb;
         case TextureFormat::bgra8_unorm: return PipelineRenderTargetFormat::bgra8_unorm;
@@ -3920,7 +3921,7 @@ IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
     }();
     if (expected_format == PipelineRenderTargetFormat::unknown) {
         diagnostic = {"overlay_line_target_format_unsupported",
-                      "Overlay lines support only RGBA8 and BGRA8 color targets"};
+                      "Overlay lines support only RGBA16F, RGBA8, and BGRA8 color targets"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
     if (pipeline.targets.colors.size() != 1U ||

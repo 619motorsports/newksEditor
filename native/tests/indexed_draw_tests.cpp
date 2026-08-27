@@ -2616,6 +2616,19 @@ void validates_overlay_line_batch_contract() {
                 IndexedStaticMeshBatchStatus::ready,
             "valid RGB overlay line contract accepted");
 
+    TextureDescription hdr_description = target_description();
+    hdr_description.format = TextureFormat::rgba16_sfloat;
+    FakeTexture hdr_target(Backend::Vulkan, hdr_description);
+    PipelineProgram hdr_pipeline = pipeline;
+    hdr_pipeline.targets.colors[0U].format =
+        PipelineRenderTargetFormat::rgba16_float;
+    OverlayLineDrawRequest hdr_request = request;
+    hdr_request.pipeline = &hdr_pipeline;
+    require(validate_overlay_line_draw_request(
+                hdr_target, hdr_request, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "valid RGB overlay line contract accepts an RGBA16F scene target");
+
     IndexedStaticMeshBatchDescription batch;
     const std::array overlays = {request};
     batch.overlay_draws = overlays;

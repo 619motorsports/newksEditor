@@ -34,7 +34,8 @@ void exact_native_marker_and_connector_vertices() {
     const auto result = apex::render::build_skeleton_overlay(nodes, 0U);
     require(result.ok() && result.vertices.size() == 8U,
             "native marker plus connector has eight vertices");
-    const auto white = apex::render::skeleton_overlay_color;
+    const auto white = apex::render::skeleton_overlay_marker_color;
+    const auto magenta = apex::render::skeleton_overlay_connector_color;
     const auto& vertices = result.vertices;
     require(vertices[0].position ==
                     std::array<float, 3U>{1.03F, 2.0F, 3.0F} &&
@@ -53,9 +54,48 @@ void exact_native_marker_and_connector_vertices() {
                 vertices[7].position ==
                     std::array<float, 3U>{4.0F, 5.0F, 6.0F},
             "marker and connector preserve recovered coordinates and order");
-    for (const auto& vertex : vertices) {
-        require(vertex.color == white, "all unselected skeleton geometry is white");
-    }
+    for (std::size_t index = 0U; index < 6U; ++index)
+        require(vertices[index].color == white,
+                "skeleton markers use the recovered white color");
+    require(vertices[6U].color == magenta &&
+                vertices[7U].color == magenta,
+            "unselected skeleton connectors use the recovered magenta color");
+}
+
+void applies_recovered_selected_connector_color() {
+    const std::array<std::uint32_t, 1U> root_children = {1U};
+    const std::array<std::uint32_t, 1U> child_children = {2U};
+    const std::array<Node, 3U> nodes = {
+        node({0.0F, 0.0F, 0.0F}, root_children),
+        node({1.0F, 0.0F, 0.0F}, child_children),
+        node({2.0F, 0.0F, 0.0F}),
+    };
+    const auto result =
+        apex::render::build_skeleton_overlay(nodes, 0U, 1U);
+    require(result.ok() && result.vertices.size() == 16U,
+            "selected skeleton fixture emits two markers and connectors");
+    require(result.vertices[6U].color ==
+                    apex::render::skeleton_overlay_connector_color &&
+                result.vertices[7U].color ==
+                    apex::render::skeleton_overlay_connector_color,
+            "connectors from an unselected current node remain magenta");
+    require(result.vertices[14U].color ==
+                    apex::render::skeleton_overlay_selected_connector_color &&
+                result.vertices[15U].color ==
+                    apex::render::skeleton_overlay_selected_connector_color,
+            "connectors from the selected current node are yellow");
+    for (const std::size_t index : {0U, 1U, 2U, 3U, 4U, 5U,
+                                    8U, 9U, 10U, 11U, 12U, 13U})
+        require(result.vertices[index].color ==
+                    apex::render::skeleton_overlay_marker_color,
+                "selection does not change the white marker color");
+
+    const auto invalid = apex::render::build_skeleton_overlay(nodes, 0U, 3U);
+    require(!invalid.ok() &&
+                invalid.diagnostic.code ==
+                    "skeleton_overlay_selected_node_invalid" &&
+                invalid.vertices.empty(),
+            "an invalid selected node is rejected before output allocation");
 }
 
 void preserves_child_order_and_filters_mesh_connectors() {
@@ -170,6 +210,7 @@ void rejects_cycles_duplicates_depth_and_counts() {
 int main() {
     try {
         exact_native_marker_and_connector_vertices();
+        applies_recovered_selected_connector_color();
         preserves_child_order_and_filters_mesh_connectors();
         rejects_malformed_and_nonfinite_input_atomically();
         rejects_cycles_duplicates_depth_and_counts();
