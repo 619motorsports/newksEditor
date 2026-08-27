@@ -76,6 +76,7 @@ void usage(std::ostream& output) {
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
+              "                       [--cloud-assets <directory>]\n"
               "                       [--hdr [--exposure <value>] [--fxaa]]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
@@ -535,6 +536,7 @@ struct WindowWorkspaceOptions {
     bool viewAxisVisible = false;
     std::string weather;
     bool weatherSpecified = false;
+    std::optional<std::filesystem::path> cloudAssets;
     double sunHeading = apex::app::workspace_viewport_default_sun_heading_degrees;
     bool sunHeadingSpecified = false;
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
@@ -1293,6 +1295,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error("duplicate --weather option");
             result.weather = std::string(require_value("--weather"));
             result.weatherSpecified = true;
+        } else if (option == "--cloud-assets") {
+            if (result.cloudAssets.has_value())
+                throw std::runtime_error("duplicate --cloud-assets option");
+            result.cloudAssets = std::filesystem::path(
+                require_value("--cloud-assets"));
         } else if (option == "--sun-heading") {
             if (result.sunHeadingSpecified)
                 throw std::runtime_error("duplicate --sun-heading option");
@@ -1575,7 +1582,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error("hierarchy options require a workspace model");
     const bool lighting_options = result.weatherSpecified ||
                                   result.sunHeadingSpecified ||
-                                  result.sunHeightSpecified;
+                                  result.sunHeightSpecified ||
+                                  result.cloudAssets.has_value();
     if (lighting_options && !has_model_source)
         throw std::runtime_error("lighting options require a workspace model");
     if (result.exposure.has_value() && !result.hdr)
@@ -2195,6 +2203,37 @@ int run_window(int argc, char** argv) {
     load_window_workspace(workspace_options, backend, loaded_workspace);
     const auto* active_document = loaded_workspace.activeDocument();
 
+    std::array<apex::render::DecodedTexturePlan,
+               apex::render::portable_cloud_texture_count>
+        cloud_texture_plans;
+    std::array<bool, apex::render::portable_cloud_texture_count>
+        cloud_texture_ready{};
+    if (workspace_options.cloudAssets.has_value()) {
+        apex::assets::AssetSource cloud_assets;
+        cloud_assets.addDirectory(*workspace_options.cloudAssets);
+        for (std::size_t index = 0U; index < cloud_texture_plans.size(); ++index) {
+            const std::string relative =
+                "content/texture/clouds/cloud" + std::to_string(index + 1U) +
+                "C.dds";
+            const auto resolved = cloud_assets.resolve(relative);
+            if (resolved.status != apex::assets::AssetResolveStatus::resolved ||
+                resolved.file == nullptr) {
+                throw std::runtime_error(
+                    "cloud asset did not resolve uniquely: " + relative);
+            }
+            const auto bytes = cloud_assets.read(*resolved.file);
+            const auto planned = apex::render::plan_decoded_dds_texture(
+                bytes, resolved.file->relativePath);
+            if (!planned.ok()) {
+                throw std::runtime_error(
+                    planned.diagnostic.code + ": " +
+                    planned.diagnostic.message);
+            }
+            cloud_texture_plans[index] = std::move(planned.plan);
+            cloud_texture_ready[index] = true;
+        }
+    }
+
     apex::platform::WindowDescription window_description;
     window_description.title = "Apex Editor native shell";
     window_description.vulkan = backend == apex::render::Backend::Vulkan;
@@ -2328,6 +2367,24 @@ int run_window(int argc, char** argv) {
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.sky_enabled = true;
+        if (workspace_options.cloudAssets.has_value()) {
+            const auto& preset = workspace_lighting.evaluated.preset;
+            apex::app::WorkspaceViewportPortableCloudOptions clouds;
+            clouds.settings.width = preset.cloud_width;
+            clouds.settings.height = preset.cloud_height;
+            clouds.settings.radius = preset.cloud_radius;
+            clouds.settings.count = preset.cloud_number;
+            clouds.settings.base_speed = preset.cloud_base_speed;
+            clouds.cloud_cover = preset.cloud_cover;
+            clouds.cloud_cutoff = preset.cloud_cutoff;
+            clouds.cloud_color = preset.cloud_color;
+            for (std::size_t index = 0U;
+                 index < cloud_texture_plans.size(); ++index) {
+                if (cloud_texture_ready[index])
+                    clouds.textures[index] = &cloud_texture_plans[index];
+            }
+            request.portable_clouds = clouds;
+        }
         request.fxaa_enabled = workspace_options.fxaa;
         if (workspace_options.hdr) {
             apex::render::HdrToneMapParameters tone_map;

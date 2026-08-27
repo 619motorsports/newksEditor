@@ -1075,6 +1075,131 @@ bool build_portable_sky_shader_constants(
     return true;
 }
 
+bool build_portable_cloud_shader_constants(
+    const PortableCloudParameters& parameters,
+    PortableCloudShaderConstants& constants, Diagnostic& diagnostic) noexcept {
+    constexpr float maximum_color_component = 64000.0F;
+    constexpr float maximum_elapsed_seconds = 1.0e9F;
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](const float value) {
+            return std::isfinite(value);
+        });
+    };
+    const auto bounded_color = [&](const std::array<float, 3U>& values) {
+        return finite(values) &&
+               std::all_of(values.begin(), values.end(), [&](const float value) {
+                   return value >= 0.0F && value <= maximum_color_component;
+               });
+    };
+    if (!finite(parameters.camera.view_projection) ||
+        !finite(parameters.camera.position) ||
+        !std::isfinite(parameters.elapsed_seconds) ||
+        parameters.elapsed_seconds < 0.0F ||
+        parameters.elapsed_seconds > maximum_elapsed_seconds) {
+        diagnostic = {"portable_cloud_camera_invalid",
+                      "Portable cloud camera values and elapsed time must be finite and bounded"};
+        return false;
+    }
+    if (!finite(parameters.light_direction) ||
+        !bounded_color(parameters.light_color) ||
+        !bounded_color(parameters.ambient_color) ||
+        !std::isfinite(parameters.fog_distance) ||
+        !std::isfinite(parameters.cloud_cover) ||
+        !std::isfinite(parameters.cloud_cutoff) ||
+        !std::isfinite(parameters.cloud_color) ||
+        parameters.fog_distance < 0.0F ||
+        parameters.fog_distance > 1.0e9F ||
+        parameters.cloud_cover < 0.0F || parameters.cloud_cover > 1.0F ||
+        parameters.cloud_cutoff < 0.0F || parameters.cloud_cutoff > 1.0F ||
+        parameters.cloud_color < 0.0F || parameters.cloud_color > 1000.0F) {
+        diagnostic = {"portable_cloud_lighting_invalid",
+                      "Portable cloud lighting values must be finite and bounded"};
+        return false;
+    }
+    if (parameters.texture_runs.size() > portable_cloud_max_count) {
+        diagnostic = {"portable_cloud_run_limit",
+                      "Portable cloud texture runs exceed the cloud limit"};
+        return false;
+    }
+    if (!parameters.texture_runs.empty() && parameters.vertex_buffer == nullptr) {
+        diagnostic = {"portable_cloud_vertex_buffer_missing",
+                      "Portable cloud texture runs require a vertex buffer"};
+        return false;
+    }
+    std::uint64_t expected_first = 0U;
+    bool has_drawable_run = false;
+    for (const PortableCloudTextureRun& run : parameters.texture_runs) {
+        if (run.texture >= portable_cloud_texture_count ||
+            run.vertex_count == 0U ||
+            run.vertex_count % portable_cloud_vertices_per_billboard != 0U ||
+            run.cloud_count !=
+                run.vertex_count / portable_cloud_vertices_per_billboard ||
+            run.first_vertex != expected_first ||
+            run.first_vertex > portable_cloud_max_vertex_count ||
+            run.vertex_count >
+                portable_cloud_max_vertex_count - run.first_vertex) {
+            diagnostic = {"portable_cloud_run_invalid",
+                          "Portable cloud texture runs must be contiguous, bounded six-vertex billboards"};
+            return false;
+        }
+        expected_first += run.vertex_count;
+        has_drawable_run = has_drawable_run ||
+                           parameters.textures[run.texture] != nullptr;
+    }
+    if (expected_first > portable_cloud_max_vertex_count) {
+        diagnostic = {"portable_cloud_vertex_limit",
+                      "Portable cloud vertices exceed the bounded cloud limit"};
+        return false;
+    }
+    if (parameters.vertex_buffer != nullptr) {
+        const BufferDescription& buffer = parameters.vertex_buffer->info().description;
+        const std::uint64_t required_bytes =
+            expected_first * portable_cloud_vertex_stride_bytes;
+        if (!any(buffer.usage & BufferUsage::vertex) ||
+            required_bytes > buffer.size_bytes) {
+            diagnostic = {"portable_cloud_vertex_buffer_invalid",
+                          "Portable clouds require a sufficiently large vertex buffer"};
+            return false;
+        }
+    }
+    if (has_drawable_run && parameters.sampler == nullptr) {
+        diagnostic = {"portable_cloud_sampler_missing",
+                      "Drawable portable clouds require a sampler"};
+        return false;
+    }
+    for (const Texture* texture : parameters.textures) {
+        if (texture == nullptr)
+            continue;
+        const TextureDescription& description = texture->info().description;
+        if (description.shape != TextureShape::texture_2d ||
+            description.array_layers != 1U || description.samples != 1U ||
+            static_cast<std::uint32_t>(description.usage &
+                                       TextureUsage::sampled) == 0U) {
+            diagnostic = {"portable_cloud_texture_invalid",
+                          "Portable cloud textures must be single-sample sampled 2D textures"};
+            return false;
+        }
+    }
+
+    constants = {};
+    constants.view_projection = parameters.camera.view_projection;
+    std::copy(parameters.camera.position.begin(), parameters.camera.position.end(),
+              constants.camera_position_time.begin());
+    constants.camera_position_time[3U] = parameters.elapsed_seconds;
+    std::copy(parameters.light_direction.begin(), parameters.light_direction.end(),
+              constants.light_direction_fog.begin());
+    constants.light_direction_fog[3U] = parameters.fog_distance;
+    std::copy(parameters.light_color.begin(), parameters.light_color.end(),
+              constants.light_color_cover.begin());
+    constants.light_color_cover[3U] = parameters.cloud_cover;
+    std::copy(parameters.ambient_color.begin(), parameters.ambient_color.end(),
+              constants.ambient_color_cutoff.begin());
+    constants.ambient_color_cutoff[3U] = parameters.cloud_cutoff;
+    constants.cloud_color[0U] = parameters.cloud_color;
+    diagnostic = {};
+    return true;
+}
+
 bool validate_hdr_bloom_resource_budget(
     std::uint32_t width, std::uint32_t height,
     std::uint64_t additional_bytes, Diagnostic& diagnostic) noexcept {
@@ -3963,6 +4088,20 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         PortableSkyShaderConstants sky_constants;
         if (!build_portable_sky_shader_constants(
                 *description.sky, sky_constants, diagnostic))
+            return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.clouds.has_value()) {
+        const CameraClipSpace expected_clip_space =
+            texture.backend() == Backend::Vulkan ? CameraClipSpace::vulkan
+                                                  : CameraClipSpace::d3d12;
+        if (description.clouds->camera.clip_space != expected_clip_space) {
+            diagnostic = {"portable_cloud_clip_space_mismatch",
+                          "The portable cloud camera clip space must match the color-target backend"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        PortableCloudShaderConstants cloud_constants;
+        if (!build_portable_cloud_shader_constants(
+                *description.clouds, cloud_constants, diagnostic))
             return IndexedStaticMeshBatchStatus::invalid_request;
     }
     if (target.shape == TextureShape::texture_cube && description.load_color) {

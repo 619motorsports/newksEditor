@@ -27,6 +27,7 @@
 #    include <wrl/client.h>
 #    include "generated/d3d12_hdr_tone_map_dxbc.hpp"
 #    include "generated/d3d12_fxaa_dxbc.hpp"
+#    include "generated/d3d12_portable_clouds_dxbc.hpp"
 #    include "generated/d3d12_portable_sky_dxbc.hpp"
 #    include "generated/d3d12_texture_mip_dxbc.hpp"
 #endif
@@ -75,6 +76,12 @@ struct Adapter {
 };
 
 struct D3D12PortableSkyPipeline {
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT samples = 1U;
+    ComPtr<ID3D12PipelineState> pipeline;
+};
+
+struct D3D12PortableCloudPipeline {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     UINT samples = 1U;
     ComPtr<ID3D12PipelineState> pipeline;
@@ -177,6 +184,8 @@ struct D3D12Context {
         hdr_bloom_tone_map_pipelines;
     ComPtr<ID3D12RootSignature> portable_sky_root_signature;
     std::vector<D3D12PortableSkyPipeline> portable_sky_pipelines;
+    ComPtr<ID3D12RootSignature> portable_cloud_root_signature;
+    std::vector<D3D12PortableCloudPipeline> portable_cloud_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -205,6 +214,24 @@ struct D3D12Context {
 class D3D12DepthAttachment;
 class D3D12Texture;
 class D3D12Sampler;
+
+struct D3D12PortableCloudTextureResource {
+    ID3D12Resource* resource = nullptr;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    D3D12_RESOURCE_STATES* tracked_state = nullptr;
+    D3D12_RESOURCE_STATES original_state = D3D12_RESOURCE_STATE_COMMON;
+    TextureDescription description{};
+    bool initialized = false;
+};
+
+[[nodiscard]] bool inspect_d3d12_portable_cloud_texture(
+    const Texture* requested, const D3D12Context* context,
+    D3D12PortableCloudTextureResource& output,
+    Diagnostic& diagnostic);
+[[nodiscard]] bool inspect_d3d12_portable_cloud_sampler(
+    const Sampler* requested, const D3D12Context* context,
+    D3D12_GPU_DESCRIPTOR_HANDLE& output,
+    Diagnostic& diagnostic);
 
 [[nodiscard]] D3D12_RESOURCE_STATES d3d12_texture_state(
     const D3D12Texture& texture) noexcept;
@@ -5026,6 +5053,132 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+[[nodiscard]] bool prepare_d3d12_portable_cloud_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT target_format,
+    UINT sample_count, UINT sample_quality,
+    ID3D12PipelineState*& pipeline, Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context == nullptr || context->device == nullptr ||
+        target_format == DXGI_FORMAT_UNKNOWN ||
+        (sample_count != 1U && sample_count != 4U)) {
+        diagnostic = {"d3d12_portable_cloud_pipeline_failed",
+                      "D3D12 portable clouds received an invalid device, format, or sample count"};
+        return false;
+    }
+    if (context->portable_cloud_root_signature == nullptr) {
+        D3D12_ROOT_PARAMETER parameters[3U]{};
+        parameters[0U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        parameters[0U].Descriptor.ShaderRegister = 0U;
+        parameters[0U].Descriptor.RegisterSpace = 0U;
+        parameters[0U].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_DESCRIPTOR_RANGE srv_range{};
+        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srv_range.NumDescriptors = 1U;
+        srv_range.BaseShaderRegister = 0U;
+        srv_range.RegisterSpace = 0U;
+        srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        parameters[1U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[1U].DescriptorTable.NumDescriptorRanges = 1U;
+        parameters[1U].DescriptorTable.pDescriptorRanges = &srv_range;
+        parameters[1U].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_DESCRIPTOR_RANGE sampler_range{};
+        sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        sampler_range.NumDescriptors = 1U;
+        sampler_range.BaseShaderRegister = 0U;
+        sampler_range.RegisterSpace = 0U;
+        sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        parameters[2U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[2U].DescriptorTable.NumDescriptorRanges = 1U;
+        parameters[2U].DescriptorTable.pDescriptorRanges = &sampler_range;
+        parameters[2U].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters = 3U;
+        root_description.pParameters = parameters;
+        root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(portable clouds)", result);
+            diagnostic.code = "d3d12_portable_cloud_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->portable_cloud_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(portable clouds)", result);
+            diagnostic.code = "d3d12_portable_cloud_pipeline_failed";
+            return false;
+        }
+    }
+    for (const D3D12PortableCloudPipeline& cached :
+         context->portable_cloud_pipelines) {
+        if (cached.format == target_format && cached.samples == sample_count) {
+            pipeline = cached.pipeline.Get();
+            return true;
+        }
+    }
+    const D3D12_INPUT_ELEMENT_DESC input[] = {
+        {"TEXCOORD", 0U, DXGI_FORMAT_R32G32_FLOAT, 0U, 0U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 1U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 8U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 2U, DXGI_FORMAT_R32G32_FLOAT, 0U, 20U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 3U, DXGI_FORMAT_R32_FLOAT, 0U, 28U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U}};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->portable_cloud_root_signature.Get();
+    description.VS = {generated::d3d12_portable_clouds_vertex_dxbc,
+                      generated::d3d12_portable_clouds_vertex_dxbc_size};
+    description.PS = {generated::d3d12_portable_clouds_pixel_dxbc,
+                      generated::d3d12_portable_clouds_pixel_dxbc_size};
+    description.InputLayout = {input, static_cast<UINT>(std::size(input))};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+    description.RasterizerState.FrontCounterClockwise = FALSE;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.DepthStencilState.DepthEnable = FALSE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    auto& blend = description.BlendState.RenderTarget[0U];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = target_format;
+    description.SampleDesc.Count = sample_count;
+    description.SampleDesc.Quality = sample_quality;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(portable clouds)", result);
+        diagnostic.code = "d3d12_portable_cloud_pipeline_failed";
+        return false;
+    }
+    D3D12PortableCloudPipeline cached;
+    cached.format = target_format;
+    cached.samples = sample_count;
+    cached.pipeline = std::move(created);
+    pipeline = cached.pipeline.Get();
+    context->portable_cloud_pipelines.push_back(std::move(cached));
+    return true;
+}
+
 bool draw_indexed_static_mesh_batch_and_readback(
     const std::shared_ptr<D3D12Context>& context,
     ID3D12Resource* destination,
@@ -6016,6 +6169,161 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 diagnostic))
             return false;
     }
+    PortableCloudShaderConstants cloud_constants{};
+    ID3D12PipelineState* cloud_pipeline = nullptr;
+    ComPtr<ID3D12DescriptorHeap> cloud_srv_heap;
+    ComPtr<ID3D12Resource> cloud_constant_buffer;
+    std::array<std::optional<D3D12PortableCloudTextureResource>,
+               portable_cloud_texture_count>
+        cloud_textures;
+    std::vector<D3D12PortableCloudTextureResource*> cloud_texture_states;
+    std::vector<const PortableCloudTextureRun*> cloud_runs;
+    ID3D12Resource* cloud_vertex_buffer = nullptr;
+    D3D12_GPU_DESCRIPTOR_HANDLE cloud_sampler{};
+    if (batch.clouds.has_value()) {
+        const PortableCloudParameters& clouds = *batch.clouds;
+        if (!build_portable_cloud_shader_constants(
+                clouds, cloud_constants, diagnostic))
+            return false;
+        for (std::size_t slot = 0U; slot < clouds.textures.size(); ++slot) {
+            if (clouds.textures[slot] == nullptr)
+                continue;
+            cloud_textures[slot].emplace();
+            if (!inspect_d3d12_portable_cloud_texture(
+                    clouds.textures[slot], context.get(),
+                    *cloud_textures[slot], diagnostic))
+                return false;
+        }
+        for (const PortableCloudTextureRun& run : clouds.texture_runs) {
+            auto& texture = cloud_textures[run.texture];
+            if (!texture.has_value())
+                continue;
+            const TextureDescription& texture_description = texture->description;
+            if (!texture->initialized ||
+                texture_description.shape != TextureShape::texture_2d ||
+                texture_description.samples != 1U ||
+                texture_description.width == 0U ||
+                texture_description.height == 0U ||
+                texture_description.mip_levels == 0U ||
+                texture->format == DXGI_FORMAT_UNKNOWN) {
+                diagnostic = {"portable_cloud_texture_invalid",
+                              "Portable cloud textures must be initialized single-sample 2D images"};
+                return false;
+            }
+            cloud_runs.push_back(&run);
+            bool known = false;
+            for (const auto* state : cloud_texture_states) {
+                if (state->resource == texture->resource) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known)
+                cloud_texture_states.push_back(&*texture);
+        }
+        if (!cloud_runs.empty()) {
+            const auto* vertex_buffer = dynamic_cast<const D3D12Buffer*>(
+                clouds.vertex_buffer);
+            if (vertex_buffer == nullptr ||
+                vertex_buffer->context() != context.get() ||
+                !inspect_d3d12_portable_cloud_sampler(
+                    clouds.sampler, context.get(), cloud_sampler,
+                    diagnostic)) {
+                if (!diagnostic.code.empty())
+                    return false;
+                diagnostic = {"portable_cloud_context_mismatch",
+                              "Portable cloud buffers and samplers must belong to the D3D12 device"};
+                return false;
+            }
+            cloud_vertex_buffer = vertex_buffer->resource();
+            if ((static_cast<UINT>(vertex_buffer->state()) &
+                 static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER)) == 0U) {
+                diagnostic = {"portable_cloud_vertex_state_invalid",
+                              "Portable cloud vertices must be in D3D12 vertex-buffer state"};
+                return false;
+            }
+            const D3D12_RESOURCE_DESC vertex_description = vertex_buffer->resource()->GetDesc();
+            for (const PortableCloudTextureRun* run : cloud_runs) {
+                const UINT64 offset = static_cast<UINT64>(run->first_vertex) *
+                                      portable_cloud_vertex_stride_bytes;
+                const UINT64 bytes = static_cast<UINT64>(run->vertex_count) *
+                                     portable_cloud_vertex_stride_bytes;
+                if (offset > vertex_description.Width ||
+                    bytes > vertex_description.Width - offset ||
+                    bytes > std::numeric_limits<UINT>::max()) {
+                    diagnostic = {"portable_cloud_vertex_range_invalid",
+                                  "Portable cloud vertex runs exceed the D3D12 vertex buffer"};
+                    return false;
+                }
+            }
+            if (!prepare_d3d12_portable_cloud_pipeline(
+                    context, dxgi_texture_format(description.format),
+                    description.samples, target_sample_quality, cloud_pipeline,
+                    diagnostic))
+                return false;
+
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC constant_description{};
+            constant_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            constant_description.Width = 256U;
+            constant_description.Height = 1U;
+            constant_description.DepthOrArraySize = 1U;
+            constant_description.MipLevels = 1U;
+            constant_description.SampleDesc.Count = 1U;
+            constant_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            result = context->device->CreateCommittedResource(
+                &upload_heap, D3D12_HEAP_FLAG_NONE, &constant_description,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&cloud_constant_buffer));
+            if (FAILED(result)) {
+                diagnostic = hresult_error(
+                    "CreateCommittedResource(portable clouds constants)", result);
+                diagnostic.code = "portable_cloud_execution_failed";
+                return false;
+            }
+            void* mapped = nullptr;
+            result = cloud_constant_buffer->Map(0U, nullptr, &mapped);
+            if (FAILED(result)) {
+                diagnostic = hresult_error("Map(portable clouds constants)", result);
+                diagnostic.code = "portable_cloud_execution_failed";
+                return false;
+            }
+            std::memcpy(mapped, &cloud_constants, sizeof(cloud_constants));
+            cloud_constant_buffer->Unmap(0U, nullptr);
+
+            D3D12_DESCRIPTOR_HEAP_DESC srv_description{};
+            srv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            srv_description.NumDescriptors = portable_cloud_texture_count;
+            srv_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            result = context->device->CreateDescriptorHeap(
+                &srv_description, IID_PPV_ARGS(&cloud_srv_heap));
+            if (FAILED(result)) {
+                diagnostic = hresult_error(
+                    "CreateDescriptorHeap(portable clouds SRV)", result);
+                diagnostic.code = "portable_cloud_execution_failed";
+                return false;
+            }
+            const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            D3D12_CPU_DESCRIPTOR_HANDLE srv_start =
+                cloud_srv_heap->GetCPUDescriptorHandleForHeapStart();
+            for (std::uint32_t slot = 0U; slot < portable_cloud_texture_count; ++slot) {
+                const auto& texture = cloud_textures[slot];
+                if (!texture.has_value())
+                    continue;
+                D3D12_CPU_DESCRIPTOR_HANDLE target = srv_start;
+                target.ptr += static_cast<SIZE_T>(slot) * srv_stride;
+                if (!create_d3d12_batch_srv(
+                        context->device.Get(), texture->resource,
+                        texture->format, target)) {
+                    diagnostic = {"portable_cloud_texture_view_invalid",
+                                  "Portable cloud texture SRV creation requires a 2D texture"};
+                    return false;
+                }
+            }
+        }
+    }
     ComPtr<ID3D12CommandAllocator> allocator;
     result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
     if (FAILED(result)) {
@@ -6104,6 +6412,24 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
+    for (const auto* cloud_state : cloud_texture_states) {
+        const bool already_sampled = std::any_of(
+            native_sampled_resources.begin(), native_sampled_resources.end(),
+            [&](const NativeSampledResource& sampled) {
+                return sampled.resource == cloud_state->resource;
+            });
+        if (already_sampled) continue;
+        if (cloud_state->original_state ==
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+            continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = cloud_state->resource;
+        barrier.Transition.StateBefore = cloud_state->original_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
     if (destination_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -6150,6 +6476,50 @@ bool draw_indexed_static_mesh_batch_and_readback(
         list->RSSetViewports(1U, &sky_viewport);
         list->RSSetScissorRects(1U, &sky_scissor);
         list->DrawInstanced(3U, 1U, 0U, 0U);
+    }
+    if (cloud_pipeline != nullptr && cloud_vertex_buffer != nullptr &&
+        cloud_sampler.ptr != 0U) {
+        // This is the WebGL-aligned portable cloud billboard pass, not
+        // recovered native cloud shader parity. It is alpha blended after
+        // sky and before retained scene geometry.
+        ID3D12DescriptorHeap* descriptor_heaps[] = {
+            cloud_srv_heap.Get(), context->sampler_heap.Get()};
+        list->SetDescriptorHeaps(2U, descriptor_heaps);
+        list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+        list->SetGraphicsRootSignature(context->portable_cloud_root_signature.Get());
+        list->SetGraphicsRootConstantBufferView(
+            0U, cloud_constant_buffer->GetGPUVirtualAddress());
+        D3D12_GPU_DESCRIPTOR_HANDLE srv_start =
+            cloud_srv_heap->GetGPUDescriptorHandleForHeapStart();
+        const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        list->SetGraphicsRootDescriptorTable(2U, cloud_sampler);
+        D3D12_VIEWPORT cloud_viewport{
+            0.0F, 0.0F, static_cast<float>(description.width),
+            static_cast<float>(description.height), 0.0F, 1.0F};
+        D3D12_RECT cloud_scissor{
+            0, 0, static_cast<LONG>(description.width),
+            static_cast<LONG>(description.height)};
+        list->RSSetViewports(1U, &cloud_viewport);
+        list->RSSetScissorRects(1U, &cloud_scissor);
+        list->SetPipelineState(cloud_pipeline);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const PortableCloudTextureRun* run : cloud_runs) {
+            if (batch.clouds->textures[run->texture] == nullptr) continue;
+            D3D12_GPU_DESCRIPTOR_HANDLE texture_gpu = srv_start;
+            texture_gpu.ptr += static_cast<UINT64>(run->texture) * srv_stride;
+            list->SetGraphicsRootDescriptorTable(1U, texture_gpu);
+            const UINT64 vertex_offset = static_cast<UINT64>(run->first_vertex) *
+                                         portable_cloud_vertex_stride_bytes;
+            D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+            vertex_view.BufferLocation = cloud_vertex_buffer->GetGPUVirtualAddress() +
+                                         vertex_offset;
+            vertex_view.SizeInBytes = run->vertex_count *
+                                      portable_cloud_vertex_stride_bytes;
+            vertex_view.StrideInBytes = portable_cloud_vertex_stride_bytes;
+            list->IASetVertexBuffers(0U, 1U, &vertex_view);
+            list->DrawInstanced(run->vertex_count, 1U, 0U, 0U);
+        }
     }
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const auto& draw = draws[index];
@@ -6355,6 +6725,24 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
+    for (const auto* cloud_state : cloud_texture_states) {
+        const bool already_sampled = std::any_of(
+            native_sampled_resources.begin(), native_sampled_resources.end(),
+            [&](const NativeSampledResource& sampled) {
+                return sampled.resource == cloud_state->resource;
+            });
+        if (already_sampled) continue;
+        if (cloud_state->original_state ==
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+            continue;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = cloud_state->resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = cloud_state->original_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
     const D3D12_RESOURCE_STATES final_state =
         texture_state(description.usage, description.access_policy);
     if (description.samples > 1U) {
@@ -6473,6 +6861,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
         for (const NativeSampledResource& sampled : native_sampled_resources)
             if (sampled.state != nullptr)
                 *sampled.state = drained ? sampled.before : D3D12_RESOURCE_STATE_COMMON;
+        for (const auto* cloud_state : cloud_texture_states)
+            if (cloud_state->tracked_state != nullptr)
+                *cloud_state->tracked_state = drained
+                                                  ? cloud_state->original_state
+                                                  : D3D12_RESOURCE_STATE_COMMON;
         diagnostic = hresult_error("D3D12 indexed batch fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
@@ -6491,6 +6884,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
         shadow_attachments[shadow_index]->set_state(shadow_states[shadow_index]);
     for (const NativeSampledResource& sampled : native_sampled_resources)
         if (sampled.state != nullptr) *sampled.state = sampled.before;
+    for (const auto* cloud_state : cloud_texture_states)
+        if (cloud_state->tracked_state != nullptr)
+            *cloud_state->tracked_state = cloud_state->original_state;
     if (!batch.capture_rgba8) {
         output.clear();
         diagnostic = {};
@@ -7534,6 +7930,54 @@ private:
 D3D12_GPU_DESCRIPTOR_HANDLE d3d12_sampler_gpu(
     const D3D12Sampler& sampler) noexcept {
     return sampler.gpu_descriptor();
+}
+
+bool inspect_d3d12_portable_cloud_texture(
+    const Texture* requested, const D3D12Context* context,
+    D3D12PortableCloudTextureResource& output,
+    Diagnostic& diagnostic) {
+    output = {};
+    const auto* texture = dynamic_cast<const D3D12Texture*>(requested);
+    if (texture == nullptr) {
+        diagnostic = {"portable_cloud_texture_type_unsupported",
+                      "Portable cloud textures must be D3D12 texture handles"};
+        return false;
+    }
+    if (texture->context() != context) {
+        diagnostic = {"portable_cloud_context_mismatch",
+                      "Portable cloud textures must belong to the D3D12 device"};
+        return false;
+    }
+    output.resource = texture->resource();
+    output.format = dxgi_texture_format(texture->info().description.format);
+    output.tracked_state =
+        const_cast<D3D12Texture*>(texture)->state_pointer();
+    output.original_state = texture->state();
+    output.description = texture->info().description;
+    output.initialized = texture->initialized();
+    diagnostic = {};
+    return true;
+}
+
+bool inspect_d3d12_portable_cloud_sampler(
+    const Sampler* requested, const D3D12Context* context,
+    D3D12_GPU_DESCRIPTOR_HANDLE& output,
+    Diagnostic& diagnostic) {
+    output = {};
+    const auto* sampler = dynamic_cast<const D3D12Sampler*>(requested);
+    if (sampler == nullptr) {
+        diagnostic = {"portable_cloud_sampler_type_unsupported",
+                      "Portable cloud samplers must be D3D12 sampler handles"};
+        return false;
+    }
+    if (sampler->context() != context || sampler->gpu_descriptor().ptr == 0U) {
+        diagnostic = {"portable_cloud_context_mismatch",
+                      "Portable cloud samplers must belong to the D3D12 device"};
+        return false;
+    }
+    output = sampler->gpu_descriptor();
+    diagnostic = {};
+    return true;
 }
 
 bool prepare_d3d12_material_binding(
@@ -9929,6 +10373,8 @@ public:
         }
         const bool native_only = batch.selected_mesh_draws.empty() &&
                                   batch.overlay_draws.empty() &&
+                                  !batch.sky.has_value() &&
+                                  !batch.clouds.has_value() &&
                                   !batch.draws.empty() && std::all_of(
             batch.draws.begin(), batch.draws.end(),
             [](const IndexedStaticMeshDrawRequest& request) {

@@ -3080,6 +3080,10 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                     sky.sun_direction.begin());
         batch.sky = sky;
     }
+    if (frame.clouds.has_value()) {
+        batch.clouds = *frame.clouds;
+        batch.clouds->camera = frame.camera;
+    }
     Diagnostic batch_diagnostic;
     const IndexedStaticMeshBatchStatus batch_validation =
         validate_indexed_static_mesh_batch_description(target, batch, batch_diagnostic);

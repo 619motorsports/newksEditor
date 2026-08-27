@@ -25,6 +25,7 @@
 using namespace apex::render;
 using apex::app::WorkspaceViewportFrameRequest;
 using apex::app::WorkspaceViewportFrameStatus;
+using apex::app::WorkspaceViewportPortableCloudOptions;
 using apex::app::WorkspaceViewportPrepareRequest;
 using apex::app::WorkspaceViewportStockVulkanSourceFrame;
 
@@ -162,6 +163,7 @@ public:
     BufferResult create_buffer(const BufferDescription &description,
                                std::span<const std::byte> bytes) override {
         ++buffer_calls;
+        created_buffer_descriptions.push_back(description);
         if (fail_buffer_call == buffer_calls)
             return {fail_buffer_status,
                     {"fake_buffer_failed", "injected buffer failure"},
@@ -250,6 +252,11 @@ public:
             events.push_back("sky");
             sky_parameters.push_back(*batch.sky);
             sky_target_subresources.push_back(batch.target_subresource);
+        }
+        if (batch.clouds.has_value()) {
+            events.push_back("clouds");
+            cloud_parameters.push_back(*batch.clouds);
+            cloud_target_subresources.push_back(batch.target_subresource);
         }
         events.push_back("color");
         draw_targets.push_back(&texture);
@@ -445,6 +452,7 @@ public:
         receiver_maps;
     std::vector<const Texture *> reflection_textures;
     std::vector<TextureDescription> created_texture_descriptions;
+    std::vector<BufferDescription> created_buffer_descriptions;
     std::vector<std::vector<std::byte>> created_texture_bytes;
     std::vector<Texture *> created_textures;
     std::vector<DepthAttachmentDescription> created_depth_descriptions;
@@ -468,6 +476,8 @@ public:
     std::vector<std::optional<CameraFrame>> draw_camera_frames;
     std::vector<PortableSkyParameters> sky_parameters;
     std::vector<TextureTargetSubresource> sky_target_subresources;
+    std::vector<PortableCloudParameters> cloud_parameters;
+    std::vector<TextureTargetSubresource> cloud_target_subresources;
     std::shared_ptr<std::size_t> live_buffer_count =
         std::make_shared<std::size_t>(0U);
 
@@ -826,6 +836,33 @@ WorkspaceViewportPrepareRequest request_for(const Fixture& fixture_value) {
     request.render.include_reflections = false;
     request.render.include_shadows = false;
     return request;
+}
+
+DecodedTexturePlan portable_cloud_texture_plan() {
+    DecodedTexturePlan plan;
+    plan.description.width = 1U;
+    plan.description.height = 1U;
+    plan.description.mip_levels = 1U;
+    plan.description.array_layers = 1U;
+    plan.description.format = TextureFormat::rgba8_unorm;
+    plan.description.usage = TextureUsage::sampled;
+    plan.description.memory = TextureMemory::device_local;
+    plan.description.mutability = TextureMutability::immutable;
+    plan.levels.push_back({1U, 1U, {std::uint8_t{255U}, std::uint8_t{128U},
+                                    std::uint8_t{64U}, std::uint8_t{255U}}});
+    return plan;
+}
+
+WorkspaceViewportPortableCloudOptions portable_cloud_options(
+    const DecodedTexturePlan& texture) {
+    WorkspaceViewportPortableCloudOptions options;
+    options.settings.count = 100U;
+    options.build.texture_count = 7U;
+    options.cloud_cover = 1.0F;
+    options.cloud_cutoff = 0.7F;
+    options.cloud_color = 1.0F;
+    options.textures[0U] = &texture;
+    return options;
 }
 
 apex::formats::AcdArchive texture_archive(std::vector<std::uint8_t> bytes) {
@@ -1523,6 +1560,176 @@ void draws_portable_sky_before_main_color_and_requires_constants() {
                     {"color", "present"}) &&
                 disabled_device.sky_parameters.empty(),
             "disabled portable sky preserves the color-only path");
+}
+
+void prepares_and_draws_portable_clouds_with_retained_resources() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        const auto texture = portable_cloud_texture_plan();
+        auto request = request_for(value);
+        request.portable_clouds = portable_cloud_options(texture);
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        if (!prepared.ok())
+            throw std::runtime_error("portable cloud preparation failed: " +
+                                     prepared.diagnostic.code + ": " +
+                                     prepared.diagnostic.message);
+        const auto cloud_layout = buildPortableCloudLayout(
+            request.portable_clouds->settings, request.portable_clouds->build);
+        const auto cloud_buffer = std::find_if(
+            device.created_buffer_descriptions.begin(),
+            device.created_buffer_descriptions.end(), [&](const auto& description) {
+                return description.size_bytes ==
+                           cloud_layout.vertices.size() *
+                               portable_cloud_vertex_stride_bytes &&
+                       description.usage == BufferUsage::vertex &&
+                       description.memory == BufferMemory::device_local &&
+                       description.mutability == BufferMutability::immutable;
+            });
+        require(cloud_buffer != device.created_buffer_descriptions.end() &&
+                    device.texture_calls >= 1U &&
+                    !device.sampler_descriptions.empty() &&
+                    device.sampler_descriptions.back().min_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().mag_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().mip_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().address_u ==
+                        SamplerAddressMode::repeat &&
+                    device.sampler_descriptions.back().address_v ==
+                        SamplerAddressMode::repeat,
+                "portable clouds retain immutable geometry, decoded texture, and linear repeat sampler");
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera = valid_shadow_camera(
+            0.0F, backend == Backend::Vulkan ? CameraClipSpace::vulkan
+                                              : CameraClipSpace::d3d12);
+        const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+        require(lighting.ok(), "portable cloud lighting evaluates");
+        frame.frame_constants = lighting.frame_constants;
+        Diagnostic diagnostic;
+        require(prepared.viewport->drawAndPresent(device, target, frame,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.events == std::vector<std::string>(
+                        {"clouds", "color", "present"}) &&
+                    device.cloud_parameters.size() == 1U,
+                "portable clouds reach the batch before scene color and present");
+        const auto& clouds = device.cloud_parameters.front();
+        require(clouds.vertex_buffer != nullptr && clouds.sampler != nullptr &&
+                    !clouds.texture_runs.empty() && clouds.textures[0U] != nullptr &&
+                    std::any_of(clouds.texture_runs.begin(), clouds.texture_runs.end(),
+                                [](const auto& run) { return run.texture != 0U; }),
+                "portable cloud batch retains drawable geometry and texture run");
+        for (std::size_t index = 1U; index < clouds.textures.size(); ++index)
+            require(clouds.textures[index] == nullptr,
+                    "missing portable cloud texture slots remain skipped");
+
+        auto missing_constants_request = request_for(value);
+        missing_constants_request.portable_clouds =
+            portable_cloud_options(texture);
+        FakeDevice missing_constants_device(backend);
+        auto missing_constants_prepared = apex::app::prepareWorkspaceViewport(
+            missing_constants_device, value.document, missing_constants_request);
+        require(missing_constants_prepared.ok(),
+                "portable cloud missing-constants preparation succeeds");
+        FakeTarget missing_constants_target(missing_constants_request.presentation,
+                                            backend);
+        WorkspaceViewportFrameRequest missing_constants_frame;
+        missing_constants_frame.camera = frame.camera;
+        require(missing_constants_prepared.viewport->drawAndPresent(
+                    missing_constants_device, missing_constants_target,
+                    missing_constants_frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_portable_cloud_constants_missing" &&
+                    missing_constants_device.draw_calls == 0U &&
+                    missing_constants_device.present_calls == 0U,
+                "portable clouds require current frame constants before drawing");
+    }
+}
+
+void captures_portable_clouds_on_all_reflection_faces() {
+    auto value = fixture();
+    configure_multimap_reflection(value);
+    const auto texture = portable_cloud_texture_plan();
+    auto request = request_for(value);
+    request.multimap_reflection = true;
+    request.render.include_reflections = true;
+    request.render.explicit_reflection_root = 1U;
+    request.sky_enabled = true;
+    request.portable_reflection_capture =
+        apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
+    request.portable_clouds = portable_cloud_options(texture);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "portable cloud reflection preparation succeeds");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+    require(lighting.ok(), "portable cloud reflection lighting evaluates");
+    frame.frame_constants = lighting.frame_constants;
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.cloud_parameters.size() == texture_cube_face_count + 1U,
+            "portable clouds draw for each reflection face and the main view");
+    std::vector<std::string> expected_events;
+    for (std::size_t face = 0U; face < texture_cube_face_count; ++face)
+        expected_events.insert(expected_events.end(), {"sky", "clouds", "color"});
+    expected_events.insert(expected_events.end(), {"mips", "sky", "clouds",
+                                                   "color", "present"});
+        require(device.events == expected_events,
+            "portable cloud reflection order remains sky, clouds, scene");
+    for (std::size_t face = 0U; face < device.cloud_target_subresources.size(); ++face)
+        require(device.cloud_target_subresources[face].cube_face ==
+                    (face < texture_cube_face_count
+                         ? std::array<CubeFace, texture_cube_face_count>{
+                               CubeFace::negative_x, CubeFace::positive_x,
+                               CubeFace::positive_y, CubeFace::negative_y,
+                               CubeFace::positive_z, CubeFace::negative_z}[face]
+                         : CubeFace::none),
+                "portable cloud reflection uses each target face");
+}
+
+void rejects_malformed_portable_cloud_options_atomically() {
+    auto value = fixture();
+    const auto texture = portable_cloud_texture_plan();
+    auto request = request_for(value);
+    auto options = portable_cloud_options(texture);
+    options.settings.width = std::numeric_limits<float>::quiet_NaN();
+    request.portable_clouds = options;
+    FakeDevice device;
+    const auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "cloud_settings_invalid" && device.buffer_calls == 0U &&
+                device.texture_calls == 0U && device.sampler_calls == 0U,
+            "non-finite cloud geometry is rejected before GPU allocation");
+
+    options = portable_cloud_options(texture);
+    options.cloud_cover = std::numeric_limits<float>::infinity();
+    request.portable_clouds = options;
+    FakeDevice lighting_device;
+    const auto lighting_prepared = apex::app::prepareWorkspaceViewport(
+        lighting_device, value.document, request);
+    require(!lighting_prepared.ok() &&
+                lighting_prepared.diagnostic.code ==
+                    "workspace_viewport_portable_cloud_lighting_invalid" &&
+                lighting_device.buffer_calls == 0U &&
+                lighting_device.texture_calls == 0U,
+            "non-finite cloud lighting is rejected before GPU allocation");
 }
 
 void draws_explicit_multimap_reflection_cube_outside_model_textures() {
@@ -7056,6 +7263,9 @@ int main() {
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
         draws_portable_sky_before_main_color_and_requires_constants();
+        prepares_and_draws_portable_clouds_with_retained_resources();
+        captures_portable_clouds_on_all_reflection_faces();
+        rejects_malformed_portable_cloud_options_atomically();
         draws_explicit_multimap_reflection_cube_outside_model_textures();
         captures_and_publishes_six_portable_reflection_faces_atomically();
         rejects_invalid_portable_reflection_capture_options_before_allocation();

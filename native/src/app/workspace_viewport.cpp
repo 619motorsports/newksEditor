@@ -1113,6 +1113,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
     std::optional<WorkspaceViewportDirectionalShadowOptions>
         directional_shadows,
+    std::optional<WorkspaceViewport::PortableCloudResources> portable_clouds,
     std::optional<PortableReflectionCaptureResources> reflection_capture,
     std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
@@ -1137,6 +1138,7 @@ WorkspaceViewport::WorkspaceViewport(
       selected_mesh_color_buffer_(std::move(selected_mesh_color_buffer)),
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
+      portable_clouds_(std::move(portable_clouds)),
       reflection_capture_(std::move(reflection_capture)),
       frame_catalog_(std::move(frame_catalog)) {}
 
@@ -1467,6 +1469,12 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic = diagnostic(
             "workspace_viewport_sky_constants_missing",
             "An enabled portable sky requires the current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (portable_clouds_.has_value() && !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_cloud_constants_missing",
+            "An enabled portable cloud pass requires current frame lighting constants");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const render::HdrToneMapParameters* effective_hdr_tone_map =
@@ -1929,6 +1937,30 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     frame.color_packet_order = color_packet_order;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
+    if (portable_clouds_.has_value()) {
+        const auto& resources = *portable_clouds_;
+        render::PortableCloudParameters clouds;
+        clouds.camera = request.camera;
+        const float elapsed_seconds = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - resources.start_time).count();
+        clouds.elapsed_seconds = std::max(0.0F, elapsed_seconds);
+        const auto& lighting = *request.frame_constants;
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            clouds.light_direction[index] = -lighting.sun_direction[index];
+            clouds.light_color[index] = lighting.sun_color[index];
+            clouds.ambient_color[index] = lighting.ambient_color[index];
+        }
+        clouds.fog_distance = lighting.fog[0U];
+        clouds.cloud_cover = resources.cloud_cover;
+        clouds.cloud_cutoff = resources.cloud_cutoff;
+        clouds.cloud_color = resources.cloud_color;
+        clouds.vertex_buffer = resources.vertex_buffer.get();
+        clouds.texture_runs = resources.texture_runs;
+        clouds.sampler = resources.sampler.get();
+        for (std::size_t index = 0U; index < resources.textures.size(); ++index)
+            clouds.textures[index] = resources.textures[index].get();
+        frame.clouds = std::move(clouds);
+    }
     if (!reflection_capture_.has_value())
         frame.multimap_reflection_cube = request.multimap_reflection_cube;
     if (request.selected_mesh_elapsed_ms.has_value() &&
@@ -2364,6 +2396,33 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "workspace_viewport_fxaa_requires_hdr",
                 "FXAA requires HDR tone mapping");
             return result;
+        }
+        if (request.portable_clouds.has_value()) {
+            const auto& options = *request.portable_clouds;
+            const auto cloud_validation = render::validatePortableCloudRequest(
+                options.settings, options.build);
+            if (!cloud_validation.accepted()) {
+                result.status =
+                    cloud_validation.status == render::PortableCloudStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    cloud_validation.code,
+                    "Portable cloud preparation rejected the supplied layout request"};
+                return result;
+            }
+            if (!std::isfinite(options.cloud_cover) ||
+                !std::isfinite(options.cloud_cutoff) ||
+                !std::isfinite(options.cloud_color) ||
+                options.cloud_cover < 0.0F || options.cloud_cover > 1.0F ||
+                options.cloud_cutoff < 0.0F || options.cloud_cutoff > 1.0F ||
+                options.cloud_color < 0.0F || options.cloud_color > 1000.0F) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_cloud_lighting_invalid",
+                    "Portable cloud cover, cutoff, and colour must be finite and bounded");
+                return result;
+            }
         }
         const bool builtin_vulkan_source =
             request.builtin_vulkan_source ==
@@ -2815,6 +2874,139 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 }
                 fxaa_color = std::move(fxaa.texture);
             }
+        }
+
+        std::optional<WorkspaceViewport::PortableCloudResources>
+            portable_clouds;
+        if (request.portable_clouds.has_value()) {
+            const auto& options = *request.portable_clouds;
+            const auto layout = render::buildPortableCloudLayout(
+                options.settings, options.build);
+            if (layout.status != render::PortableCloudStatus::ready &&
+                layout.status != render::PortableCloudStatus::empty) {
+                result.status =
+                    layout.status == render::PortableCloudStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    layout.code,
+                    "Portable cloud preparation could not build the bounded layout"};
+                return result;
+            }
+
+            WorkspaceViewport::PortableCloudResources resources;
+            resources.settings = options.settings;
+            resources.cloud_cover = options.cloud_cover;
+            resources.cloud_cutoff = options.cloud_cutoff;
+            resources.cloud_color = options.cloud_color;
+            resources.texture_runs = layout.texture_runs;
+            resources.start_time = std::chrono::steady_clock::now();
+
+            if (!layout.vertices.empty()) {
+                render::BufferDescription cloud_buffer_description;
+                cloud_buffer_description.size_bytes =
+                    layout.vertices.size() * render::portable_cloud_vertex_stride_bytes;
+                cloud_buffer_description.usage = render::BufferUsage::vertex;
+                cloud_buffer_description.memory = render::BufferMemory::device_local;
+                cloud_buffer_description.mutability =
+                    render::BufferMutability::immutable;
+                auto cloud_buffer = device.create_buffer(
+                    cloud_buffer_description,
+                    std::as_bytes(std::span<const render::PortableCloudVertex>(
+                        layout.vertices)));
+                if (!cloud_buffer.ok()) {
+                    result.status =
+                        cloud_buffer.status == render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : cloud_buffer.status == render::BufferStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(cloud_buffer.diagnostic);
+                    return result;
+                }
+                if (cloud_buffer.buffer->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_buffer_backend_mismatch",
+                        "Portable cloud vertex storage belongs to a different backend");
+                    return result;
+                }
+                resources.vertex_buffer = std::move(cloud_buffer.buffer);
+            }
+
+            for (std::size_t index = 0U;
+                 index < options.textures.size(); ++index) {
+                const render::DecodedTexturePlan* plan = options.textures[index];
+                if (plan == nullptr)
+                    continue;
+                if (plan->levels.empty()) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_texture_plan_empty",
+                        "A portable cloud texture plan must contain at least one mip level");
+                    return result;
+                }
+                const render::TextureUploadPlan uploads = plan->make_upload_plan();
+                render::Diagnostic texture_diagnostic;
+                const render::TextureStatus texture_validation =
+                    render::validate_texture_description(
+                        plan->description, uploads, texture_diagnostic);
+                if (texture_validation != render::TextureStatus::ready) {
+                    result.status =
+                        texture_validation == render::TextureStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(texture_diagnostic);
+                    return result;
+                }
+                auto texture = device.create_texture(plan->description, uploads);
+                if (!texture.ok()) {
+                    result.status =
+                        texture.status == render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : texture.status == render::TextureStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(texture.diagnostic);
+                    return result;
+                }
+                if (texture.texture->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_cloud_texture_backend_mismatch",
+                        "Portable cloud texture belongs to a different backend");
+                    return result;
+                }
+                resources.textures[index] = std::move(texture.texture);
+            }
+
+            render::SamplerDescription cloud_sampler_description;
+            cloud_sampler_description.min_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.mag_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.mip_filter = render::SamplerFilter::linear;
+            cloud_sampler_description.address_u = render::SamplerAddressMode::repeat;
+            cloud_sampler_description.address_v = render::SamplerAddressMode::repeat;
+            cloud_sampler_description.address_w = render::SamplerAddressMode::repeat;
+            auto cloud_sampler = device.create_sampler(cloud_sampler_description);
+            if (!cloud_sampler.ok()) {
+                result.status =
+                    cloud_sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : cloud_sampler.status == render::SamplerStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(cloud_sampler.diagnostic);
+                return result;
+            }
+            if (cloud_sampler.sampler->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_cloud_sampler_backend_mismatch",
+                    "Portable cloud sampler belongs to a different backend");
+                return result;
+            }
+            resources.sampler = std::move(cloud_sampler.sampler);
+            portable_clouds = std::move(resources);
         }
 
         render::DepthAttachmentDescription depth_description;
@@ -3679,6 +3871,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selected_mesh_pipeline),
             std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), std::move(directional_shadows),
+            std::move(portable_clouds),
             std::move(reflection_capture),
             std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;

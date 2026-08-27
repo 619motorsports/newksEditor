@@ -21,6 +21,7 @@
 #    include "generated/hdr_tone_map_spirv.hpp"
 #    include "generated/hdr_bloom_spirv.hpp"
 #    include "generated/portable_sky_spirv.hpp"
+#    include "generated/portable_clouds_spirv.hpp"
 #endif
 
 namespace apex::render {
@@ -2204,6 +2205,12 @@ struct VulkanDrawGeometry {
 };
 
 class VulkanTexture;
+class VulkanSampler;
+
+bool extract_vulkan_sampler(const Sampler* sampler,
+                            const std::shared_ptr<VulkanContext>& context,
+                            VkSampler& raw_sampler,
+                            Diagnostic& diagnostic);
 
 struct VulkanIndexedBatchDraw {
     const PipelineProgram* program = nullptr;
@@ -2521,6 +2528,169 @@ struct VulkanTransientSkyDescriptors {
         context.reset();
     }
 };
+
+// Cloud descriptors are transient because each ordered texture run may name a
+// different sampled image. The batch is synchronous, so one descriptor set per
+// run is sufficient and avoids rewriting a set that earlier recorded draws
+// still reference.
+struct VulkanTransientCloudDescriptors {
+    std::shared_ptr<VulkanContext> context;
+    RawVulkanBuffer constants;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sets;
+
+    VulkanTransientCloudDescriptors() = default;
+    VulkanTransientCloudDescriptors(const VulkanTransientCloudDescriptors&) = delete;
+    VulkanTransientCloudDescriptors& operator=(const VulkanTransientCloudDescriptors&) = delete;
+    ~VulkanTransientCloudDescriptors() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (pool != VK_NULL_HANDLE)
+                vkDestroyDescriptorPool(context->device, pool, nullptr);
+            if (layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(context->device, layout, nullptr);
+        }
+        pool = VK_NULL_HANDLE;
+        layout = VK_NULL_HANDLE;
+        sets.clear();
+        constants.reset();
+        context.reset();
+    }
+};
+
+// Concrete Vulkan ownership is resolved after VulkanTexture/VulkanSampler are
+// complete. The recording helper consumes only these raw handles and tracked
+// layout pointers, so it remains valid above the concrete resource classes.
+struct VulkanPortableCloudRun {
+    std::uint32_t first_vertex = 0U;
+    std::uint32_t vertex_count = 0U;
+    VkImage image = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkImageLayout* tracked_layout = nullptr;
+    VkImageLayout original_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    std::uint32_t mip_levels = 1U;
+};
+
+struct VulkanPortableCloudResources {
+    VkBuffer vertex_buffer = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    std::vector<VulkanPortableCloudRun> runs;
+};
+
+bool create_portable_cloud_descriptors(
+    const std::shared_ptr<VulkanContext>& context,
+    const PortableCloudShaderConstants& cloud_constants,
+    const VulkanPortableCloudResources& resources,
+    VulkanTransientCloudDescriptors& descriptors,
+    Diagnostic& diagnostic) {
+    descriptors.reset();
+    descriptors.context = context;
+    BufferDescription buffer_description;
+    buffer_description.size_bytes = sizeof(PortableCloudShaderConstants);
+    buffer_description.usage = BufferUsage::uniform;
+    buffer_description.memory = BufferMemory::host_visible;
+    buffer_description.mutability = BufferMutability::mutable_data;
+    if (!create_raw_buffer(context, buffer_description,
+                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                           BufferMemory::host_visible, descriptors.constants,
+                           diagnostic)) {
+        diagnostic.code = diagnostic.code.empty()
+                              ? "vulkan_portable_cloud_uniform_failed"
+                              : diagnostic.code;
+        descriptors.reset();
+        return false;
+    }
+    if (!write_host_buffer(
+            context, descriptors.constants, 0U,
+            std::as_bytes(std::span(&cloud_constants, 1U)), diagnostic)) {
+        diagnostic.code = diagnostic.code.empty()
+                              ? "vulkan_portable_cloud_uniform_failed"
+                              : diagnostic.code;
+        descriptors.reset();
+        return false;
+    }
+    std::array<VkDescriptorSetLayoutBinding, 2U> bindings{};
+    bindings[0] = {0U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1U,
+                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                   nullptr};
+    bindings[1] = {1U, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1U,
+                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layout_info.pBindings = bindings.data();
+    VkResult result = vkCreateDescriptorSetLayout(
+        context->device, &layout_info, nullptr, &descriptors.layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorSetLayout(portable clouds)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_cloud_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    std::array<VkDescriptorPoolSize, 2U> pool_sizes{};
+    // Each set has its own uniform-buffer descriptor, even though all sets
+    // point at the same transient allocation.
+    pool_sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                     static_cast<std::uint32_t>(resources.runs.size())};
+    pool_sizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                     static_cast<std::uint32_t>(resources.runs.size())};
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = static_cast<std::uint32_t>(resources.runs.size());
+    pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
+    pool_info.pPoolSizes = pool_sizes.data();
+    result = vkCreateDescriptorPool(context->device, &pool_info, nullptr,
+                                    &descriptors.pool);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorPool(portable clouds)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_cloud_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    descriptors.sets.resize(resources.runs.size(), VK_NULL_HANDLE);
+    std::vector<VkDescriptorSetLayout> layouts(resources.runs.size(), descriptors.layout);
+    VkDescriptorSetAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = descriptors.pool;
+    allocation.descriptorSetCount = static_cast<std::uint32_t>(layouts.size());
+    allocation.pSetLayouts = layouts.data();
+    result = vkAllocateDescriptorSets(context->device, &allocation,
+                                      descriptors.sets.data());
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkAllocateDescriptorSets(portable clouds)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_cloud_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorBufferInfo buffer_info{descriptors.constants.buffer, 0U,
+                                       sizeof(PortableCloudShaderConstants)};
+    for (std::size_t index = 0U; index < resources.runs.size(); ++index) {
+        const VulkanPortableCloudRun& run = resources.runs[index];
+        VkDescriptorImageInfo image_info{resources.sampler, run.view,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        std::array<VkWriteDescriptorSet, 2U> writes{};
+        writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                     descriptors.sets[index], 0U, 0U, 1U,
+                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buffer_info,
+                     nullptr};
+        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                     descriptors.sets[index], 1U, 0U, 1U,
+                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &image_info,
+                     nullptr, nullptr};
+        vkUpdateDescriptorSets(context->device,
+                               static_cast<std::uint32_t>(writes.size()),
+                               writes.data(), 0U, nullptr);
+    }
+    return true;
+}
 
 bool create_portable_sky_descriptors(
     const std::shared_ptr<VulkanContext>& context,
@@ -4293,6 +4463,8 @@ bool draw_indexed_batch_and_readback(
     const TextureTargetSubresource& target_subresource,
     std::span<const VulkanIndexedBatchDraw> draws,
     const PortableSkyShaderConstants* sky_constants,
+    const PortableCloudShaderConstants* cloud_constants,
+    const VulkanPortableCloudResources* cloud_resources,
     VulkanDepthAttachment* depth_attachment,
     bool load_color,
     bool clear_depth,
@@ -4709,6 +4881,95 @@ bool draw_indexed_batch_and_readback(
         return false;
     }
 
+    VulkanTransientCloudDescriptors cloud_descriptors;
+    VulkanBatchPipeline cloud_pipeline;
+    const std::span<const VulkanPortableCloudRun> cloud_runs =
+        cloud_resources != nullptr ? std::span<const VulkanPortableCloudRun>(
+                                         cloud_resources->runs)
+                                    : std::span<const VulkanPortableCloudRun>{};
+    const auto cleanup_batch_setup = [&]() {
+        pipelines.clear();
+        vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+        vkDestroyRenderPass(context->device, render_pass, nullptr);
+    };
+    if (cloud_constants != nullptr || cloud_resources != nullptr) {
+        if (cloud_constants == nullptr || cloud_resources == nullptr ||
+            cloud_runs.size() > portable_cloud_max_count ||
+            (!cloud_runs.empty() &&
+             (cloud_resources->vertex_buffer == VK_NULL_HANDLE ||
+              cloud_resources->sampler == VK_NULL_HANDLE))) {
+            diagnostic = {"vulkan_portable_cloud_request_invalid",
+                          "The Vulkan cloud batch contains an incomplete or oversized request"};
+            cleanup_batch_setup();
+            return false;
+        }
+        if (!cloud_runs.empty()) {
+            if (!create_portable_cloud_descriptors(
+                    context, *cloud_constants, *cloud_resources,
+                    cloud_descriptors, diagnostic)) {
+                cleanup_batch_setup();
+                return false;
+            }
+            const auto shader_bytes = [](const unsigned char* bytes,
+                                         std::size_t byte_count) {
+                return std::vector<std::uint8_t>(bytes, bytes + byte_count);
+            };
+            PipelineProgram cloud_program;
+            cloud_program.name = "portable-clouds-webgl-aligned";
+            cloud_program.shaders = {
+                {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                shader_bytes(generated::portable_clouds_vertex_spirv,
+                             generated::portable_clouds_vertex_spirv_size),
+                 PipelineShaderProvenance::source_equivalent},
+                {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                shader_bytes(generated::portable_clouds_fragment_spirv,
+                             generated::portable_clouds_fragment_spirv_size),
+                 PipelineShaderProvenance::source_equivalent},
+            };
+            cloud_program.vertex_layout.stride = static_cast<std::uint32_t>(
+                portable_cloud_vertex_stride_bytes);
+            cloud_program.vertex_layout.attributes = {
+                {PipelineVertexSemantic::position,
+                 PipelineVertexAttributeFormat::float32x2, 0U, 0U},
+                {PipelineVertexSemantic::position,
+                 PipelineVertexAttributeFormat::float32x3, 1U,
+                 2U * sizeof(float)},
+                {PipelineVertexSemantic::texcoord0,
+                 PipelineVertexAttributeFormat::float32x2, 2U,
+                 5U * sizeof(float)},
+                {PipelineVertexSemantic::texcoord0,
+                 PipelineVertexAttributeFormat::float32, 3U,
+                 7U * sizeof(float)},
+            };
+            cloud_program.raster.cull = PipelineCullMode::front;
+            cloud_program.depth.test_enabled = false;
+            cloud_program.depth.write_enabled = false;
+            cloud_program.blend.enabled = true;
+            cloud_program.blend.source_color = PipelineBlendFactor::source_alpha;
+            cloud_program.blend.destination_color =
+                PipelineBlendFactor::one_minus_source_alpha;
+            cloud_program.blend.source_alpha = PipelineBlendFactor::source_alpha;
+            cloud_program.blend.destination_alpha =
+                PipelineBlendFactor::one_minus_source_alpha;
+            cloud_program.resources = {
+                {PipelineResourceKind::uniform_buffer, 0U, 0U,
+                 "portableCloudConstants"},
+                {PipelineResourceKind::sampled_texture, 0U, 1U,
+                 "portableCloudTexture"},
+            };
+            const std::array<VkDescriptorSetLayout, 1U> cloud_layouts = {
+                cloud_descriptors.layout};
+            if (!create_batch_pipeline(
+                    context, render_pass, description.width, description.height,
+                    description.samples, cloud_program, true,
+                    depth_attachment != nullptr, cloud_layouts, false,
+                    cloud_pipeline, diagnostic)) {
+                cleanup_batch_setup();
+                return false;
+            }
+        }
+    }
+
     VkCommandBufferAllocateInfo allocation{};
     allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocation.commandPool = context->command_pool;
@@ -4827,6 +5088,49 @@ bool draw_indexed_batch_and_readback(
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0U, 0U, nullptr,
                                  0U, nullptr, 1U, &resolve_barrier);
         }
+        if (!cloud_runs.empty()) {
+            std::vector<VkImageMemoryBarrier> barriers;
+            barriers.reserve(cloud_runs.size());
+            bool has_non_shader_read_source = false;
+            for (std::size_t index = 0U; index < cloud_runs.size(); ++index) {
+                const VulkanPortableCloudRun& run = cloud_runs[index];
+                const bool already_seen = std::any_of(
+                    cloud_runs.begin(), cloud_runs.begin() +
+                        static_cast<std::span<const VulkanPortableCloudRun>::difference_type>(index),
+                    [&](const VulkanPortableCloudRun& prior) {
+                        return prior.image == run.image &&
+                               prior.tracked_layout == run.tracked_layout;
+                    });
+                if (already_seen) continue;
+                const VkImageLayout original = run.original_layout;
+                if (original == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) continue;
+                has_non_shader_read_source = true;
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.oldLayout = original;
+                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = run.image;
+                barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                barrier.subresourceRange.levelCount =
+                    run.mip_levels;
+                barrier.subresourceRange.layerCount = 1U;
+                barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT |
+                                        VK_ACCESS_MEMORY_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barriers.push_back(barrier);
+            }
+            if (!barriers.empty()) {
+                vkCmdPipelineBarrier(
+                    command,
+                    has_non_shader_read_source ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                                : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0U, 0U, nullptr, 0U,
+                    nullptr, static_cast<std::uint32_t>(barriers.size()),
+                    barriers.data());
+            }
+        }
         std::array<VkClearValue, 3> clear_values{};
         for (std::size_t index = 0; index < 4U; ++index) clear_values[0].color.float32[index] = clear_color[index];
         if (depth_attachment != nullptr) clear_values[1].depthStencil.depth = depth_clear_value;
@@ -4847,6 +5151,23 @@ bool draw_indexed_batch_and_readback(
             // The inverted clip-space Y in portable_sky.vert preserves the
             // production WebGL top/bottom NDC orientation on Vulkan.
             vkCmdDraw(command, 3U, 1U, 0U, 0U);
+        }
+        if (!cloud_runs.empty()) {
+            // Cloud runs are ordered exactly as produced by the portable
+            // layout builder. A missing texture slot skips only that run.
+            const VkBuffer cloud_vertex_buffer = cloud_resources->vertex_buffer;
+            const VkDeviceSize cloud_vertex_offset = 0U;
+            for (std::size_t index = 0U; index < cloud_runs.size(); ++index) {
+                const VulkanPortableCloudRun& run = cloud_runs[index];
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  cloud_pipeline.pipeline);
+                vkCmdBindDescriptorSets(
+                    command, VK_PIPELINE_BIND_POINT_GRAPHICS, cloud_pipeline.layout,
+                    0U, 1U, &cloud_descriptors.sets[index], 0U, nullptr);
+                vkCmdBindVertexBuffers(command, 0U, 1U, &cloud_vertex_buffer,
+                                       &cloud_vertex_offset);
+                vkCmdDraw(command, run.vertex_count, 1U, run.first_vertex, 0U);
+            }
         }
         for (std::size_t index = 0; index < draws.size(); ++index) {
             const VulkanIndexedBatchDraw& draw = draws[index];
@@ -4881,6 +5202,45 @@ bool draw_indexed_batch_and_readback(
             }
         }
         vkCmdEndRenderPass(command);
+        if (!cloud_runs.empty()) {
+            std::vector<VkImageMemoryBarrier> barriers;
+            barriers.reserve(cloud_runs.size());
+            for (std::size_t index = 0U; index < cloud_runs.size(); ++index) {
+                const VulkanPortableCloudRun& run = cloud_runs[index];
+                const bool already_seen = std::any_of(
+                    cloud_runs.begin(), cloud_runs.begin() +
+                        static_cast<std::span<const VulkanPortableCloudRun>::difference_type>(index),
+                    [&](const VulkanPortableCloudRun& prior) {
+                        return prior.image == run.image &&
+                               prior.tracked_layout == run.tracked_layout;
+                    });
+                if (already_seen) continue;
+                const VkImageLayout original = run.original_layout;
+                if (original == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) continue;
+                VkImageMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.newLayout = original;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = run.image;
+                barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                barrier.subresourceRange.levelCount =
+                    run.mip_levels;
+                barrier.subresourceRange.layerCount = 1U;
+                barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT |
+                                        VK_ACCESS_MEMORY_WRITE_BIT;
+                barriers.push_back(barrier);
+            }
+            if (!barriers.empty()) {
+                vkCmdPipelineBarrier(
+                    command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0U, 0U, nullptr, 0U,
+                    nullptr, static_cast<std::uint32_t>(barriers.size()),
+                    barriers.data());
+            }
+        }
         if (description.samples != 1U && retained_resolve_image != nullptr &&
             retained_resolve_mip_levels > 1U &&
             retained_resolve_final_layout !=
@@ -5045,6 +5405,9 @@ bool draw_indexed_batch_and_readback(
                  index < sampled_shadow_attachments.size(); ++index)
                 sampled_shadow_attachments[index]->mark_layout(
                     sampled_shadow_original_layouts[index]);
+            for (const VulkanPortableCloudRun& run : cloud_runs)
+                if (run.tracked_layout != nullptr)
+                    *run.tracked_layout = run.original_layout;
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             if (retained_resolve_layout != nullptr)
@@ -5054,6 +5417,9 @@ bool draw_indexed_batch_and_readback(
             if (depth_attachment != nullptr) depth_attachment->mark_invalid();
             for (VulkanDepthAttachment* shadow : sampled_shadow_attachments)
                 shadow->mark_invalid();
+            for (const VulkanPortableCloudRun& run : cloud_runs)
+                if (run.tracked_layout != nullptr)
+                    *run.tracked_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             result = drain;
         }
     } else if (completed) {
@@ -5068,6 +5434,9 @@ bool draw_indexed_batch_and_readback(
              index < sampled_shadow_attachments.size(); ++index)
             sampled_shadow_attachments[index]->mark_layout(
                 sampled_shadow_original_layouts[index]);
+        for (const VulkanPortableCloudRun& run : cloud_runs)
+            if (run.tracked_layout != nullptr)
+                *run.tracked_layout = run.original_layout;
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
     vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -5611,7 +5980,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, nullptr, depth_attachment, request.load_color,
+                draws, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -5634,7 +6003,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, nullptr, depth_attachment, request.load_color,
+                draws, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -5828,9 +6197,113 @@ public:
                     *description.sky, *sky_constants, diagnostic))
                 return false;
         }
+        std::optional<PortableCloudShaderConstants> cloud_constants;
+        if (description.clouds.has_value()) {
+            cloud_constants.emplace();
+            if (!build_portable_cloud_shader_constants(
+                    *description.clouds, *cloud_constants, diagnostic))
+                return false;
+        }
+        std::optional<VulkanPortableCloudResources> cloud_resources;
+        if (description.clouds.has_value()) {
+            const PortableCloudParameters& parameters = *description.clouds;
+            const VulkanBuffer* vertices = nullptr;
+            if (!parameters.texture_runs.empty())
+                vertices = dynamic_cast<const VulkanBuffer*>(
+                    parameters.vertex_buffer);
+            if (parameters.texture_runs.size() > portable_cloud_max_count ||
+                (!parameters.texture_runs.empty() &&
+                 (vertices == nullptr ||
+                  vertices->raw().buffer == VK_NULL_HANDLE ||
+                  (static_cast<std::uint32_t>(
+                       vertices->info().description.usage) &
+                   static_cast<std::uint32_t>(BufferUsage::vertex)) == 0U))) {
+                diagnostic = {"vulkan_portable_cloud_resource_invalid",
+                              "Vulkan cloud vertices must be an owned vertex resource"};
+                return false;
+            }
+            cloud_resources.emplace();
+            if (vertices != nullptr)
+                cloud_resources->vertex_buffer = vertices->raw().buffer;
+            cloud_resources->runs.reserve(parameters.texture_runs.size());
+            for (const Texture* requested_texture : parameters.textures) {
+                if (requested_texture == nullptr)
+                    continue;
+                const auto* texture = dynamic_cast<const VulkanTexture*>(
+                    requested_texture);
+                if (texture == nullptr || texture->context() != context_) {
+                    diagnostic = {"vulkan_portable_cloud_texture_invalid",
+                                  "Vulkan cloud textures must be owned Vulkan resources"};
+                    return false;
+                }
+            }
+            for (const PortableCloudTextureRun& source_run : parameters.texture_runs) {
+                if (source_run.vertex_count == 0U ||
+                    source_run.first_vertex >
+                        std::numeric_limits<std::uint32_t>::max() -
+                            source_run.vertex_count ||
+                    static_cast<std::uint64_t>(source_run.first_vertex +
+                                               source_run.vertex_count) *
+                            portable_cloud_vertex_stride_bytes >
+                        vertices->info().description.size_bytes) {
+                    diagnostic = {"vulkan_portable_cloud_vertex_range_invalid",
+                                  "A Vulkan cloud texture run exceeds its vertex buffer"};
+                    return false;
+                }
+                if (source_run.texture >= parameters.textures.size()) {
+                    diagnostic = {"vulkan_portable_cloud_texture_slot_invalid",
+                                  "A Vulkan cloud texture run names an invalid texture slot"};
+                    return false;
+                }
+                const auto* texture = dynamic_cast<const VulkanTexture*>(
+                    parameters.textures[source_run.texture]);
+                if (texture == nullptr) {
+                    // Null slots skip only the run that names them.
+                    if (parameters.textures[source_run.texture] != nullptr) {
+                        diagnostic = {"vulkan_portable_cloud_texture_invalid",
+                                      "Vulkan cloud textures must be Vulkan resources"};
+                        return false;
+                    }
+                    continue;
+                }
+                const TextureDescription& texture_description =
+                    texture->info().description;
+                if (texture->context() != context_ || !texture->initialized() ||
+                    texture->image() == VK_NULL_HANDLE ||
+                    texture->view() == VK_NULL_HANDLE ||
+                    texture->layout() == VK_IMAGE_LAYOUT_UNDEFINED ||
+                    texture_description.samples != 1U ||
+                    texture_description.array_layers != 1U ||
+                    texture_description.mip_levels == 0U ||
+                    (static_cast<std::uint32_t>(texture_description.usage) &
+                     static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                    diagnostic = {"vulkan_portable_cloud_texture_invalid",
+                                  "Vulkan cloud textures must be initialized single-layer sampled images"};
+                    return false;
+                }
+                cloud_resources->runs.push_back({
+                    source_run.first_vertex, source_run.vertex_count,
+                    texture->image(), texture->view(),
+                    const_cast<VulkanTexture*>(texture)->mutable_layout_ptr(),
+                    texture->layout(), texture_description.mip_levels});
+            }
+            if (!cloud_resources->runs.empty()) {
+                VkSampler raw_sampler = VK_NULL_HANDLE;
+                if (!extract_vulkan_sampler(parameters.sampler, context_,
+                                            raw_sampler, diagnostic) ||
+                    raw_sampler == VK_NULL_HANDLE) {
+                    diagnostic = {"vulkan_portable_cloud_resource_invalid",
+                                  "Drawable Vulkan clouds require an owned sampler"};
+                    return false;
+                }
+                cloud_resources->sampler = raw_sampler;
+            }
+        }
         const bool drawn = draw_indexed_batch_and_readback(
             context_, raw_, info_.description, description.target_subresource,
             draws, sky_constants.has_value() ? &*sky_constants : nullptr,
+            cloud_constants.has_value() ? &*cloud_constants : nullptr,
+            cloud_resources.has_value() ? &*cloud_resources : nullptr,
             depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,
             layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
@@ -7275,6 +7748,21 @@ private:
     RawVulkanSampler raw_;
     SamplerInfo info_;
 };
+
+bool extract_vulkan_sampler(const Sampler* sampler,
+                            const std::shared_ptr<VulkanContext>& context,
+                            VkSampler& raw_sampler,
+                            Diagnostic& diagnostic) {
+    const auto* vulkan_sampler = dynamic_cast<const VulkanSampler*>(sampler);
+    if (vulkan_sampler == nullptr || vulkan_sampler->context() != context ||
+        vulkan_sampler->sampler() == VK_NULL_HANDLE) {
+        diagnostic = {"vulkan_portable_cloud_resource_invalid",
+                      "Vulkan cloud vertices and sampler must be owned vertex and sampler resources"};
+        return false;
+    }
+    raw_sampler = vulkan_sampler->sampler();
+    return true;
+}
 
 bool prepare_vulkan_sampled_binding(const IndexedStaticMeshDrawRequest& request,
                                     const std::shared_ptr<VulkanContext>& context,

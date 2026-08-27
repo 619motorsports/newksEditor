@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apex/render/camera.hpp"
+#include "apex/render/portable_clouds.hpp"
 #include "apex/platform/native_surface.hpp"
 #include "apex/render/pipeline.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
@@ -1066,6 +1067,37 @@ struct PortableSkyShaderConstants {
 static_assert(sizeof(PortableSkyShaderConstants) == 112U);
 static_assert(std::is_trivially_copyable_v<PortableSkyShaderConstants>);
 
+// Portable/WebGL-aligned cloud billboards. The layout and shader equations
+// follow the production browser renderer. Native ksEditor uses process-global
+// rand state, so callers must not label a deterministic layout exact parity.
+struct PortableCloudParameters {
+    CameraFrame camera{};
+    float elapsed_seconds = 0.0F;
+    std::array<float, 3U> light_direction = {0.0F, -1.0F, 0.0F};
+    std::array<float, 3U> light_color{};
+    std::array<float, 3U> ambient_color{};
+    float fog_distance = 12000.0F;
+    float cloud_cover = 0.0F;
+    float cloud_cutoff = 0.0F;
+    float cloud_color = 0.0F;
+    const Buffer* vertex_buffer = nullptr;
+    std::span<const PortableCloudTextureRun> texture_runs{};
+    std::array<const Texture*, portable_cloud_texture_count> textures{};
+    const Sampler* sampler = nullptr;
+};
+
+struct PortableCloudShaderConstants {
+    apex::scene::Matrix4 view_projection{};
+    std::array<float, 4U> camera_position_time{};
+    std::array<float, 4U> light_direction_fog{};
+    std::array<float, 4U> light_color_cover{};
+    std::array<float, 4U> ambient_color_cutoff{};
+    std::array<float, 4U> cloud_color{};
+};
+
+static_assert(sizeof(PortableCloudShaderConstants) == 144U);
+static_assert(std::is_trivially_copyable_v<PortableCloudShaderConstants>);
+
 struct IndexedStaticMeshBatchDescription {
     std::span<const IndexedStaticMeshDrawRequest> draws{};
     DepthAttachment* depth_attachment = nullptr;
@@ -1090,6 +1122,10 @@ struct IndexedStaticMeshBatchDescription {
     // Optional fullscreen background. Backends draw it after attachment
     // load/clear and before every scene, selected-mesh, and overlay draw.
     std::optional<PortableSkyParameters> sky;
+    // Optional alpha-blended billboards. Backends draw them after sky and
+    // before every retained scene draw. Missing texture slots skip only runs
+    // that name those slots, matching the production browser preview.
+    std::optional<PortableCloudParameters> clouds;
     // All draws target this one subresource. The first cube-target slice is
     // single-sample, mip zero, clear-only, and has no resolve target.
     TextureTargetSubresource target_subresource{};
@@ -1699,6 +1735,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] bool build_portable_sky_shader_constants(
     const PortableSkyParameters& parameters,
     PortableSkyShaderConstants& constants, Diagnostic& diagnostic) noexcept;
+
+[[nodiscard]] bool build_portable_cloud_shader_constants(
+    const PortableCloudParameters& parameters,
+    PortableCloudShaderConstants& constants, Diagnostic& diagnostic) noexcept;
 
 // Checks the five-level, two-image-per-level RGBA16F bloom chain before a
 // backend allocates it. Backends include any additional transient images in

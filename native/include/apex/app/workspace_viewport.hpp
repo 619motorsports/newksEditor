@@ -4,6 +4,7 @@
 #include "apex/app/workspace_ai_spline.hpp"
 #include "apex/app/workspace_session.hpp"
 #include "apex/render/device.hpp"
+#include "apex/render/decoded_dds_texture.hpp"
 #include "apex/render/directional_shadow.hpp"
 #include "apex/render/external_texture_authority.hpp"
 #include "apex/render/selection_axis.hpp"
@@ -138,6 +139,22 @@ struct WorkspaceViewportPortableReflectionCaptureOptions {
     std::uint32_t size = 512U;
 };
 
+// CPU-decoded cloud textures are borrowed only during synchronous viewport
+// preparation. The viewport retains backend resources, never filesystem
+// paths or AssetSource authority. Null slots remain intentionally unavailable.
+struct WorkspaceViewportPortableCloudOptions {
+    render::PortableCloudSettings settings{};
+    render::PortableCloudBuildOptions build{};
+    // Per-frame weather scalars are kept beside the prepared geometry. The
+    // light direction, colours, and fog distance come from frame constants.
+    float cloud_cover = 0.0F;
+    float cloud_cutoff = 0.0F;
+    float cloud_color = 0.0F;
+    std::array<const render::DecodedTexturePlan*,
+               render::portable_cloud_texture_count>
+        textures{};
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced
@@ -149,8 +166,8 @@ struct WorkspaceViewportPrepareRequest {
     // tone mapping. It is intentionally opt-in and has no temporal history.
     render::HdrExposureMode hdr_exposure_mode = render::HdrExposureMode::manual;
     // Draw the portable WebGL-aligned sky before retained scene geometry.
-    // Clouds remain a separate, not-yet-retained scene pass.
     bool sky_enabled = false;
+    std::optional<WorkspaceViewportPortableCloudOptions> portable_clouds;
     // Apply the recovered post-tone-map FXAA pass. This requires HDR tone
     // mapping and keeps the default LDR path unchanged.
     bool fxaa_enabled = false;
@@ -517,6 +534,20 @@ private:
         std::size_t write_cube = 0U;
     };
 
+    struct PortableCloudResources {
+        render::PortableCloudSettings settings{};
+        float cloud_cover = 0.0F;
+        float cloud_cutoff = 0.0F;
+        float cloud_color = 0.0F;
+        std::vector<render::PortableCloudTextureRun> texture_runs;
+        std::array<std::unique_ptr<render::Texture>,
+                   render::portable_cloud_texture_count>
+            textures;
+        std::unique_ptr<render::Buffer> vertex_buffer;
+        std::unique_ptr<render::Sampler> sampler;
+        std::chrono::steady_clock::time_point start_time{};
+    };
+
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
                                     const AiSplineUpdateRequest& request,
@@ -552,6 +583,7 @@ private:
         std::unique_ptr<render::Buffer> selected_mesh_color_buffer,
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
+        std::optional<PortableCloudResources> portable_clouds,
         std::optional<PortableReflectionCaptureResources> reflection_capture,
         std::optional<FrameCatalog> frame_catalog);
 
@@ -584,6 +616,7 @@ private:
         std::chrono::steady_clock::now();
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
+    std::optional<PortableCloudResources> portable_clouds_;
     std::optional<PortableReflectionCaptureResources> reflection_capture_;
     std::optional<FrameCatalog> frame_catalog_;
 

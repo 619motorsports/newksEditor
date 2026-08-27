@@ -14,6 +14,40 @@ endif()
 
 execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --cloud-assets first --cloud-assets second
+  RESULT_VARIABLE duplicate_cloud_assets_result
+  ERROR_VARIABLE duplicate_cloud_assets_error
+)
+if(NOT duplicate_cloud_assets_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate cloud assets returned ${duplicate_cloud_assets_result}: ${duplicate_cloud_assets_error}")
+endif()
+string(FIND "${duplicate_cloud_assets_error}"
+  "duplicate --cloud-assets option" duplicate_cloud_assets_position)
+if(duplicate_cloud_assets_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate cloud assets were not diagnosed: ${duplicate_cloud_assets_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --cloud-assets missing-cloud-root
+  RESULT_VARIABLE detached_cloud_assets_result
+  ERROR_VARIABLE detached_cloud_assets_error
+)
+if(NOT detached_cloud_assets_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached cloud assets returned ${detached_cloud_assets_result}: ${detached_cloud_assets_error}")
+endif()
+string(FIND "${detached_cloud_assets_error}"
+  "lighting options require a workspace model" detached_cloud_assets_position)
+if(detached_cloud_assets_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached cloud assets were not diagnosed: ${detached_cloud_assets_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
           --builtin-vulkan-ks-per-pixel
   RESULT_VARIABLE detached_source_result
   ERROR_VARIABLE detached_source_error
