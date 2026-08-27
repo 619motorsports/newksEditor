@@ -232,9 +232,10 @@ struct LocalShadowResult { LightingMat4 matrix{}; LightingVec3 position{}, direc
 [[nodiscard]] LocalShadowResult computeLocalLightShadow(const LocalShadowInput& input);
 [[nodiscard]] bool shadowCasterEnabled(bool node_cast_shadows, std::optional<bool> override_cast_shadows) noexcept;
 
-struct CubemapConfig { std::uint32_t size=512, faces_per_frame=1; float near_plane=.01F, far_plane=500, fov_degrees=90; std::uint32_t shader_slot=10; LightingSource source_kind=LightingSource::source_evidenced; };
+struct CubemapConfig { std::uint32_t size=512, mip_levels=7, faces_per_frame=6; float near_plane=.01F, far_plane=350, fov_degrees=90; std::uint32_t shader_slot=10; LightingSource source_kind=LightingSource::source_evidenced; };
 struct CubemapFace { std::array<std::int8_t,3> direction{}; std::array<std::int8_t,3> up{}; std::string target; };
 [[nodiscard]] const CubemapConfig& ksEditorCubemap() noexcept;
+[[nodiscard]] const std::array<CubemapFace,6>& stockCubemapFaces() noexcept;
 [[nodiscard]] const std::array<CubemapFace,6>& webglCubemapFaces() noexcept;
 struct ReflectionCaptureItem { std::string name; bool transparent=false, environment=false, explicit_member=false; };
 enum class ReflectionCaptureMode : std::uint8_t { disabled, explicit_subtree, environment, scene, fallback };

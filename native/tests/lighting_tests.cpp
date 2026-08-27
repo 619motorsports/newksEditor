@@ -261,10 +261,20 @@ void convertsDirectionalCascadeClipSpace() {
 }
 
 void reflectionsAndBounds() {
-    const auto faces = webglCubemapFaces();
-    require(ksEditorCubemap().faces_per_frame == 1u && faces.size() == 6u &&
-                faces[0].target == "negative-x" && faces[2].up[2] == 1,
-            "cubemap face budget and orientation");
+    const auto stock_faces = stockCubemapFaces();
+    const auto webgl_faces = webglCubemapFaces();
+    const auto& stock_config = ksEditorCubemap();
+    require(stock_config.size == 512U && stock_config.mip_levels == 7U &&
+                stock_config.faces_per_frame == 6U &&
+                stock_config.near_plane == 0.01F &&
+                stock_config.far_plane == 350.0F &&
+                stock_faces[0].target == "negative-x" &&
+                stock_faces[0].up[1] == 1 && stock_faces[1].up[2] == 1 &&
+                stock_faces[2].up[2] == -1 && stock_faces[3].up[2] == 1,
+            "stock cubemap budget and recovered face orientations");
+    require(webgl_faces.size() == 6U && webgl_faces[0].up[1] == -1 &&
+                webgl_faces[2].up[2] == 1,
+            "WebGL cubemap orientations remain explicitly separate");
     const std::array<ReflectionCaptureItem, 2> items = {{{"environment", false, true, false},
                                                           {"selected", false, false, true}}};
     const auto environment = selectReflectionCaptureItems(items);
