@@ -22,6 +22,7 @@
 #    include <d3d12.h>
 #    include <dxgi1_6.h>
 #    include <wrl/client.h>
+#    include "generated/d3d12_texture_mip_dxbc.hpp"
 #endif
 
 namespace apex::render {
@@ -144,6 +145,9 @@ struct D3D12Context {
     UINT next_sampler = 0;
     std::mutex sampler_mutex;
     std::mutex command_mutex;
+    ComPtr<ID3D12RootSignature> mip_root_signature;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
+        mip_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -954,6 +958,388 @@ d3d12_texture_srv_description(const TextureDescription& description,
     if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
         add(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     return state;
+}
+
+[[nodiscard]] bool prepare_d3d12_mip_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT format,
+    ID3D12PipelineState*& pipeline, Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context->mip_root_signature == nullptr) {
+        D3D12_DESCRIPTOR_RANGE srv_range{};
+        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srv_range.NumDescriptors = 1U;
+        srv_range.BaseShaderRegister = 0U;
+        srv_range.RegisterSpace = 0U;
+        srv_range.OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER srv_parameter{};
+        srv_parameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        srv_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+        srv_parameter.DescriptorTable.pDescriptorRanges = &srv_range;
+        srv_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MipLODBias = 0.0F;
+        sampler.MaxAnisotropy = 1U;
+        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        sampler.MinLOD = 0.0F;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister = 0U;
+        sampler.RegisterSpace = 0U;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters = 1U;
+        root_description.pParameters = &srv_parameter;
+        root_description.NumStaticSamplers = 1U;
+        root_description.pStaticSamplers = &sampler;
+        root_description.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(texture mip)", result);
+            diagnostic.code = "d3d12_texture_mip_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->mip_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(texture mip)", result);
+            diagnostic.code = "d3d12_texture_mip_pipeline_failed";
+            return false;
+        }
+    }
+
+    for (const auto& cached : context->mip_pipelines) {
+        if (cached.first == format) {
+            pipeline = cached.second.Get();
+            return true;
+        }
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->mip_root_signature.Get();
+    description.VS = {
+        generated::d3d12_texture_mip_vertex_dxbc,
+        generated::d3d12_texture_mip_vertex_dxbc_size};
+    description.PS = {
+        generated::d3d12_texture_mip_pixel_dxbc,
+        generated::d3d12_texture_mip_pixel_dxbc_size};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.FrontCounterClockwise = FALSE;
+    description.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    description.RasterizerState.DepthBiasClamp =
+        D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    description.RasterizerState.SlopeScaledDepthBias =
+        D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.RasterizerState.MultisampleEnable = FALSE;
+    description.RasterizerState.AntialiasedLineEnable = FALSE;
+    description.RasterizerState.ForcedSampleCount = 0U;
+    description.RasterizerState.ConservativeRaster =
+        D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    D3D12_RENDER_TARGET_BLEND_DESC& blend =
+        description.BlendState.RenderTarget[0U];
+    blend.BlendEnable = FALSE;
+    blend.LogicOpEnable = FALSE;
+    blend.SrcBlend = D3D12_BLEND_ONE;
+    blend.DestBlend = D3D12_BLEND_ZERO;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    description.DepthStencilState.DepthEnable = FALSE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    description.DepthStencilState.StencilEnable = FALSE;
+    description.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    description.DepthStencilState.StencilWriteMask =
+        D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    description.DepthStencilState.FrontFace = {
+        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
+        D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    description.DepthStencilState.BackFace =
+        description.DepthStencilState.FrontFace;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType =
+        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = format;
+    description.SampleDesc.Count = 1U;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(texture mip)", result);
+        diagnostic.code = "d3d12_texture_mip_pipeline_failed";
+        return false;
+    }
+    pipeline = created.Get();
+    context->mip_pipelines.emplace_back(format, std::move(created));
+    return true;
+}
+
+[[nodiscard]] bool execute_texture_mip_generation(
+    const std::shared_ptr<D3D12Context>& context, ID3D12Resource* texture,
+    const TextureDescription& description,
+    D3D12_RESOURCE_STATES& texture_resource_state,
+    Diagnostic& diagnostic) {
+    const std::uint64_t physical_layers =
+        texture_physical_array_layers(description);
+    const std::uint64_t operations =
+        physical_layers * static_cast<std::uint64_t>(description.mip_levels - 1U);
+    if (operations == 0U ||
+        operations > std::numeric_limits<UINT>::max()) {
+        diagnostic = {
+            "d3d12_texture_mip_descriptor_limit",
+            "Texture mip generation exceeds the D3D12 descriptor count limit"};
+        return false;
+    }
+
+    std::lock_guard command_guard(context->command_mutex);
+    ID3D12PipelineState* pipeline = nullptr;
+    const DXGI_FORMAT format = dxgi_texture_format(description.format);
+    if (!prepare_d3d12_mip_pipeline(context, format, pipeline, diagnostic))
+        return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
+    srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srv_heap_description.NumDescriptors = static_cast<UINT>(operations);
+    srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    HRESULT result = context->device->CreateDescriptorHeap(
+        &srv_heap_description, IID_PPV_ARGS(&srv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(texture mip SRV)", result);
+        diagnostic.code = "d3d12_texture_mip_descriptor_failed";
+        return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
+    rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_description.NumDescriptors = static_cast<UINT>(operations);
+    rtv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(
+        &rtv_heap_description, IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(texture mip RTV)", result);
+        diagnostic.code = "d3d12_texture_mip_descriptor_failed";
+        return false;
+    }
+    const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT rtv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const std::uint64_t last_operation = operations - 1U;
+    if (srv_stride == 0U || rtv_stride == 0U ||
+        last_operation >
+            std::numeric_limits<SIZE_T>::max() / srv_stride ||
+        last_operation >
+            std::numeric_limits<SIZE_T>::max() / rtv_stride ||
+        last_operation >
+            std::numeric_limits<UINT64>::max() / srv_stride) {
+        diagnostic = {
+            "d3d12_texture_mip_descriptor_failed",
+            "Texture mip descriptor handles exceed the D3D12 address range"};
+        return false;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE first_srv =
+        srv_heap->GetCPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE first_rtv =
+        rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    for (std::uint32_t layer = 0U;
+         layer < static_cast<std::uint32_t>(physical_layers); ++layer) {
+        for (std::uint32_t mip = 1U; mip < description.mip_levels; ++mip) {
+            const UINT operation =
+                layer * (description.mip_levels - 1U) + (mip - 1U);
+            D3D12_CPU_DESCRIPTOR_HANDLE srv = first_srv;
+            srv.ptr += static_cast<SIZE_T>(operation) * srv_stride;
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv_description{};
+            srv_description.Format = format;
+            srv_description.ViewDimension =
+                D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            srv_description.Shader4ComponentMapping =
+                D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv_description.Texture2DArray.MostDetailedMip = mip - 1U;
+            srv_description.Texture2DArray.MipLevels = 1U;
+            srv_description.Texture2DArray.FirstArraySlice = layer;
+            srv_description.Texture2DArray.ArraySize = 1U;
+            srv_description.Texture2DArray.PlaneSlice = 0U;
+            srv_description.Texture2DArray.ResourceMinLODClamp = 0.0F;
+            context->device->CreateShaderResourceView(
+                texture, &srv_description, srv);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = first_rtv;
+            rtv.ptr += static_cast<SIZE_T>(operation) * rtv_stride;
+            D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
+            rtv_description.Format = format;
+            rtv_description.ViewDimension =
+                D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            rtv_description.Texture2DArray.MipSlice = mip;
+            rtv_description.Texture2DArray.FirstArraySlice = layer;
+            rtv_description.Texture2DArray.ArraySize = 1U;
+            rtv_description.Texture2DArray.PlaneSlice = 0U;
+            context->device->CreateRenderTargetView(
+                texture, &rtv_description, rtv);
+        }
+    }
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandAllocator(texture mip)", result);
+        diagnostic.code = "d3d12_texture_mip_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), pipeline,
+        IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandList(texture mip)", result);
+        diagnostic.code = "d3d12_texture_mip_execution_failed";
+        return false;
+    }
+
+    constexpr D3D12_RESOURCE_STATES source_state =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const D3D12_RESOURCE_STATES final_state =
+        texture_state(description.usage, description.access_policy);
+    if (texture_resource_state != source_state) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture;
+        barrier.Transition.StateBefore = texture_resource_state;
+        barrier.Transition.StateAfter = source_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    ID3D12DescriptorHeap* descriptor_heaps[] = {srv_heap.Get()};
+    list->SetDescriptorHeaps(1U, descriptor_heaps);
+    list->SetGraphicsRootSignature(context->mip_root_signature.Get());
+    list->SetPipelineState(pipeline);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const D3D12_GPU_DESCRIPTOR_HANDLE first_srv_gpu =
+        srv_heap->GetGPUDescriptorHandleForHeapStart();
+    for (std::uint32_t layer = 0U;
+         layer < static_cast<std::uint32_t>(physical_layers); ++layer) {
+        for (std::uint32_t mip = 1U; mip < description.mip_levels; ++mip) {
+            const UINT operation =
+                layer * (description.mip_levels - 1U) + (mip - 1U);
+            const UINT subresource = layer * description.mip_levels + mip;
+            D3D12_RESOURCE_BARRIER to_render_target{};
+            to_render_target.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            to_render_target.Transition.pResource = texture;
+            to_render_target.Transition.StateBefore = source_state;
+            to_render_target.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_RENDER_TARGET;
+            to_render_target.Transition.Subresource = subresource;
+            list->ResourceBarrier(1U, &to_render_target);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = first_rtv;
+            rtv.ptr += static_cast<SIZE_T>(operation) * rtv_stride;
+            list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+            const std::uint32_t width =
+                std::max(1U, description.width >> mip);
+            const std::uint32_t height =
+                std::max(1U, description.height >> mip);
+            const D3D12_VIEWPORT viewport = {
+                0.0F, 0.0F, static_cast<float>(width),
+                static_cast<float>(height), 0.0F, 1.0F};
+            const D3D12_RECT scissor = {
+                0L, 0L, static_cast<LONG>(width),
+                static_cast<LONG>(height)};
+            list->RSSetViewports(1U, &viewport);
+            list->RSSetScissorRects(1U, &scissor);
+            D3D12_GPU_DESCRIPTOR_HANDLE srv = first_srv_gpu;
+            srv.ptr += static_cast<UINT64>(operation) * srv_stride;
+            list->SetGraphicsRootDescriptorTable(0U, srv);
+            list->DrawInstanced(3U, 1U, 0U, 0U);
+
+            std::swap(to_render_target.Transition.StateBefore,
+                      to_render_target.Transition.StateAfter);
+            list->ResourceBarrier(1U, &to_render_target);
+        }
+    }
+    if (final_state != source_state) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture;
+        barrier.Transition.StateBefore = source_state;
+        barrier.Transition.StateAfter = final_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12GraphicsCommandList::Close(texture mip)", result);
+        diagnostic.code = "d3d12_texture_mip_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(
+        0U, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateFence(texture mip)", result);
+        diagnostic.code = "d3d12_texture_mip_execution_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event == nullptr) {
+        diagnostic = {
+            "d3d12_texture_mip_execution_failed",
+            "CreateEventW failed while waiting for D3D12 mip generation"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    constexpr UINT64 fence_value = 1U;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+        result = fence->SetEventOnCompletion(fence_value, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        texture_resource_state =
+            drained ? final_state : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 texture mip fence", result);
+        diagnostic.code =
+            result == DXGI_ERROR_DEVICE_REMOVED ||
+                    result == DXGI_ERROR_DEVICE_RESET
+                ? "d3d12_device_removed"
+                : "d3d12_texture_mip_execution_failed";
+        return false;
+    }
+    texture_resource_state = final_state;
+    diagnostic = {};
+    return true;
 }
 
 [[nodiscard]] bool validate_d3d12_sample_count(const std::shared_ptr<D3D12Context>& context,
@@ -4595,6 +4981,11 @@ public:
     }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
+    bool generate_mips(Diagnostic& diagnostic) {
+        return execute_texture_mip_generation(
+            context_, resource_.Get(), info_.description, state_, diagnostic);
+    }
+
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         const bool uploaded = execute_texture_upload(
             context_, resource_.Get(), info_.description, uploads, state_,
@@ -7068,7 +7459,7 @@ public:
             return {TextureStatus::allocation_failed, std::move(failure), nullptr};
         }
         auto texture = std::make_unique<D3D12Texture>(context_, std::move(resource), description,
-                                                      initial_state, needs_upload);
+                                                      initial_state, false);
         if (!initial_uploads.subresources.empty() && !texture->upload(initial_uploads, diagnostic))
             return {TextureStatus::upload_failed, std::move(diagnostic), nullptr};
         return {TextureStatus::ready, {}, std::move(texture)};
@@ -7118,9 +7509,15 @@ public:
             return {TextureStatus::invalid_description,
                     {"texture_mip_generation_base_uninitialized",
                      "Texture mip generation requires initialized mip-zero data for every physical layer"}};
-        return {TextureStatus::unsupported,
-                {"d3d12_texture_mip_generation_shader_pending",
-                 "D3D12 filtered mip generation requires the pending fullscreen downsample shader path"}};
+        if (!validate_d3d12_texture_format_support(
+                context_, dxgi_texture_format(texture.info().description.format),
+                texture.info().description.mip_levels, diagnostic,
+                texture.info().description.usage))
+            return {TextureStatus::unsupported, std::move(diagnostic)};
+        return d3d_texture->generate_mips(diagnostic)
+                   ? TextureUpdateResult{TextureStatus::ready, {}}
+                   : TextureUpdateResult{TextureStatus::upload_failed,
+                                         std::move(diagnostic)};
     }
 
     TextureClearReadbackResult clear_texture_and_readback(

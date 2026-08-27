@@ -2690,14 +2690,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 request.portable_reflection_capture->size;
             cube_description.height = cube_description.width;
             cube_description.format = render::TextureFormat::rgba16_sfloat;
-            if (device.info().backend == render::Backend::Vulkan) {
-                std::uint32_t dimension = cube_description.width;
-                while (dimension != 0U &&
-                       cube_description.mip_levels < 7U) {
-                    dimension >>= 1U;
-                    if (dimension != 0U)
-                        ++cube_description.mip_levels;
-                }
+            std::uint32_t dimension = cube_description.width;
+            while (dimension != 0U &&
+                   cube_description.mip_levels < 7U) {
+                dimension >>= 1U;
+                if (dimension != 0U)
+                    ++cube_description.mip_levels;
             }
             cube_description.usage =
                 render::TextureUsage::sampled |

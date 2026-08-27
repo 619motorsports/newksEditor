@@ -551,6 +551,251 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   }
 }
 
+#if defined(_WIN32)
+void exercise_d3d12_warp_mip_generation(Device &device) {
+  require(device.info().backend == Backend::D3D12,
+          "D3D12 mip test receives a D3D12 device");
+  require(device.info().software,
+          "D3D12 mip test selects the software WARP adapter");
+
+  constexpr std::uint32_t width = 8U;
+  constexpr std::uint32_t height = 8U;
+  constexpr std::size_t texel_count = width * height;
+  using HalfRgba = std::array<std::uint16_t, texel_count * 4U>;
+  // These values are exactly representable in binary16.  A checkerboard and
+  // two green stripes make a copy-or-point implementation observably differ
+  // from the required filtered mip result.
+  constexpr std::uint16_t half_zero = 0x0000U;
+  constexpr std::uint16_t half_one = 0x3c00U;
+  constexpr std::uint16_t half_quarter = 0x3400U;
+  constexpr std::uint16_t half_three_quarters = 0x3a00U;
+  constexpr std::uint16_t half_eighth = 0x3000U;
+  std::array<HalfRgba, texture_cube_face_count> faces{};
+  for (std::uint32_t face = 0U; face < texture_cube_face_count; ++face) {
+    for (std::uint32_t y = 0U; y < height; ++y) {
+      for (std::uint32_t x = 0U; x < width; ++x) {
+        const std::size_t texel =
+            (static_cast<std::size_t>(y) * width + x) * 4U;
+        if (face == 0U) {
+          faces[face][texel + 0U] = ((x + y) & 1U) != 0U ? half_one : half_zero;
+          faces[face][texel + 1U] = x < width / 2U ? half_quarter
+                                                  : half_three_quarters;
+          faces[face][texel + 2U] = half_eighth;
+        } else {
+          faces[face][texel + 0U] = half_zero;
+          faces[face][texel + 1U] = half_zero;
+          faces[face][texel + 2U] = half_zero;
+        }
+        faces[face][texel + 3U] = half_one;
+      }
+    }
+  }
+  const auto face_bytes = [](const HalfRgba &face) {
+    return std::as_bytes(std::span(face));
+  };
+
+  TextureDescription description;
+  description.width = width;
+  description.height = height;
+  description.mip_levels = 4U;
+  description.array_layers = 1U;
+  description.format = TextureFormat::rgba16_sfloat;
+  description.usage = TextureUsage::sampled | TextureUsage::color_attachment |
+                       TextureUsage::transfer_source;
+  description.mutability = TextureMutability::mutable_data;
+  description.shape = TextureShape::texture_cube;
+  description.access_policy = TextureAccessPolicy::render_then_sample;
+
+  // Create with one face only.  The backend must retain per-physical-layer
+  // initialization state and reject generation until the other five arrive.
+  TextureUploadPlan partial;
+  partial.subresources.push_back(
+      {0U, 0U, width, height, width * 4U * sizeof(std::uint16_t),
+       face_bytes(faces[0U]), CubeFace::positive_x});
+  TextureResult cube = device.create_texture(description, partial);
+  require(cube.ok(), "D3D12 WARP creates a partially initialized RGBA16F cube");
+  const TextureUpdateResult partial_generation =
+      device.generate_texture_mips(*cube.texture);
+  require(!partial_generation.ok() &&
+              partial_generation.diagnostic.code ==
+                  "texture_mip_generation_base_uninitialized",
+          "D3D12 WARP rejects mip generation for a partial cube base");
+
+  TextureUploadPlan remaining;
+  remaining.subresources.reserve(texture_cube_face_count - 1U);
+  for (std::uint32_t face = 1U; face < texture_cube_face_count; ++face) {
+    remaining.subresources.push_back(
+        {0U, 0U, width, height, width * 4U * sizeof(std::uint16_t),
+         face_bytes(faces[face]), cube_faces[face]});
+  }
+  const TextureUpdateResult uploaded =
+      device.update_texture(*cube.texture, remaining);
+  require(uploaded.ok(), "D3D12 WARP uploads the remaining cube faces");
+  const TextureUpdateResult generated =
+      device.generate_texture_mips(*cube.texture);
+  if (!generated.ok())
+    throw std::runtime_error(
+        "D3D12 WARP RGBA16F cube mip generation failed: " +
+        generated.diagnostic.code + ": " + generated.diagnostic.message);
+
+  // Bind the generated cube to a real indexed draw.  Sampling mip three
+  // reaches the one-by-one level, whose expected result is the arithmetic
+  // average of the nonconstant positive-X base face: (0.5, 0.5, 0.125, 1).
+  TextureDescription sampled_description;
+  sampled_description.width = 1U;
+  sampled_description.height = 1U;
+  sampled_description.format = TextureFormat::rgba8_unorm;
+  sampled_description.usage = TextureUsage::sampled;
+  const std::array<std::byte, 4U> sampled_pixel = {
+      std::byte{255U}, std::byte{255U}, std::byte{255U}, std::byte{255U}};
+  const TextureUploadPlan sampled_uploads{{
+      {0U, 0U, 1U, 1U, 4U, sampled_pixel}}};
+  TextureResult sampled =
+      device.create_texture(sampled_description, sampled_uploads);
+  require(sampled.ok(), "D3D12 WARP creates the mip-test material texture");
+  SamplerResult sampler = device.create_sampler({});
+  require(sampler.ok(), "D3D12 WARP creates the mip-test sampler");
+
+  std::array<float, 33U> vertices{};
+  vertices[0U] = -1.0F;
+  vertices[1U] = -1.0F;
+  vertices[11U] = 3.0F;
+  vertices[12U] = -1.0F;
+  vertices[22U] = -1.0F;
+  vertices[23U] = 3.0F;
+  constexpr std::array<std::uint16_t, 3U> indices = {0U, 1U, 2U};
+  BufferResult vertex_buffer = device.create_buffer(
+      {sizeof(vertices), BufferUsage::vertex, BufferMemory::device_local,
+       BufferMutability::immutable},
+      std::as_bytes(std::span(vertices)));
+  BufferResult index_buffer = device.create_buffer(
+      {sizeof(indices), BufferUsage::index, BufferMemory::device_local,
+       BufferMutability::immutable},
+      std::as_bytes(std::span(indices)));
+  require(vertex_buffer.ok() && index_buffer.ok(),
+          "D3D12 WARP creates mip-test indexed geometry");
+
+  std::array<std::byte, portable_material_buffer_view_bytes> material{};
+  std::array<std::byte, portable_frame_buffer_view_bytes> frame{};
+  const auto make_uniform = [&](const std::span<const std::byte> bytes) {
+    return device.create_buffer({bytes.size(), BufferUsage::uniform,
+                                 BufferMemory::host_visible,
+                                 BufferMutability::immutable},
+                                bytes);
+  };
+  BufferResult material_buffer = make_uniform(material);
+  BufferResult frame_buffer = make_uniform(frame);
+  std::array<std::byte, portable_multimap_reflection_buffer_view_bytes>
+      reflection{};
+  BufferResult reflection_buffer = device.create_buffer(
+      {reflection.size(), BufferUsage::uniform, BufferMemory::host_visible,
+       BufferMutability::mutable_data},
+      reflection);
+  require(material_buffer.ok() && frame_buffer.ok() && reflection_buffer.ok(),
+          "D3D12 WARP creates mip-test padded uniform views");
+
+  PipelineProgram pipeline;
+  pipeline.name = "d3d12-warp-mip-filter-readback";
+  pipeline.targets.colors.push_back(
+      {PipelineRenderTargetFormat::rgba8_unorm, 1U});
+  pipeline.raster.cull = PipelineCullMode::none;
+  pipeline.depth.test_enabled = false;
+  pipeline.depth.write_enabled = false;
+  pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+  pipeline.vertex_layout.stride = 11U * sizeof(float);
+  pipeline.vertex_layout.attributes.push_back(
+      {PipelineVertexSemantic::position,
+       PipelineVertexAttributeFormat::float32x3, 0U, 0U});
+  constexpr std::string_view vertex_source =
+      "cbuffer DrawMatrices : register(b0) { column_major float4x4 world; "
+      "column_major float4x4 viewProjection; };"
+      "float4 main(float3 position : POSITION) : SV_Position { return "
+      "mul(viewProjection, mul(world, float4(position, 1.0))); }";
+  constexpr std::string_view fragment_source =
+      "TextureCube reflectionCube : register(t21);"
+      "SamplerState reflectionSampler : register(s22);"
+      "float4 main() : SV_Target { return reflectionCube.SampleLevel("
+      "reflectionSampler, float3(1.0, 0.0, 0.0), 3.0); }";
+  pipeline.shaders = {
+      {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+       d3d_shader(vertex_source, "vs_5_0")},
+      {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+       d3d_shader(fragment_source, "ps_5_0")},
+  };
+  pipeline.resources = {
+      {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+      {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+      {PipelineResourceKind::uniform_buffer, 0U, 2U, "material"},
+      {PipelineResourceKind::uniform_buffer, 0U, 3U, "frame"},
+      {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+      {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+      {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+      {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+      {PipelineResourceKind::sampled_texture, 0U,
+       portable_multimap_cube_texture_binding, "reflectionCube"},
+      {PipelineResourceKind::sampler, 0U,
+       portable_multimap_cube_sampler_binding, "reflectionSampler"},
+      {PipelineResourceKind::uniform_buffer, 0U,
+       portable_multimap_reflection_constants_binding, "reflectionConstants"},
+  };
+
+  TextureDescription target_description;
+  target_description.width = width;
+  target_description.height = height;
+  target_description.format = TextureFormat::rgba8_unorm;
+  target_description.usage =
+      TextureUsage::color_attachment | TextureUsage::transfer_source;
+  target_description.mutability = TextureMutability::mutable_data;
+  TextureResult target = device.create_texture(target_description);
+  require(target.ok(), "D3D12 WARP creates the mip-test readback target");
+
+  DrawPacket packet;
+  packet.primitive = DrawPrimitiveKind::static_mesh;
+  packet.vertex_count = 3U;
+  packet.index_count = 3U;
+  packet.vertex_stride_floats = 11U;
+  packet.shader_execution_supported = true;
+  packet.flags.depth_test = false;
+  packet.flags.depth_write = false;
+  CameraFrame camera;
+  camera.clip_space = CameraClipSpace::d3d12;
+  IndexedStaticMeshDrawRequest request;
+  request.packet = &packet;
+  request.pipeline = &pipeline;
+  request.vertex_buffer = vertex_buffer.buffer.get();
+  request.index_buffer = index_buffer.buffer.get();
+  request.camera_frame = camera;
+  request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+  request.sampled_binding = {sampled.texture.get(), sampler.sampler.get()};
+  request.normal_binding = request.sampled_binding;
+  request.maps_binding = request.sampled_binding;
+  request.material_binding = {material_buffer.buffer.get(), 0U,
+                              portable_material_buffer_view_bytes};
+  request.frame_binding = {frame_buffer.buffer.get(), 0U,
+                           portable_frame_buffer_view_bytes};
+  request.multimap_reflection_binding = {
+      {cube.texture.get(), sampler.sampler.get()},
+      {reflection_buffer.buffer.get(), 0U,
+       portable_multimap_reflection_buffer_view_bytes}};
+  const IndexedStaticMeshDrawResult readback =
+      device.draw_indexed_static_mesh_and_readback(*target.texture, request);
+  if (!readback.ok())
+    throw std::runtime_error(
+        "D3D12 WARP mip sample failed: " + readback.diagnostic.code +
+        ": " + readback.diagnostic.message);
+  const std::size_t center = (4U * width + 4U) * 4U;
+  require(readback.rgba8.size() >= center + 4U,
+          "D3D12 WARP mip sample returned a complete readback");
+  const std::array<int, 4U> expected = {128, 128, 32, 255};
+  for (std::size_t channel = 0U; channel < expected.size(); ++channel) {
+    const int actual = std::to_integer<std::uint8_t>(
+        readback.rgba8[center + channel]);
+    require(std::abs(actual - expected[channel]) <= 3,
+            "D3D12 WARP mip sample proves filtered RGBA16F output");
+  }
+}
+#endif
+
 bool exercise_backend(const Backend backend, const DeviceOptions &options) {
   DeviceResult created = create_device(backend, options);
   if (!created.ok()) {
@@ -613,6 +858,10 @@ bool exercise_backend(const Backend backend, const DeviceOptions &options) {
       make_array_uploads(std::span(pixels).first(texture_cube_face_count)));
   require(ordinary_array_result.ok(),
           "backend keeps a six-layer 2D array distinct from a cube");
+#if defined(_WIN32)
+  if (backend == Backend::D3D12)
+    exercise_d3d12_warp_mip_generation(*created.device);
+#endif
   return true;
 }
 
