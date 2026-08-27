@@ -668,6 +668,47 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     return result;
 }
 
+KsPerPixelMultiMapReflectionResolveResult
+resolve_ks_per_pixel_multimap_reflection_constants(
+    const MaterialBinding& binding) {
+    KsPerPixelMultiMapReflectionResolveResult result;
+    const std::string shader = canonical(binding.shader);
+    if (!is_base_multimap_family(shader) && !is_nmdetail_family(shader)) {
+        result.diagnostic = {
+            "ks_per_pixel_multimap_reflection_shader_unsupported", "shader",
+            "Cubemap reflection controls require a bounded ksPerPixelMultiMap family"};
+        return result;
+    }
+
+    result.constants.fresnel_and_additive = {
+        material_scalar(binding, "fresnelC", 0.0F),
+        material_scalar(binding, "fresnelEXP", 5.0F),
+        material_scalar(binding, "fresnelMaxLevel", 0.05F),
+        material_scalar(binding, "isAdditive", 0.0F),
+    };
+    if (!std::all_of(result.constants.fresnel_and_additive.begin(),
+                     result.constants.fresnel_and_additive.end(),
+                     [](const float value) { return std::isfinite(value); })) {
+        result.status =
+            KsPerPixelMultiMapReflectionResolveStatus::invalid_input;
+        result.diagnostic = {
+            "non_finite_constants", "MultiMap reflection",
+            "Resolved MultiMap reflection constants must contain only finite values"};
+        return result;
+    }
+
+    const float additive = result.constants.fresnel_and_additive[3U];
+    if (additive != 0.0F && additive != 1.0F && additive != 2.0F) {
+        result.diagnostic = {
+            "ks_per_pixel_multimap_is_additive_unsupported", "isAdditive",
+            "The recovered MultiMap reflection path accepts isAdditive branch 0, 1, or 2"};
+        return result;
+    }
+
+    result.status = KsPerPixelMultiMapReflectionResolveStatus::ready;
+    return result;
+}
+
 StockShadowCasterMaterialResolveResult
 resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding) {
     StockShadowCasterMaterialResolveResult result;

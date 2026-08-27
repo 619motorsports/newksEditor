@@ -634,6 +634,83 @@ void resolves_bounded_base_multimap_families() {
             "base MultiMap keeps maps.b reflection outside the bounded path");
 }
 
+void resolves_multimap_reflection_controls_separately() {
+    Kn5Material material;
+    material.shader = "ksPerPixelMultiMap";
+    material.properties = {
+        {"fresnelC", 0.02F, {}, {}, {}},
+        {"fresnelEXP", 6.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.13F, {}, {}, {}},
+        {"isAdditive", 2.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "body.dds"},
+        {"txNormal", 1U, "body_nm.dds"},
+        {"txMaps", 2U, "body_maps.dds"},
+    };
+
+    const MaterialBinding binding = build_material_binding(material, 3U);
+    const auto resolved =
+        resolve_ks_per_pixel_multimap_reflection_constants(binding);
+    require(resolved.ok() &&
+                resolved.constants.fresnel_and_additive ==
+                    std::array<float, 4>{0.02F, 6.0F, 0.13F, 2.0F},
+            "base MultiMap preserves recovered Fresnel and additive controls");
+
+    MaterialBindingOverrides overrides;
+    overrides.properties.emplace(
+        "fresnelMaxLevel", MaterialPropertyOverride::scalar_value(0.4F));
+    overrides.properties.emplace(
+        "isAdditive", MaterialPropertyOverride::scalar_value(1.0F));
+    const auto overridden = resolve_ks_per_pixel_multimap_reflection_constants(
+        build_material_binding(material, 3U, &overrides));
+    require(overridden.ok() &&
+                overridden.constants.fresnel_and_additive ==
+                    std::array<float, 4>{0.02F, 6.0F, 0.4F, 1.0F},
+            "CSP overrides retain precedence for MultiMap reflection controls");
+
+    material.shader = "ksPerPixelMultiMap_AT_NMDetail";
+    material.resources.push_back({"txDetail", 3U, "detail.dds"});
+    material.resources.push_back(
+        {"txNormalDetail", 4U, "detail_nm.dds"});
+    const auto nm_detail = resolve_ks_per_pixel_multimap_reflection_constants(
+        build_material_binding(material, 5U));
+    require(nm_detail.ok() &&
+                nm_detail.constants.fresnel_and_additive[3U] == 2.0F,
+            "AT NMDetail uses the same portable reflection semantics without claiming native row identity");
+
+    MaterialBinding invalid_additive = binding;
+    invalid_additive.properties.at("isadditive").scalar = 3.0F;
+    const auto unsupported =
+        resolve_ks_per_pixel_multimap_reflection_constants(invalid_additive);
+    require(!unsupported.ok() &&
+                unsupported.status ==
+                    KsPerPixelMultiMapReflectionResolveStatus::unsupported &&
+                unsupported.diagnostic.code ==
+                    "ks_per_pixel_multimap_is_additive_unsupported",
+            "unrecovered additive branches are rejected explicitly");
+
+    MaterialBinding non_finite = binding;
+    non_finite.properties.at("fresnelc").scalar =
+        std::numeric_limits<float>::quiet_NaN();
+    const auto invalid =
+        resolve_ks_per_pixel_multimap_reflection_constants(non_finite);
+    require(!invalid.ok() &&
+                invalid.status ==
+                    KsPerPixelMultiMapReflectionResolveStatus::invalid_input &&
+                invalid.diagnostic.code == "non_finite_constants",
+            "non-finite reflection controls are rejected before allocation");
+
+    material.shader = "ksPerPixel";
+    const auto wrong_family =
+        resolve_ks_per_pixel_multimap_reflection_constants(
+            build_material_binding(material, 5U));
+    require(!wrong_family.ok() &&
+                wrong_family.diagnostic.code ==
+                    "ks_per_pixel_multimap_reflection_shader_unsupported",
+            "non-MultiMap shaders cannot request the frame-owned cube path");
+}
+
 void resolves_bounded_nmdetail_stack() {
     Kn5Material material;
     material.shader = "ksPerPixelMultiMap_NMDetail";
@@ -819,6 +896,7 @@ int main() {
         rejects_invalid_ks_per_pixel_constants();
         resolves_bounded_tangent_space_nm_variant();
         resolves_bounded_base_multimap_families();
+        resolves_multimap_reflection_controls_separately();
         resolves_bounded_nmdetail_stack();
         resolves_bounded_at_nmdetail_stack();
         resolves_bounded_dirt_zero_damage_variant();

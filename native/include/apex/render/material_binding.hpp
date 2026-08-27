@@ -200,6 +200,36 @@ struct KsPerPixelMaterialResolveResult {
     }
 };
 
+// Source-evidenced MultiMap reflection controls. This is a portable semantic
+// record, not a claim that every installed variant packs cbCarPaint b5 the
+// same way. In particular, isAdditive has a different native row between the
+// base and NMDetail families, so it remains separate from the existing
+// KsPerPixelMaterialConstants::fresnel alpha slot.
+struct KsPerPixelMultiMapReflectionConstants {
+    // fresnelC, fresnelEXP, fresnelMaxLevel, isAdditive (0, 1, or 2).
+    std::array<float, 4> fresnel_and_additive = {0.0F, 5.0F, 0.05F, 0.0F};
+};
+
+static_assert(sizeof(KsPerPixelMultiMapReflectionConstants) == 16U);
+static_assert(std::is_trivially_copyable_v<KsPerPixelMultiMapReflectionConstants>);
+
+enum class KsPerPixelMultiMapReflectionResolveStatus : std::uint8_t {
+    ready,
+    invalid_input,
+    unsupported,
+};
+
+struct KsPerPixelMultiMapReflectionResolveResult {
+    KsPerPixelMultiMapReflectionResolveStatus status =
+        KsPerPixelMultiMapReflectionResolveStatus::unsupported;
+    KsPerPixelMultiMapReflectionConstants constants{};
+    MaterialBindingDiagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == KsPerPixelMultiMapReflectionResolveStatus::ready;
+    }
+};
+
 enum class StockShadowCasterMaterialResolveStatus : std::uint8_t {
     ready,
     invalid_input,
@@ -233,6 +263,12 @@ resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding);
 [[nodiscard]] KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
     const MaterialBinding& binding,
     KsPerPixelMaterialResolveOptions options = {});
+
+// Resolve only the recovered cubemap/Fresnel controls for the four bounded
+// MultiMap families. txCube remains a frame-owned renderer resource and is
+// deliberately absent from MaterialBinding::textures.
+[[nodiscard]] KsPerPixelMultiMapReflectionResolveResult
+resolve_ks_per_pixel_multimap_reflection_constants(const MaterialBinding& binding);
 
 // Build a backend-neutral material binding. texture_table_count is retained
 // for callers that already have the parsed KN5 table size, but resource bind
