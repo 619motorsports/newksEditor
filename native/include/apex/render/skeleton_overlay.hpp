@@ -68,10 +68,23 @@ struct SkeletonOverlayResult {
     SkeletonOverlayStatus status = SkeletonOverlayStatus::invalid_request;
     Diagnostic diagnostic;
     std::vector<OverlayLineVertex> vertices;
+    // Each entry binds one emitted vertex to a source node translation plus
+    // the recovered marker offset. The binding supports allocation-free
+    // per-frame position refresh without changing topology or color.
+    struct PositionSource {
+        std::uint32_t node = invalid_skeleton_overlay_node;
+        std::array<float, 3U> offset{};
+    };
+    std::vector<PositionSource> position_sources;
 
     [[nodiscard]] bool ok() const noexcept {
         return status == SkeletonOverlayStatus::ready;
     }
+};
+
+enum class SkeletonOverlayUpdateStatus : std::uint8_t {
+    ready,
+    invalid_request,
 };
 
 // Build the source-order line list used by the original skeleton overlay.
@@ -90,5 +103,13 @@ struct SkeletonOverlayResult {
     std::uint32_t root,
     std::uint32_t selected_node,
     SkeletonOverlayLimits limits = {});
+
+// Refresh only world-space positions. Validation completes before any output
+// vertex changes, and the function performs no allocation.
+[[nodiscard]] SkeletonOverlayUpdateStatus update_skeleton_overlay_positions(
+    std::span<OverlayLineVertex> vertices,
+    std::span<const SkeletonOverlayResult::PositionSource> position_sources,
+    std::span<const apex::scene::Matrix4> world_transforms,
+    Diagnostic& diagnostic) noexcept;
 
 } // namespace apex::render

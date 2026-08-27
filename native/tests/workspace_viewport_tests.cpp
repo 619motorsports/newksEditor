@@ -89,6 +89,15 @@ public:
     [[nodiscard]] const std::vector<std::byte> &bytes() const noexcept {
         return bytes_;
     }
+    [[nodiscard]] bool update(const std::uint64_t offset,
+                              const std::span<const std::byte> bytes) {
+        if (offset > bytes_.size() ||
+            bytes.size() > bytes_.size() - static_cast<std::size_t>(offset))
+            return false;
+        std::copy(bytes.begin(), bytes.end(),
+                  bytes_.data() + static_cast<std::size_t>(offset));
+        return true;
+    }
 
 private:
     BufferInfo info_{};
@@ -180,6 +189,14 @@ public:
     BufferUpdateResult
     update_buffer(Buffer &buffer, std::uint64_t offset,
                   std::span<const std::byte> bytes) override {
+        ++update_calls;
+        if (fail_update_call == update_calls)
+            return {fail_update_status,
+                    {"fake_buffer_update_failed", "injected buffer update failure"}};
+        auto* fake = dynamic_cast<FakeBuffer*>(&buffer);
+        if (fake == nullptr || !fake->update(offset, bytes))
+            return {BufferStatus::invalid_description,
+                    {"fake_buffer_update_invalid", "invalid fake buffer update"}};
         buffer_updates.push_back(
             {&buffer, offset, {bytes.begin(), bytes.end()}});
         return {BufferStatus::ready, {}};
@@ -421,7 +438,10 @@ public:
     std::size_t fail_depth_batch_call = 0U;
     std::size_t fail_buffer_call = 0U;
     BufferStatus fail_buffer_status = BufferStatus::allocation_failed;
+    std::size_t fail_update_call = 0U;
+    BufferStatus fail_update_status = BufferStatus::upload_failed;
     std::size_t buffer_calls = 0U;
+    std::size_t update_calls = 0U;
     std::size_t texture_calls = 0U;
     std::size_t depth_calls = 0U;
     std::size_t sampler_calls = 0U;
@@ -2143,16 +2163,46 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
     require(lighting.ok(), "reflection portable sky lighting evaluates");
     frame.frame_constants = lighting.frame_constants;
+    std::array<apex::scene::Matrix4, 3U> skeleton_transforms = {
+        value.document.scene.snapshot.nodes[0U].transform,
+        value.document.scene.snapshot.nodes[1U].transform,
+        value.document.scene.snapshot.nodes[2U].transform};
+    skeleton_transforms[1U][0U] =
+        std::numeric_limits<float>::quiet_NaN();
+    frame.skeleton_world_transforms = skeleton_transforms;
     Diagnostic diagnostic;
     require(prepared.viewport->drawAndPresent(device, target, frame,
                                               diagnostic) ==
-                WorkspaceViewportFrameStatus::ready &&
-                device.draw_calls == 7U && device.mip_calls == 1U &&
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "skeleton_overlay_update_transform_non_finite" &&
+                device.update_calls == 0U && device.draw_calls == 0U &&
+                device.mip_calls == 0U && device.present_calls == 0U,
+            "malformed skeleton pose fails before all six reflection faces");
+
+    skeleton_transforms[1U][0U] = 1.0F;
+    const auto refreshed = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    if (refreshed != WorkspaceViewportFrameStatus::ready)
+        throw std::runtime_error("animated reflection skeleton refresh: " +
+                                 diagnostic.code);
+    require(device.draw_calls == 7U && device.mip_calls == 1U &&
                 device.present_calls == 1U &&
                 device.mip_targets.front() == device.draw_targets.front() &&
                 device.overlay_counts ==
                     std::vector<std::size_t>({0U, 0U, 0U, 0U, 0U, 0U, 1U}),
             "six completed faces generate mips before the main frame and presentation");
+    require(device.overlay_buffers.size() == 1U,
+            "reflection captures exclude the main-frame skeleton buffer");
+    const auto skeleton_updates = std::count_if(
+        device.buffer_updates.begin(), device.buffer_updates.end(),
+        [&device](const FakeDevice::BufferUpdate& update) {
+            return update.buffer == device.overlay_buffers.front() &&
+                   update.bytes.size() ==
+                       14U * sizeof(OverlayLineVertex);
+        });
+    require(skeleton_updates == 1,
+            "reflection frame refreshes the skeleton once before capture");
 
     std::vector<std::string> expected_events;
     for (std::size_t face = 0U; face < texture_cube_face_count; ++face) {
@@ -3034,11 +3084,11 @@ void prepares_retains_and_toggles_recovered_skeleton_overlay() {
             dynamic_cast<const FakeBuffer*>(device.overlay_buffers[0U]);
         require(skeleton_buffer != nullptr &&
                     skeleton_buffer->info().description.mutability ==
-                        BufferMutability::immutable &&
+                        BufferMutability::mutable_data &&
                     device.overlay_vertex_counts[0U] == 14U &&
                     skeleton_buffer->bytes().size() ==
                         14U * sizeof(OverlayLineVertex),
-                "skeleton geometry is retained in one immutable backend buffer");
+                "skeleton geometry is retained in one mutable backend buffer");
         std::array<OverlayLineVertex, 14U> vertices{};
         std::memcpy(vertices.data(), skeleton_buffer->bytes().data(),
                     skeleton_buffer->bytes().size());
@@ -3056,12 +3106,116 @@ void prepares_retains_and_toggles_recovered_skeleton_overlay() {
                         apex::render::skeleton_overlay_selected_connector_color,
                 "viewport preserves recovered world positions and selected connector color");
 
-        frame.skeleton_overlay_visible = false;
+        const auto prepared_buffer_calls = device.buffer_calls;
+        std::array<apex::scene::Matrix4, 3U> transforms = {
+            nodes[0U].transform, nodes[1U].transform, nodes[2U].transform};
+        transforms[0U][12U] = 20.0F;
+        transforms[0U][13U] = 21.0F;
+        transforms[0U][14U] = 22.0F;
+        transforms[1U][12U] = 11.0F;
+        transforms[1U][13U] = 12.0F;
+        transforms[1U][14U] = 13.0F;
+        transforms[2U][12U] = 14.0F;
+        transforms[2U][13U] = 15.0F;
+        transforms[2U][14U] = 16.0F;
+        frame.skeleton_world_transforms = transforms;
+        frame.selection_axis_world = transforms[1U];
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.buffer_calls == prepared_buffer_calls &&
+                    device.overlay_counts ==
+                        std::vector<std::size_t>({2U, 2U}) &&
+                    device.overlay_buffers[2U] == skeleton_buffer,
+                "animated skeleton refresh reuses the retained backend buffer");
+
+        std::array<OverlayLineVertex, 14U> refreshed_vertices{};
+        std::memcpy(refreshed_vertices.data(), skeleton_buffer->bytes().data(),
+                    skeleton_buffer->bytes().size());
+        require(refreshed_vertices[0U].position ==
+                        std::array<float, 3U>{20.03F, 21.0F, 22.0F} &&
+                    refreshed_vertices[12U].position ==
+                        std::array<float, 3U>{11.0F, 12.0F, 13.0F} &&
+                    refreshed_vertices[13U].position ==
+                        std::array<float, 3U>{14.0F, 15.0F, 16.0F} &&
+                    refreshed_vertices[12U].color ==
+                        apex::render::skeleton_overlay_selected_connector_color &&
+                    refreshed_vertices[13U].color ==
+                        apex::render::skeleton_overlay_selected_connector_color,
+                "animated skeleton refresh uses current world positions and retained colors");
+        const auto skeleton_upload = std::find_if(
+            device.buffer_updates.rbegin(), device.buffer_updates.rend(),
+            [skeleton_buffer](const FakeDevice::BufferUpdate& update) {
+                return update.buffer == skeleton_buffer;
+            });
+        require(skeleton_upload != device.buffer_updates.rend() &&
+                    skeleton_upload->offset == 0U &&
+                    skeleton_upload->bytes.size() ==
+                        14U * sizeof(OverlayLineVertex),
+                "animated skeleton refresh uploads the complete retained line list once");
+
+        const auto stable_bytes = skeleton_buffer->bytes();
+        const auto stable_update_calls = device.update_calls;
+        const auto stable_draw_calls = device.draw_calls;
+        const auto stable_present_calls = device.present_calls;
+        frame.skeleton_world_transforms =
+            std::span<const apex::scene::Matrix4>(transforms).first(2U);
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_skeleton_transform_count_invalid" &&
+                    device.update_calls == stable_update_calls &&
+                    device.draw_calls == stable_draw_calls &&
+                    device.present_calls == stable_present_calls &&
+                    skeleton_buffer->bytes() == stable_bytes,
+                "truncated animated skeleton pose fails before upload or rendering");
+
+        frame.skeleton_world_transforms = transforms;
+        transforms[2U][0U] = std::numeric_limits<float>::quiet_NaN();
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "skeleton_overlay_update_transform_non_finite" &&
+                    device.update_calls == stable_update_calls &&
+                    device.draw_calls == stable_draw_calls &&
+                    device.present_calls == stable_present_calls &&
+                    skeleton_buffer->bytes() == stable_bytes,
+                "non-finite animated skeleton pose fails atomically");
+
+        transforms[2U][0U] = 1.0F;
+        transforms[2U][12U] = 24.0F;
+        frame.skeleton_world_transforms = transforms;
+        device.fail_update_call = device.update_calls + 1U;
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::execution_failed &&
+                    diagnostic.code == "fake_buffer_update_failed" &&
+                    device.draw_calls == stable_draw_calls &&
+                    device.present_calls == stable_present_calls &&
+                    skeleton_buffer->bytes() == stable_bytes,
+                "failed animated skeleton upload prevents rendering and preserves the active pose");
+
+        device.fail_update_call = 0U;
+        transforms[2U][12U] = 34.0F;
+        frame.skeleton_world_transforms = transforms;
         require(prepared.viewport->drawAndPresent(
                     device, target, frame, diagnostic) ==
                     WorkspaceViewportFrameStatus::ready &&
                     device.overlay_counts ==
-                        std::vector<std::size_t>({2U, 1U}),
+                        std::vector<std::size_t>({2U, 2U, 2U}) &&
+                    device.overlay_buffers[4U] == skeleton_buffer,
+                "animated skeleton recovers after an upload failure");
+
+        frame.skeleton_overlay_visible = false;
+        frame.skeleton_world_transforms = {};
+        frame.selection_axis_world.reset();
+        require(prepared.viewport->drawAndPresent(
+                    device, target, frame, diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.overlay_counts ==
+                        std::vector<std::size_t>({2U, 2U, 2U, 1U}),
                 "frame override hides the retained skeleton without rebuilding it");
     }
 }
@@ -3117,6 +3271,21 @@ void rejects_malformed_skeleton_viewport_inputs_before_allocation() {
                 diagnostic.code == "workspace_viewport_skeleton_unprepared" &&
                 ordinary_device.draw_calls == 0U,
             "frame override cannot enable an unprepared skeleton overlay");
+
+    frame.skeleton_overlay_visible.reset();
+    const std::array<apex::scene::Matrix4, 3U> transforms = {
+        apex::scene::identity_matrix, apex::scene::identity_matrix,
+        apex::scene::identity_matrix};
+    frame.skeleton_world_transforms = transforms;
+    require(prepared.viewport->drawAndPresent(
+                ordinary_device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_skeleton_transforms_unprepared" &&
+                ordinary_device.update_calls == 0U &&
+                ordinary_device.draw_calls == 0U &&
+                ordinary_device.present_calls == 0U,
+            "frame transforms cannot refresh an unprepared skeleton overlay");
 }
 
 void draws_selected_axis_inside_the_scene_batch() {

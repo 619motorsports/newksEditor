@@ -391,6 +391,10 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared skeleton state. A true value requires retained
     // skeleton geometry and the authoring overlay pipeline.
     std::optional<bool> skeleton_overlay_visible;
+    // Optional current world transforms in prepared scene-node order. The
+    // viewport borrows this span only for the synchronous draw and refreshes
+    // retained skeleton positions without changing topology or colors.
+    std::span<const apex::scene::Matrix4> skeleton_world_transforms{};
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
@@ -599,6 +603,13 @@ private:
         bool visible = true;
         std::unique_ptr<render::Buffer> vertex_buffer;
         std::uint32_t vertex_count = 0U;
+        std::size_t node_count = 0U;
+        std::vector<render::OverlayLineVertex> vertices;
+        // Preallocated so a failed upload leaves the active CPU pose and GPU
+        // buffer coherent. Successful uploads swap these vectors.
+        std::vector<render::OverlayLineVertex> staging_vertices;
+        std::vector<render::SkeletonOverlayResult::PositionSource>
+            position_sources;
     };
 
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult

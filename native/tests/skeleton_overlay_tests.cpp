@@ -1,5 +1,6 @@
 #include "apex/render/skeleton_overlay.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -14,6 +15,17 @@ namespace {
 
 void require(const bool condition, const std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
+}
+
+bool same_vertices(
+    const std::span<const apex::render::OverlayLineVertex> first,
+    const std::span<const apex::render::OverlayLineVertex> second) {
+    return first.size() == second.size() &&
+           std::equal(first.begin(), first.end(), second.begin(),
+                      [](const auto& left, const auto& right) {
+                          return left.position == right.position &&
+                                 left.color == right.color;
+                      });
 }
 
 using Node = apex::render::SkeletonOverlayNode;
@@ -32,7 +44,8 @@ void exact_native_marker_and_connector_vertices() {
         node({4.0F, 5.0F, 6.0F}),
     };
     const auto result = apex::render::build_skeleton_overlay(nodes, 0U);
-    require(result.ok() && result.vertices.size() == 8U,
+    require(result.ok() && result.vertices.size() == 8U &&
+                result.position_sources.size() == result.vertices.size(),
             "native marker plus connector has eight vertices");
     const auto white = apex::render::skeleton_overlay_marker_color;
     const auto magenta = apex::render::skeleton_overlay_connector_color;
@@ -60,6 +73,60 @@ void exact_native_marker_and_connector_vertices() {
     require(vertices[6U].color == magenta &&
                 vertices[7U].color == magenta,
             "unselected skeleton connectors use the recovered magenta color");
+}
+
+void refreshes_world_positions_atomically_without_changing_colors() {
+    const std::array<std::uint32_t, 1U> root_children = {1U};
+    const std::array<Node, 2U> nodes = {
+        node({1.0F, 2.0F, 3.0F}, root_children),
+        node({4.0F, 5.0F, 6.0F}),
+    };
+    auto result = apex::render::build_skeleton_overlay(nodes, 0U);
+    require(result.ok(), "refresh fixture builds");
+    const auto original = result.vertices;
+    std::array<apex::scene::Matrix4, 2U> transforms = {
+        apex::scene::identity_matrix, apex::scene::identity_matrix};
+    transforms[0U][12U] = 10.0F;
+    transforms[0U][13U] = 20.0F;
+    transforms[0U][14U] = 30.0F;
+    transforms[1U][12U] = 40.0F;
+    transforms[1U][13U] = 50.0F;
+    transforms[1U][14U] = 60.0F;
+    apex::render::Diagnostic diagnostic;
+    require(apex::render::update_skeleton_overlay_positions(
+                result.vertices, result.position_sources, transforms,
+                diagnostic) ==
+                apex::render::SkeletonOverlayUpdateStatus::ready &&
+                result.vertices[0U].position ==
+                    std::array<float, 3U>{10.03F, 20.0F, 30.0F} &&
+                result.vertices[6U].position ==
+                    std::array<float, 3U>{10.0F, 20.0F, 30.0F} &&
+                result.vertices[7U].position ==
+                    std::array<float, 3U>{40.0F, 50.0F, 60.0F} &&
+                result.vertices[0U].color == original[0U].color &&
+                result.vertices[7U].color == original[7U].color,
+            "refresh uses current world translations and preserves colors");
+
+    const auto refreshed = result.vertices;
+    transforms[1U][0U] = std::numeric_limits<float>::quiet_NaN();
+    require(apex::render::update_skeleton_overlay_positions(
+                result.vertices, result.position_sources, transforms,
+                diagnostic) ==
+                apex::render::SkeletonOverlayUpdateStatus::invalid_request &&
+                diagnostic.code ==
+                    "skeleton_overlay_update_transform_non_finite" &&
+                same_vertices(result.vertices, refreshed),
+            "non-finite refresh input leaves every vertex unchanged");
+
+    transforms[1U][0U] = 1.0F;
+    auto invalid_sources = result.position_sources;
+    invalid_sources.back().node = 2U;
+    require(apex::render::update_skeleton_overlay_positions(
+                result.vertices, invalid_sources, transforms, diagnostic) ==
+                apex::render::SkeletonOverlayUpdateStatus::invalid_request &&
+                diagnostic.code == "skeleton_overlay_update_source_invalid" &&
+                same_vertices(result.vertices, refreshed),
+            "out-of-range refresh binding is rejected atomically");
 }
 
 void applies_recovered_selected_connector_color() {
@@ -210,6 +277,7 @@ void rejects_cycles_duplicates_depth_and_counts() {
 int main() {
     try {
         exact_native_marker_and_connector_vertices();
+        refreshes_world_positions_atomically_without_changing_colors();
         applies_recovered_selected_connector_color();
         preserves_child_order_and_filters_mesh_connectors();
         rejects_malformed_and_nonfinite_input_atomically();

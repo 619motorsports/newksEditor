@@ -156,7 +156,7 @@ buildStockNativeFrame(
     const auto reject = [](const char* code, const char* message) {
         return render::SkeletonOverlayResult{
             render::SkeletonOverlayStatus::invalid_request,
-            {code, message}, {}};
+            {code, message}, {}, {}};
     };
     if (scene.nodes.empty() || scene.root == apex::scene::invalid_node_id ||
         static_cast<std::size_t>(scene.root) >= scene.nodes.size()) {
@@ -1860,6 +1860,27 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             "A frame cannot show a skeleton overlay that was not prepared");
         return WorkspaceViewportFrameStatus::invalid;
     }
+    if (!request.skeleton_world_transforms.empty()) {
+        if (!skeleton_overlay_.has_value()) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_skeleton_transforms_unprepared",
+                "Skeleton world transforms require a prepared skeleton overlay");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        auto& skeleton = *skeleton_overlay_;
+        if (request.skeleton_world_transforms.size() != skeleton.node_count) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_skeleton_transform_count_invalid",
+                "Skeleton world transforms must match the prepared scene-node count");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        if (render::update_skeleton_overlay_positions(
+                skeleton.staging_vertices, skeleton.position_sources,
+                request.skeleton_world_transforms, output_diagnostic) !=
+            render::SkeletonOverlayUpdateStatus::ready) {
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+    }
     if (request.selection_axis_world.has_value() &&
         (authoring_overlay_pipeline_ == std::nullopt ||
          selection_axis_buffer_ == nullptr ||
@@ -2212,6 +2233,32 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                        "A selected-mesh elapsed time requires prepared "
                        "highlight resources");
         return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (!request.skeleton_world_transforms.empty()) {
+        auto& skeleton = *skeleton_overlay_;
+        if (skeleton.vertex_buffer != nullptr &&
+            !skeleton.staging_vertices.empty()) {
+            const auto bytes =
+                std::as_bytes(std::span(skeleton.staging_vertices));
+            const auto updated =
+                device.update_buffer(*skeleton.vertex_buffer, 0U, bytes);
+            if (!updated.ok()) {
+                output_diagnostic = updated.diagnostic;
+                switch (updated.status) {
+                case render::BufferStatus::invalid_description:
+                    return WorkspaceViewportFrameStatus::invalid;
+                case render::BufferStatus::unsupported:
+                    return WorkspaceViewportFrameStatus::unsupported;
+                case render::BufferStatus::allocation_failed:
+                case render::BufferStatus::upload_failed:
+                    return WorkspaceViewportFrameStatus::execution_failed;
+                case render::BufferStatus::ready:
+                    break;
+                }
+                return WorkspaceViewportFrameStatus::execution_failed;
+            }
+        }
+        skeleton.vertices.swap(skeleton.staging_vertices);
     }
     if (selected_mesh_pipeline_.has_value()) {
         if (selected_mesh_color_buffer_ == nullptr) {
@@ -4239,13 +4286,18 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 resources.visible = request.skeleton_overlay->visible;
                 resources.vertex_count = static_cast<std::uint32_t>(
                     skeleton_geometry->vertices.size());
+                resources.node_count = document.scene.snapshot.nodes.size();
                 if (!skeleton_geometry->vertices.empty() &&
                     !create_overlay_buffer(
                         std::as_bytes(
                             std::span(skeleton_geometry->vertices)),
-                        render::BufferMutability::immutable,
+                        render::BufferMutability::mutable_data,
                         resources.vertex_buffer))
                     return result;
+                resources.vertices = std::move(skeleton_geometry->vertices);
+                resources.staging_vertices = resources.vertices;
+                resources.position_sources =
+                    std::move(skeleton_geometry->position_sources);
                 skeleton_overlay = std::move(resources);
             }
 

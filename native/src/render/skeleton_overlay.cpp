@@ -1,5 +1,6 @@
 #include "apex/render/skeleton_overlay.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -22,7 +23,7 @@ struct WalkFrame {
 [[nodiscard]] SkeletonOverlayResult failure(
     const SkeletonOverlayStatus status, const char* code,
     const char* message) {
-    return {status, {code, message}, {}};
+    return {status, {code, message}, {}, {}};
 }
 
 [[nodiscard]] bool finite_translation(
@@ -55,31 +56,41 @@ struct WalkFrame {
            left > std::numeric_limits<std::size_t>::max() / right;
 }
 
-void emit_vertex(std::vector<OverlayLineVertex>& output,
+void emit_vertex(SkeletonOverlayResult& output,
                  const std::array<float, 3U>& position,
-                 const std::array<float, 3U>& color) {
-    output.push_back({position, color});
+                 const std::array<float, 3U>& color,
+                 const std::uint32_t node,
+                 const std::array<float, 3U>& offset) {
+    output.vertices.push_back({position, color});
+    output.position_sources.push_back({node, offset});
 }
 
-void emit_marker(std::vector<OverlayLineVertex>& output,
+void emit_marker(SkeletonOverlayResult& output,
+                 const std::uint32_t node,
                  const std::array<float, 3U>& position) {
     std::array<float, 3U> endpoint = position;
     endpoint[0U] = position[0U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {skeleton_overlay_marker_half_extent, 0.0F, 0.0F});
     endpoint[0U] = position[0U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {-skeleton_overlay_marker_half_extent, 0.0F, 0.0F});
 
     endpoint = position;
     endpoint[1U] = position[1U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {0.0F, skeleton_overlay_marker_half_extent, 0.0F});
     endpoint[1U] = position[1U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {0.0F, -skeleton_overlay_marker_half_extent, 0.0F});
 
     endpoint = position;
     endpoint[2U] = position[2U] + skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {0.0F, 0.0F, skeleton_overlay_marker_half_extent});
     endpoint[2U] = position[2U] - skeleton_overlay_marker_half_extent;
-    emit_vertex(output, endpoint, skeleton_overlay_marker_color);
+    emit_vertex(output, endpoint, skeleton_overlay_marker_color, node,
+                {0.0F, 0.0F, -skeleton_overlay_marker_half_extent});
 }
 
 SkeletonOverlayResult build_skeleton_overlay_impl(
@@ -222,11 +233,13 @@ SkeletonOverlayResult build_skeleton_overlay_impl(
     SkeletonOverlayResult result;
     result.status = SkeletonOverlayStatus::ready;
     result.vertices.reserve(marker_vertices + connector_vertices);
+    result.position_sources.reserve(marker_vertices + connector_vertices);
     while (!stack.empty()) {
         WalkFrame& frame = stack.back();
         const SkeletonOverlayNode& node = nodes[frame.node];
         if (frame.next_child == 0U && !node.children.empty()) {
-            emit_marker(result.vertices, node.world_translation);
+            emit_marker(result, static_cast<std::uint32_t>(frame.node),
+                        node.world_translation);
         }
         if (frame.next_child == node.children.size()) {
             stack.pop_back();
@@ -240,10 +253,10 @@ SkeletonOverlayResult build_skeleton_overlay_impl(
                 frame.node == selected_node
                     ? skeleton_overlay_selected_connector_color
                     : skeleton_overlay_connector_color;
-            emit_vertex(result.vertices, node.world_translation,
-                        connector_color);
-            emit_vertex(result.vertices, child.world_translation,
-                        connector_color);
+            emit_vertex(result, node.world_translation, connector_color,
+                        static_cast<std::uint32_t>(frame.node), {});
+            emit_vertex(result, child.world_translation, connector_color,
+                        child_id, {});
         }
         // All children recurse, including mesh and skinned-mesh nodes. Only
         // their connector was filtered above, matching the native walk.
@@ -269,6 +282,72 @@ SkeletonOverlayResult build_skeleton_overlay(
     const std::uint32_t selected_node,
     const SkeletonOverlayLimits limits) {
     return build_skeleton_overlay_impl(nodes, root, selected_node, limits);
+}
+
+SkeletonOverlayUpdateStatus update_skeleton_overlay_positions(
+    const std::span<OverlayLineVertex> vertices,
+    const std::span<const SkeletonOverlayResult::PositionSource>
+        position_sources,
+    const std::span<const apex::scene::Matrix4> world_transforms,
+    Diagnostic& diagnostic) noexcept {
+    if ((vertices.data() == nullptr && !vertices.empty()) ||
+        (position_sources.data() == nullptr && !position_sources.empty()) ||
+        (world_transforms.data() == nullptr && !world_transforms.empty())) {
+        diagnostic = {
+            "skeleton_overlay_update_span_null",
+            "A non-empty skeleton refresh span must have storage"};
+        return SkeletonOverlayUpdateStatus::invalid_request;
+    }
+    if (vertices.size() != position_sources.size()) {
+        diagnostic = {
+            "skeleton_overlay_update_size_mismatch",
+            "Skeleton vertices and position sources must have equal counts"};
+        return SkeletonOverlayUpdateStatus::invalid_request;
+    }
+    if (world_transforms.empty()) {
+        diagnostic = {
+            "skeleton_overlay_update_transforms_empty",
+            "Skeleton position refresh requires world transforms"};
+        return SkeletonOverlayUpdateStatus::invalid_request;
+    }
+    for (const auto& transform : world_transforms) {
+        if (!std::all_of(transform.begin(), transform.end(), [](float value) {
+                return std::isfinite(value);
+            })) {
+            diagnostic = {
+                "skeleton_overlay_update_transform_non_finite",
+                "Skeleton world transforms must contain only finite values"};
+            return SkeletonOverlayUpdateStatus::invalid_request;
+        }
+    }
+    for (const auto& source : position_sources) {
+        if (static_cast<std::size_t>(source.node) >= world_transforms.size()) {
+            diagnostic = {
+                "skeleton_overlay_update_source_invalid",
+                "A skeleton position source falls outside the transform span"};
+            return SkeletonOverlayUpdateStatus::invalid_request;
+        }
+        const auto& transform = world_transforms[source.node];
+        for (std::size_t component = 0U; component < 3U; ++component) {
+            if (!std::isfinite(transform[12U + component] +
+                               source.offset[component])) {
+                diagnostic = {
+                    "skeleton_overlay_update_position_non_finite",
+                    "A refreshed skeleton position is not finite"};
+                return SkeletonOverlayUpdateStatus::invalid_request;
+            }
+        }
+    }
+    for (std::size_t index = 0U; index < vertices.size(); ++index) {
+        const auto& source = position_sources[index];
+        const auto& transform = world_transforms[source.node];
+        for (std::size_t component = 0U; component < 3U; ++component) {
+            vertices[index].position[component] =
+                transform[12U + component] + source.offset[component];
+        }
+    }
+    diagnostic = {};
+    return SkeletonOverlayUpdateStatus::ready;
 }
 
 } // namespace apex::render
