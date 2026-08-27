@@ -4569,7 +4569,11 @@ public:
                  D3D12_RESOURCE_STATES state,
                  bool initialized)
         : context_(std::move(context)), resource_(std::move(resource)), info_({description}),
-          state_(state), initialized_(initialized) {}
+          state_(state), initialized_(initialized),
+          base_mip_initialized_(
+              static_cast<std::size_t>(
+                  texture_physical_array_layers(description)),
+              0U) {}
 
     ~D3D12Texture() override {
         if (context_) context_->wait_idle();
@@ -4583,6 +4587,12 @@ public:
         return &state_;
     }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
+    [[nodiscard]] bool base_mip_initialized() const noexcept {
+        return !base_mip_initialized_.empty() &&
+               std::all_of(base_mip_initialized_.begin(),
+                           base_mip_initialized_.end(),
+                           [](std::uint8_t value) { return value != 0U; });
+    }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
@@ -4592,6 +4602,16 @@ public:
                           info_.description.access_policy),
             diagnostic);
         initialized_ = initialized_ || uploaded;
+        if (uploaded) {
+            for (const TextureUpload& upload : uploads.subresources) {
+                if (upload.mip_level != 0U) continue;
+                const std::size_t layer = static_cast<std::size_t>(
+                    texture_upload_physical_array_layer(
+                        info_.description, upload));
+                if (layer < base_mip_initialized_.size())
+                    base_mip_initialized_[layer] = 1U;
+            }
+        }
         return uploaded;
     }
 
@@ -4601,6 +4621,8 @@ public:
         const bool cleared = clear_texture_readback(context_, resource_.Get(), info_.description, request,
                                                     state_, output, diagnostic);
         initialized_ = initialized_ || cleared;
+        if (cleared && !base_mip_initialized_.empty())
+            base_mip_initialized_[0U] = 1U;
         return cleared;
     }
 
@@ -4610,6 +4632,8 @@ public:
         const bool drawn = draw_graphics_and_readback(context_, resource_.Get(), info_.description, request,
                                                       state_, output, diagnostic);
         initialized_ = initialized_ || drawn;
+        if (drawn && !base_mip_initialized_.empty())
+            base_mip_initialized_[0U] = 1U;
         return drawn;
     }
 
@@ -4629,6 +4653,8 @@ public:
             index_buffer.resource(), state_, vertex_buffer.state(), index_buffer.state(), depth_attachment,
             output, diagnostic);
         initialized_ = initialized_ || drawn;
+        if (drawn && !base_mip_initialized_.empty())
+            base_mip_initialized_[0U] = 1U;
         return drawn;
     }
 
@@ -4667,6 +4693,16 @@ public:
             resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
             output, diagnostic);
         initialized_ = initialized_ || drawn;
+        if (drawn) {
+            const std::size_t layer = static_cast<std::size_t>(
+                texture_target_physical_array_layer(
+                    info_.description, batch.target_subresource));
+            if (layer < base_mip_initialized_.size())
+                base_mip_initialized_[layer] = 1U;
+            if (resolve_target != nullptr &&
+                !resolve_target->base_mip_initialized_.empty())
+                resolve_target->base_mip_initialized_[0U] = 1U;
+        }
         return drawn;
     }
 
@@ -4676,6 +4712,7 @@ private:
     TextureInfo info_;
     D3D12_RESOURCE_STATES state_;
     bool initialized_ = false;
+    std::vector<std::uint8_t> base_mip_initialized_;
 };
 
 D3D12_RESOURCE_STATES d3d12_texture_state(
@@ -6466,6 +6503,8 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native(
         if (depth_cleared) depth_attachment->set_cleared();
     }
     initialized_ = true;
+    if (!base_mip_initialized_.empty())
+        base_mip_initialized_[0U] = 1U;
     return true;
 }
 
@@ -6570,7 +6609,16 @@ bool D3D12Texture::draw_stock_ks_per_pixel_native_batch(
         native_context, diagnostic);
     if (drawn) {
         initialized_ = true;
-        if (resolve_target != nullptr) resolve_target->initialized_ = true;
+        const std::size_t layer = static_cast<std::size_t>(
+            texture_target_physical_array_layer(
+                info_.description, batch.target_subresource));
+        if (layer < base_mip_initialized_.size())
+            base_mip_initialized_[layer] = 1U;
+        if (resolve_target != nullptr) {
+            resolve_target->initialized_ = true;
+            if (!resolve_target->base_mip_initialized_.empty())
+                resolve_target->base_mip_initialized_[0U] = 1U;
+        }
     }
     return drawn;
 }
@@ -7044,6 +7092,35 @@ public:
         return d3d_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    TextureUpdateResult generate_texture_mips(Texture& texture) override {
+        Diagnostic diagnostic;
+        const TextureStatus validation =
+            validate_texture_mip_generation_description(
+                texture.info().description, diagnostic);
+        if (validation != TextureStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (texture.backend() != Backend::D3D12)
+            return {TextureStatus::unsupported,
+                    {"texture_backend_mismatch",
+                     "The texture belongs to another graphics backend"}};
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr)
+            return {TextureStatus::unsupported,
+                    {"texture_type_unsupported",
+                     "The D3D12 device received an unknown texture handle"}};
+        if (d3d_texture->context() != context_.get())
+            return {TextureStatus::unsupported,
+                    {"texture_context_mismatch",
+                     "The texture belongs to another D3D12 device"}};
+        if (!d3d_texture->base_mip_initialized())
+            return {TextureStatus::invalid_description,
+                    {"texture_mip_generation_base_uninitialized",
+                     "Texture mip generation requires initialized mip-zero data for every physical layer"}};
+        return {TextureStatus::unsupported,
+                {"d3d12_texture_mip_generation_shader_pending",
+                 "D3D12 filtered mip generation requires the pending fullscreen downsample shader path"}};
     }
 
     TextureClearReadbackResult clear_texture_and_readback(
