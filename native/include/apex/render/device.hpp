@@ -680,6 +680,19 @@ struct KsPerPixelMaterialConstants {
 static_assert(sizeof(KsPerPixelMaterialConstants) == 80U);
 static_assert(std::is_trivially_copyable_v<KsPerPixelMaterialConstants>);
 
+// Portable semantic projection of the source-evidenced MultiMap reflection
+// controls. This is intentionally not labeled as the recovered native b5
+// layout because base and NMDetail packages place isAdditive differently.
+struct KsPerPixelMultiMapReflectionConstants {
+    // fresnelC, fresnelEXP, fresnelMaxLevel, isAdditive. Values 1 and 2
+    // select recovered special branches; every other finite value uses the
+    // recovered default lerp branch.
+    std::array<float, 4> fresnel_and_additive = {0.0F, 5.0F, 0.05F, 0.0F};
+};
+
+static_assert(sizeof(KsPerPixelMultiMapReflectionConstants) == 16U);
+static_assert(std::is_trivially_copyable_v<KsPerPixelMultiMapReflectionConstants>);
+
 // Per-frame lighting values follow the production WebGL ksPerPixel binder.
 // Static-scene execution derives camera_position from its CameraFrame so
 // view-dependent lighting cannot use stale duplicate state. The first 64
@@ -703,6 +716,11 @@ inline constexpr std::uint32_t portable_material_constant_bytes = 80U;
 inline constexpr std::uint32_t portable_material_buffer_view_bytes = 256U;
 inline constexpr std::uint32_t portable_frame_constant_bytes = 128U;
 inline constexpr std::uint32_t portable_frame_buffer_view_bytes = 256U;
+inline constexpr std::uint32_t portable_multimap_reflection_constant_bytes = 16U;
+inline constexpr std::uint32_t portable_multimap_reflection_buffer_view_bytes = 256U;
+inline constexpr std::uint32_t portable_multimap_cube_texture_binding = 21U;
+inline constexpr std::uint32_t portable_multimap_cube_sampler_binding = 22U;
+inline constexpr std::uint32_t portable_multimap_reflection_constants_binding = 23U;
 
 struct IndexedMaterialBufferBinding {
     // Non-owning. Keep this buffer alive until the synchronous draw returns.
@@ -720,6 +738,15 @@ struct IndexedFrameBufferBinding {
     const Buffer* buffer = nullptr;
     std::uint64_t offset_bytes = 0U;
     std::uint32_t range_bytes = 0U;
+};
+
+struct IndexedMultiMapReflectionBinding {
+    // Frame-owned cubemap and explicit portable sampler. Native installed
+    // packages instead use t10 and variant-dependent s0/s5.
+    IndexedSampledTextureBinding cube{};
+    // Portable binding 23 uses one D3D12-aligned 256-byte view whose first
+    // 16 bytes contain KsPerPixelMultiMapReflectionConstants.
+    IndexedMaterialBufferBinding constants{};
 };
 
 enum class IndexedPortableResourceLayout : std::uint8_t {
@@ -756,6 +783,11 @@ enum class IndexedPortableResourceLayout : std::uint8_t {
 // 16-18, one sampler at 19, and one uniform buffer at 20. The extension is
 // orthogonal to the classified material layout.
 [[nodiscard]] bool pipeline_declares_directional_shadow_receiver(
+    const PipelineProgram& pipeline) noexcept;
+
+// Portable translated extension at set 0/bindings 21-23. It deliberately
+// does not claim the recovered native t10/s0-or-s5/b5 register ABI.
+[[nodiscard]] bool pipeline_declares_multimap_reflection(
     const PipelineProgram& pipeline) noexcept;
 
 inline constexpr std::uint32_t max_indexed_static_mesh_vertices = 10'000'000U;
@@ -839,6 +871,7 @@ struct IndexedStaticMeshDrawRequest {
     IndexedMaterialBufferBinding material_binding{};
     IndexedFrameBufferBinding frame_binding{};
     IndexedDirectionalShadowBinding directional_shadow_binding{};
+    IndexedMultiMapReflectionBinding multimap_reflection_binding{};
     const StockKsPerPixelNativeDrawBinding* stock_ks_per_pixel_native = nullptr;
     const StockKsPerPixelVulkanAbiProbeDrawBinding*
         stock_ks_per_pixel_vulkan_abi_probe = nullptr;

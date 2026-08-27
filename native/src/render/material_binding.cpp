@@ -697,14 +697,6 @@ resolve_ks_per_pixel_multimap_reflection_constants(
         return result;
     }
 
-    const float additive = result.constants.fresnel_and_additive[3U];
-    if (additive != 0.0F && additive != 1.0F && additive != 2.0F) {
-        result.diagnostic = {
-            "ks_per_pixel_multimap_is_additive_unsupported", "isAdditive",
-            "The recovered MultiMap reflection path accepts isAdditive branch 0, 1, or 2"};
-        return result;
-    }
-
     result.status = KsPerPixelMultiMapReflectionResolveStatus::ready;
     return result;
 }

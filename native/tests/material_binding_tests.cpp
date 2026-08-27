@@ -679,16 +679,13 @@ void resolves_multimap_reflection_controls_separately() {
                 nm_detail.constants.fresnel_and_additive[3U] == 2.0F,
             "AT NMDetail uses the same portable reflection semantics without claiming native row identity");
 
-    MaterialBinding invalid_additive = binding;
-    invalid_additive.properties.at("isadditive").scalar = 3.0F;
-    const auto unsupported =
-        resolve_ks_per_pixel_multimap_reflection_constants(invalid_additive);
-    require(!unsupported.ok() &&
-                unsupported.status ==
-                    KsPerPixelMultiMapReflectionResolveStatus::unsupported &&
-                unsupported.diagnostic.code ==
-                    "ks_per_pixel_multimap_is_additive_unsupported",
-            "unrecovered additive branches are rejected explicitly");
+    MaterialBinding default_branch = binding;
+    default_branch.properties.at("isadditive").scalar = 3.0F;
+    const auto default_result =
+        resolve_ks_per_pixel_multimap_reflection_constants(default_branch);
+    require(default_result.ok() &&
+                default_result.constants.fresnel_and_additive[3U] == 3.0F,
+            "finite non-special isAdditive values preserve the recovered default branch");
 
     MaterialBinding non_finite = binding;
     non_finite.properties.at("fresnelc").scalar =

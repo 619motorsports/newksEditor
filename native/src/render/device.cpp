@@ -913,6 +913,29 @@ bool pipeline_declares_directional_shadow_receiver(
     return std::all_of(found.begin(), found.end(), [](bool value) { return value; });
 }
 
+bool pipeline_declares_multimap_reflection(
+    const PipelineProgram& pipeline) noexcept {
+    std::array<bool, 3U> found{};
+    for (const PipelineResourceBinding& resource : pipeline.resources) {
+        if (resource.set != 0U ||
+            resource.binding < portable_multimap_cube_texture_binding ||
+            resource.binding > portable_multimap_reflection_constants_binding)
+            continue;
+        const std::size_t index =
+            resource.binding - portable_multimap_cube_texture_binding;
+        const PipelineResourceKind expected =
+            resource.binding == portable_multimap_cube_texture_binding
+                ? PipelineResourceKind::sampled_texture
+            : resource.binding == portable_multimap_cube_sampler_binding
+                ? PipelineResourceKind::sampler
+                : PipelineResourceKind::uniform_buffer;
+        if (resource.kind != expected || found[index]) return false;
+        found[index] = true;
+    }
+    return std::all_of(found.begin(), found.end(),
+                       [](const bool value) { return value; });
+}
+
 IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     const PipelineProgram& pipeline) noexcept {
     if (pipeline.resources.empty())
@@ -926,8 +949,20 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
         });
     if (has_receiver_range && !has_receiver)
         return IndexedPortableResourceLayout::unsupported;
+    const bool has_reflection = pipeline_declares_multimap_reflection(pipeline);
+    const bool has_reflection_range = std::any_of(
+        pipeline.resources.begin(), pipeline.resources.end(),
+        [](const PipelineResourceBinding& resource) {
+            return resource.set == 0U &&
+                   resource.binding >= portable_multimap_cube_texture_binding &&
+                   resource.binding <=
+                       portable_multimap_reflection_constants_binding;
+        });
+    if (has_reflection_range && !has_reflection)
+        return IndexedPortableResourceLayout::unsupported;
     const std::size_t material_resource_count =
-        pipeline.resources.size() - (has_receiver ? 5U : 0U);
+        pipeline.resources.size() - (has_receiver ? 5U : 0U) -
+        (has_reflection ? 3U : 0U);
     if (material_resource_count != 2U && material_resource_count != 3U &&
         material_resource_count != 4U && material_resource_count != 6U &&
         material_resource_count != 8U && material_resource_count != 12U &&
@@ -952,6 +987,11 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
     for (const PipelineResourceBinding& resource : pipeline.resources) {
         if (resource.set == 0U && resource.binding >= 16U &&
             resource.binding <= 20U && has_receiver)
+            continue;
+        if (resource.set == 0U &&
+            resource.binding >= portable_multimap_cube_texture_binding &&
+            resource.binding <= portable_multimap_reflection_constants_binding &&
+            has_reflection)
             continue;
         if (resource.set == 0U && resource.binding == 0U &&
             resource.kind == PipelineResourceKind::sampled_texture) {
@@ -1969,8 +2009,19 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     const bool has_shadow_range =
         request.directional_shadow_binding.constants_offset_bytes != 0U ||
         request.directional_shadow_binding.constants_range_bytes != 0U;
+    const bool has_reflection_cube =
+        request.multimap_reflection_binding.cube.texture != nullptr;
+    const bool has_reflection_sampler =
+        request.multimap_reflection_binding.cube.sampler != nullptr;
+    const bool has_reflection_constants =
+        request.multimap_reflection_binding.constants.buffer != nullptr;
+    const bool has_reflection_range =
+        request.multimap_reflection_binding.constants.offset_bytes != 0U ||
+        request.multimap_reflection_binding.constants.range_bytes != 0U;
     const bool shadow_declaration =
         pipeline_declares_directional_shadow_receiver(pipeline);
+    const bool reflection_declaration =
+        pipeline_declares_multimap_reflection(pipeline);
     const bool has_directional_shadow_binding =
         has_shadow_map || has_shadow_sampler || has_shadow_constants || has_shadow_range;
     // Check this before classifying the material layout. A partial receiver
@@ -1982,6 +2033,14 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     if (!shadow_declaration && has_directional_shadow_binding) {
         diagnostic = {"indexed_directional_shadow_binding_unexpected",
                       "A pipeline without the receiver extension cannot receive directional-shadow resources"};
+        return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (!reflection_declaration &&
+        (has_reflection_cube || has_reflection_sampler ||
+         has_reflection_constants || has_reflection_range)) {
+        diagnostic = {
+            "indexed_multimap_reflection_binding_unexpected",
+            "A pipeline without the portable MultiMap reflection extension cannot receive cubemap resources"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
     // The probe manifest was validated above. Use the resource-free control
@@ -2001,6 +2060,8 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             has_material_buffer || has_material_range ||
             has_frame_buffer || has_frame_range ||
             has_shadow_map || has_shadow_sampler || has_shadow_constants || has_shadow_range ||
+            has_reflection_cube || has_reflection_sampler ||
+            has_reflection_constants || has_reflection_range ||
             request.resource_authority != IndexedResourceAuthority::packet_contract) {
             diagnostic = {"indexed_resource_binding_unexpected",
                           "A resource-free pipeline cannot receive explicit material bindings"};
@@ -2045,6 +2106,12 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
+        if (reflection_declaration && !maps_declaration) {
+            diagnostic = {
+                "indexed_multimap_reflection_layout_unsupported",
+                "The portable MultiMap reflection extension requires the txMaps material layout"};
+            return IndexedStaticMeshDrawStatus::unsupported;
+        }
         const bool detail_declaration =
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_detail_stack_with_constants_and_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_normal_maps_damage_dust_with_constants_and_frame;
@@ -2078,6 +2145,19 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                           maps_declaration
                               ? "The portable txMaps ABI requires its maps texture and sampler"
                               : "The diffuse and normal ABIs cannot receive a maps texture or sampler"};
+            return IndexedStaticMeshDrawStatus::invalid_request;
+        }
+        if (reflection_declaration != has_reflection_cube ||
+            reflection_declaration != has_reflection_sampler ||
+            reflection_declaration != has_reflection_constants ||
+            (!reflection_declaration && has_reflection_range)) {
+            diagnostic = {
+                reflection_declaration
+                    ? "indexed_multimap_reflection_binding_missing"
+                    : "indexed_multimap_reflection_binding_unexpected",
+                reflection_declaration
+                    ? "The portable MultiMap reflection extension requires one cubemap, sampler, and constants buffer"
+                    : "A pipeline without the portable MultiMap reflection extension cannot receive cubemap resources"};
             return IndexedStaticMeshDrawStatus::invalid_request;
         }
         const bool has_detail_texture = request.detail_binding.texture != nullptr;
@@ -2305,6 +2385,108 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
                 shadow_range > constants_description.size_bytes - shadow_offset) {
                 diagnostic = {"indexed_directional_shadow_constants_range_invalid",
                               "Directional-shadow constants exceed the declared buffer size"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+        }
+        if (reflection_declaration) {
+            const Texture& cube =
+                *request.multimap_reflection_binding.cube.texture;
+            const Sampler& cube_sampler =
+                *request.multimap_reflection_binding.cube.sampler;
+            const Buffer& reflection_constants =
+                *request.multimap_reflection_binding.constants.buffer;
+            if (&cube == &texture) {
+                diagnostic = {
+                    "indexed_multimap_reflection_feedback_loop",
+                    "The color target cannot also be the reflection cubemap"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (cube.backend() != texture.backend() ||
+                cube_sampler.backend() != texture.backend() ||
+                reflection_constants.backend() != texture.backend()) {
+                diagnostic = {
+                    "indexed_multimap_reflection_backend_mismatch",
+                    "Reflection cubemap resources and the color target must use the same backend"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            const TextureDescription& cube_description = cube.info().description;
+            const auto cube_usage =
+                static_cast<std::uint32_t>(cube_description.usage);
+            if ((cube_usage &
+                 static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U) {
+                diagnostic = {
+                    "indexed_multimap_reflection_texture_usage_invalid",
+                    "The reflection cubemap requires sampled usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if ((cube_usage &
+                 static_cast<std::uint32_t>(TextureUsage::storage)) != 0U) {
+                diagnostic = {
+                    "indexed_multimap_reflection_texture_usage_unsupported",
+                    "The portable reflection path rejects storage cubemaps"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            if (cube_description.shape != TextureShape::texture_cube ||
+                cube_description.width == 0U ||
+                cube_description.width != cube_description.height ||
+                cube_description.mip_levels == 0U ||
+                cube_description.array_layers != 1U ||
+                cube_description.samples != 1U ||
+                !portable_sampled_color_format(cube_description.format, true) ||
+                (texture_format_is_compressed(cube_description.format) &&
+                 cube_description.mutability != TextureMutability::immutable)) {
+                diagnostic = {
+                    "indexed_multimap_reflection_texture_description_unsupported",
+                    "The portable reflection path requires one explicit single-sample square RGBA8, BGRA8, BC1, BC3, or BC7 cube"};
+                return IndexedStaticMeshDrawStatus::unsupported;
+            }
+            Diagnostic cube_sampler_diagnostic;
+            const SamplerStatus cube_sampler_status = validate_sampler_description(
+                cube_sampler.info().description, cube_sampler_diagnostic);
+            if (cube_sampler_status != SamplerStatus::ready) {
+                diagnostic = {
+                    cube_sampler_diagnostic.code.empty()
+                        ? "indexed_multimap_reflection_sampler_invalid"
+                        : "indexed_multimap_reflection_" +
+                              cube_sampler_diagnostic.code,
+                    cube_sampler_diagnostic.message};
+                return cube_sampler_status == SamplerStatus::unsupported
+                           ? IndexedStaticMeshDrawStatus::unsupported
+                           : IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (cube_sampler.info().description.compare !=
+                SamplerCompare::disabled) {
+                diagnostic = {
+                    "indexed_multimap_reflection_sampler_contract_invalid",
+                    "Portable reflection cubemap sampling requires comparison disabled"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            const BufferDescription& constants_description =
+                reflection_constants.info().description;
+            if (constants_description.usage != BufferUsage::uniform) {
+                diagnostic = {
+                    "indexed_multimap_reflection_constants_usage_invalid",
+                    "Reflection constants require exclusive uniform-buffer usage"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            const IndexedMaterialBufferBinding& constants =
+                request.multimap_reflection_binding.constants;
+            if (constants.offset_bytes %
+                        portable_multimap_reflection_buffer_view_bytes !=
+                    0U ||
+                constants.range_bytes !=
+                    portable_multimap_reflection_buffer_view_bytes) {
+                diagnostic = {
+                    "indexed_multimap_reflection_constants_alignment_invalid",
+                    "Reflection constants require a 256-byte aligned offset and 256-byte range"};
+                return IndexedStaticMeshDrawStatus::invalid_request;
+            }
+            if (constants.offset_bytes > constants_description.size_bytes ||
+                static_cast<std::uint64_t>(constants.range_bytes) >
+                    constants_description.size_bytes - constants.offset_bytes) {
+                diagnostic = {
+                    "indexed_multimap_reflection_constants_range_invalid",
+                    "Reflection constants exceed the declared buffer size"};
                 return IndexedStaticMeshDrawStatus::invalid_request;
             }
         }

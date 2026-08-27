@@ -200,19 +200,6 @@ struct KsPerPixelMaterialResolveResult {
     }
 };
 
-// Source-evidenced MultiMap reflection controls. This is a portable semantic
-// record, not a claim that every installed variant packs cbCarPaint b5 the
-// same way. In particular, isAdditive has a different native row between the
-// base and NMDetail families, so it remains separate from the existing
-// KsPerPixelMaterialConstants::fresnel alpha slot.
-struct KsPerPixelMultiMapReflectionConstants {
-    // fresnelC, fresnelEXP, fresnelMaxLevel, isAdditive (0, 1, or 2).
-    std::array<float, 4> fresnel_and_additive = {0.0F, 5.0F, 0.05F, 0.0F};
-};
-
-static_assert(sizeof(KsPerPixelMultiMapReflectionConstants) == 16U);
-static_assert(std::is_trivially_copyable_v<KsPerPixelMultiMapReflectionConstants>);
-
 enum class KsPerPixelMultiMapReflectionResolveStatus : std::uint8_t {
     ready,
     invalid_input,

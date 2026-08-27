@@ -1306,6 +1306,186 @@ void validates_portable_maps_contract() {
             "duplicate maps sampled binding alias rejected");
 }
 
+void validates_portable_multimap_reflection_contract() {
+    PipelineProgram pipeline = pipeline_fixture();
+    pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "diffuseTexture"},
+        {PipelineResourceKind::sampler, 0U, 1U, "diffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U, "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "normalTexture"},
+        {PipelineResourceKind::sampler, 0U, 5U, "normalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "mapsTexture"},
+        {PipelineResourceKind::sampler, 0U, 7U, "mapsSampler"},
+        {PipelineResourceKind::sampled_texture, 0U,
+         portable_multimap_cube_texture_binding, "reflectionCube"},
+        {PipelineResourceKind::sampler, 0U,
+         portable_multimap_cube_sampler_binding, "reflectionSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U,
+         portable_multimap_reflection_constants_binding,
+         "reflectionConstants"},
+    };
+    require(pipeline_declares_multimap_reflection(pipeline),
+            "complete portable MultiMap reflection extension recognized");
+    require(classify_indexed_portable_resource_layout(pipeline) ==
+                IndexedPortableResourceLayout::
+                    diffuse_normal_maps_with_constants_and_frame,
+            "reflection extension preserves the underlying maps layout");
+
+    DrawPacket packet = packet_fixture();
+    FakeTexture target(Backend::Vulkan, target_description());
+    FakeTexture diffuse(Backend::Vulkan, sampled_description());
+    FakeTexture normal(Backend::Vulkan, sampled_description());
+    FakeTexture maps(Backend::Vulkan, sampled_description());
+    TextureDescription cube_description = sampled_description();
+    cube_description.width = 4U;
+    cube_description.height = 4U;
+    cube_description.mip_levels = 3U;
+    cube_description.shape = TextureShape::texture_cube;
+    FakeTexture cube(Backend::Vulkan, cube_description);
+    FakeSampler diffuse_sampler(Backend::Vulkan);
+    FakeSampler normal_sampler(Backend::Vulkan);
+    FakeSampler maps_sampler(Backend::Vulkan);
+    FakeSampler cube_sampler(Backend::Vulkan);
+    FakeBuffer vertices(Backend::Vulkan,
+                        {132U, BufferUsage::vertex,
+                         BufferMemory::device_local,
+                         BufferMutability::immutable});
+    FakeBuffer indices(Backend::Vulkan,
+                       {6U, BufferUsage::index, BufferMemory::device_local,
+                        BufferMutability::immutable});
+    FakeBuffer material(Backend::Vulkan,
+                        {256U, BufferUsage::uniform,
+                         BufferMemory::host_visible,
+                         BufferMutability::immutable});
+    FakeBuffer frame(Backend::Vulkan,
+                     {256U, BufferUsage::uniform, BufferMemory::host_visible,
+                      BufferMutability::mutable_data});
+    FakeBuffer reflection(Backend::Vulkan,
+                          {512U, BufferUsage::uniform,
+                           BufferMemory::host_visible,
+                           BufferMutability::mutable_data});
+    auto request = request_fixture(packet, pipeline, vertices, indices);
+    request.resource_authority = IndexedResourceAuthority::explicit_bindings;
+    request.sampled_binding = {&diffuse, &diffuse_sampler};
+    request.normal_binding = {&normal, &normal_sampler};
+    request.maps_binding = {&maps, &maps_sampler};
+    request.material_binding = {
+        &material, 0U, portable_material_buffer_view_bytes};
+    request.frame_binding = {&frame, 0U, portable_frame_buffer_view_bytes};
+    request.multimap_reflection_binding = {
+        {&cube, &cube_sampler},
+        {&reflection, 256U,
+         portable_multimap_reflection_buffer_view_bytes}};
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::ready,
+            "explicit cube and padded reflection constants accepted");
+
+    request.multimap_reflection_binding.cube.texture = nullptr;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_binding_missing",
+            "partial reflection request binding rejected");
+    request.multimap_reflection_binding.cube.texture = &cube;
+
+    TextureDescription array_description = cube_description;
+    array_description.shape = TextureShape::texture_2d;
+    array_description.array_layers = texture_cube_face_count;
+    FakeTexture six_layer_array(Backend::Vulkan, array_description);
+    request.multimap_reflection_binding.cube.texture = &six_layer_array;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_texture_description_unsupported",
+            "ordinary six-layer arrays cannot masquerade as cubes");
+
+    TextureDescription non_square_description = cube_description;
+    non_square_description.height = 2U;
+    FakeTexture non_square_cube(Backend::Vulkan, non_square_description);
+    request.multimap_reflection_binding.cube.texture = &non_square_cube;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_texture_description_unsupported",
+            "non-square reflection cubes fail closed");
+    request.multimap_reflection_binding.cube.texture = &cube;
+
+    SamplerDescription comparison_description;
+    comparison_description.compare = SamplerCompare::less;
+    FakeSampler comparison_sampler(Backend::Vulkan, comparison_description);
+    request.multimap_reflection_binding.cube.sampler = &comparison_sampler;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_sampler_contract_invalid",
+            "comparison reflection sampler rejected");
+    request.multimap_reflection_binding.cube.sampler = &cube_sampler;
+
+    request.multimap_reflection_binding.constants.range_bytes = 16U;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_constants_alignment_invalid",
+            "unpadded reflection constants view rejected");
+    request.multimap_reflection_binding.constants.range_bytes =
+        portable_multimap_reflection_buffer_view_bytes;
+    request.multimap_reflection_binding.constants.offset_bytes = 512U;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_constants_range_invalid",
+            "out-of-bounds reflection constants view rejected");
+    request.multimap_reflection_binding.constants.offset_bytes = 256U;
+
+    FakeBuffer foreign_reflection(
+        Backend::D3D12,
+        {256U, BufferUsage::uniform, BufferMemory::host_visible,
+         BufferMutability::immutable});
+    request.multimap_reflection_binding.constants.buffer = &foreign_reflection;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_backend_mismatch",
+            "foreign reflection constants buffer rejected");
+    request.multimap_reflection_binding.constants.buffer = &reflection;
+
+    PipelineProgram partial = pipeline;
+    partial.resources.pop_back();
+    require(!pipeline_declares_multimap_reflection(partial) &&
+                classify_indexed_portable_resource_layout(partial) ==
+                    IndexedPortableResourceLayout::unsupported,
+            "partial reflection declaration rejected");
+    PipelineProgram duplicate = pipeline;
+    duplicate.resources.push_back(
+        {PipelineResourceKind::sampled_texture, 0U,
+         portable_multimap_cube_texture_binding, "duplicateReflectionCube"});
+    require(!pipeline_declares_multimap_reflection(duplicate) &&
+                classify_indexed_portable_resource_layout(duplicate) ==
+                    IndexedPortableResourceLayout::unsupported,
+            "duplicate reflection declaration rejected");
+
+    PipelineProgram no_maps = pipeline;
+    no_maps.resources.erase(no_maps.resources.begin() + 6U,
+                            no_maps.resources.begin() + 8U);
+    request.pipeline = &no_maps;
+    require(validate_indexed_static_mesh_draw_request(target, request,
+                                                      diagnostic) ==
+                IndexedStaticMeshDrawStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_multimap_reflection_layout_unsupported",
+            "reflection extension cannot attach to a non-maps material layout");
+}
+
 void validates_portable_detail_stack_contract() {
     PipelineProgram pipeline = pipeline_fixture();
     pipeline.resources = {
@@ -3022,6 +3202,7 @@ int main() {
         validates_recovered_stock_directional_shadow_abi();
         validates_portable_normal_map_contract();
         validates_portable_maps_contract();
+        validates_portable_multimap_reflection_contract();
         validates_portable_detail_stack_contract();
         validates_portable_damage_stack_contract();
         validates_portable_damage_dust_alpha_contract();
