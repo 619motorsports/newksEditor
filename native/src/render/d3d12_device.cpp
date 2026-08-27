@@ -4605,6 +4605,9 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     ID3D12Resource* readback_source = destination;
     if (description.samples > 1U) {
         D3D12_RESOURCE_DESC resolve_description = resource_description;
+        // GetDesc() reports the source's MSAA placement alignment. Let D3D12
+        // choose the valid alignment again after converting to single-sample.
+        resolve_description.Alignment = 0U;
         resolve_description.SampleDesc.Count = 1U;
         resolve_description.SampleDesc.Quality = 0U;
         D3D12_HEAP_PROPERTIES resolve_heap{};
@@ -6264,6 +6267,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
     ID3D12Resource* readback_source = destination;
     if (description.samples > 1U) {
         D3D12_RESOURCE_DESC resolve_description = resource_description;
+        // GetDesc() reports the source's MSAA placement alignment. Let D3D12
+        // choose the valid alignment again after converting to single-sample.
+        resolve_description.Alignment = 0U;
         resolve_description.SampleDesc.Count = 1U;
         resolve_description.SampleDesc.Quality = 0U;
         if (retained_resolve_resource == nullptr) {
