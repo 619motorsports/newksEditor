@@ -2354,23 +2354,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
         if (builtin_d3d12_native && request.shader_modules.empty() &&
-            (request.wireframe || request.grid_visible ||
-             request.view_axis_visible ||
-             request.authoring_overlay_pipeline.has_value() ||
-             request.selected_mesh_pipeline.has_value() ||
-             request.ai_spline_pipeline.has_value() ||
-             request.ai_spline_interval_pipeline.has_value() ||
-             request.ai_spline_left_pipeline.has_value() ||
-             request.ai_spline_right_pipeline.has_value() ||
-             request.ai_spline_selection_pipeline.has_value() ||
-             request.ai_spline_temporary_interpolation_pipeline.has_value() ||
-             request.ai_spline_temporary_marker_pipeline.has_value() ||
-             request.ai_spline_camber_pipeline.has_value())) {
+            request.wireframe) {
             result.status = WorkspaceViewportStatus::unsupported;
             result.diagnostic = diagnostic(
-                "workspace_viewport_d3d12_native_overlay_unsupported",
-                "The first installed D3D12 native viewport cannot submit "
-                "wireframe, authoring, selection, or spline overlays");
+                "workspace_viewport_d3d12_native_wireframe_unsupported",
+                "Installed D3D12 native programs cannot change their "
+                "recovered fill mode for a wireframe viewport");
             return result;
         }
         if ((request.directional_shadow_receiver &&

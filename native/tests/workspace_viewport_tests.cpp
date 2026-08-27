@@ -5646,19 +5646,31 @@ void rejects_invalid_d3d12_native_viewport_selection_before_allocation() {
     request.builtin_d3d12_native_programs = placeholder_programs;
 
     request.color_samples = 1U;
+    request.wireframe = true;
+    FakeDevice wireframe_device(Backend::D3D12);
+    auto wireframe = apex::app::prepareWorkspaceViewport(
+        wireframe_device, value.document, request);
+    require(!wireframe.ok() &&
+                wireframe.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                wireframe.diagnostic.code ==
+                    "workspace_viewport_d3d12_native_wireframe_unsupported" &&
+                wireframe_device.buffer_calls == 0U &&
+                wireframe_device.texture_calls == 0U &&
+                wireframe_device.depth_calls == 0U,
+            "native D3D12 wireframe rejects before allocation");
+
+    request.wireframe = false;
     request.grid_visible = true;
     FakeDevice overlay_device(Backend::D3D12);
     auto overlay = apex::app::prepareWorkspaceViewport(
         overlay_device, value.document, request);
     require(!overlay.ok() &&
-                overlay.status ==
-                    apex::app::WorkspaceViewportStatus::unsupported &&
                 overlay.diagnostic.code ==
-                    "workspace_viewport_d3d12_native_overlay_unsupported" &&
-                overlay_device.buffer_calls == 0U &&
-                overlay_device.texture_calls == 0U &&
-                overlay_device.depth_calls == 0U,
-            "native D3D12 overlays reject before allocation");
+                    "stock_material_d3d12_native_program_invalid" &&
+                overlay_device.texture_calls == 1U &&
+                overlay_device.depth_calls == 1U,
+            "native D3D12 overlays reach retained-scene validation");
 }
 
 void shares_live_camera_visibility_with_directional_shadows() {

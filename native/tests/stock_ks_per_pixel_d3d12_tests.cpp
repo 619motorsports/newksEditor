@@ -154,6 +154,51 @@ float4 main() : SV_Target { return float4(1.0, 0.0, 1.0, 1.0); }
   };
   return pipeline;
 }
+
+PipelineProgram portable_overlay_pipeline() {
+  constexpr std::string_view vertex_source = R"(
+cbuffer DrawMatrices : register(b0) {
+  column_major float4x4 world;
+  column_major float4x4 viewProjection;
+};
+struct Input { float3 position : POSITION; float3 color : COLOR; };
+struct Output { float4 position : SV_Position; float3 color : COLOR; };
+Output main(Input input) {
+  Output output;
+  output.position = mul(viewProjection, mul(world, float4(input.position, 1.0)));
+  output.color = input.color;
+  return output;
+}
+)";
+  constexpr std::string_view fragment_source = R"(
+float4 main(float3 color : COLOR) : SV_Target {
+  return float4(color, 1.0);
+}
+)";
+  PipelineProgram pipeline;
+  pipeline.name = "portable-overlay-hybrid-warp";
+  pipeline.shaders = {
+      {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+       compile_d3d_shader(vertex_source, "vs_5_0")},
+      {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+       compile_d3d_shader(fragment_source, "ps_5_0")},
+  };
+  pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+  pipeline.vertex_layout.attributes = {
+      {PipelineVertexSemantic::position,
+       PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+      {PipelineVertexSemantic::color,
+       PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+  };
+  pipeline.targets.colors = {
+      {PipelineRenderTargetFormat::rgba8_unorm, 4U}};
+  pipeline.raster.cull = PipelineCullMode::none;
+  pipeline.raster.fill = PipelineFillMode::wireframe;
+  pipeline.depth.test_enabled = false;
+  pipeline.depth.write_enabled = false;
+  pipeline.transform_contract = PipelineTransformContract::draw_matrices;
+  return pipeline;
+}
 #endif
 
 apex::formats::Kn5Node triangle_mesh() {
@@ -580,6 +625,56 @@ apex::formats::Kn5Node triangle_mesh() {
               portable_then_native_draw.rgba8[center + 1U] != std::byte{0} ||
               portable_then_native_draw.rgba8[center + 2U] != std::byte{255},
           "native draw executes after portable draw in visitor order");
+
+  const std::array<OverlayLineVertex, 2U> overlay_vertices = {{
+      {{-0.9F, 0.0F, 0.0F}, {1.0F, 0.0F, 1.0F}},
+      {{0.9F, 0.0F, 0.0F}, {1.0F, 0.0F, 1.0F}},
+  }};
+  BufferDescription overlay_buffer_description;
+  overlay_buffer_description.size_bytes = sizeof(overlay_vertices);
+  overlay_buffer_description.usage = BufferUsage::vertex;
+  overlay_buffer_description.memory = BufferMemory::host_visible;
+  overlay_buffer_description.mutability = BufferMutability::immutable;
+  BufferResult overlay_buffer = device_result.device->create_buffer(
+      overlay_buffer_description,
+      std::as_bytes(std::span(overlay_vertices)));
+  require(overlay_buffer.ok(), "hybrid overlay vertex buffer allocation");
+  PipelineProgram overlay_pipeline = portable_overlay_pipeline();
+  OverlayLineDrawRequest overlay_request;
+  overlay_request.pipeline = &overlay_pipeline;
+  overlay_request.vertex_buffer = overlay_buffer.buffer.get();
+  overlay_request.vertex_count =
+      static_cast<std::uint32_t>(overlay_vertices.size());
+  const std::array overlay_requests = {overlay_request};
+  const std::array native_overlay_scene_requests = {
+      base_multisample_request};
+  IndexedStaticMeshBatchDescription native_overlay_batch;
+  native_overlay_batch.draws = native_overlay_scene_requests;
+  native_overlay_batch.overlay_draws = overlay_requests;
+  native_overlay_batch.clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
+  native_overlay_batch.resolve_target = alpha_resolve.texture.get();
+  const IndexedStaticMeshBatchResult native_overlay_draw =
+      device_result.device->draw_indexed_static_mesh_batch_and_readback(
+          *alpha_target.texture, native_overlay_batch);
+  require(native_overlay_draw.ok() &&
+              native_overlay_draw.rgba8.size() == 32U * 32U * 4U,
+          native_overlay_draw.diagnostic.code.empty()
+              ? "native scene and portable overlay hybrid WARP batch/readback"
+              : native_overlay_draw.diagnostic.code);
+  std::size_t magenta_pixels = 0U;
+  for (std::size_t offset = 0U;
+       offset + 3U < native_overlay_draw.rgba8.size(); offset += 4U) {
+    const auto red = std::to_integer<unsigned>(
+        native_overlay_draw.rgba8[offset]);
+    const auto green = std::to_integer<unsigned>(
+        native_overlay_draw.rgba8[offset + 1U]);
+    const auto blue = std::to_integer<unsigned>(
+        native_overlay_draw.rgba8[offset + 2U]);
+    if (red > green && blue > green && red > 0U && blue > 0U)
+      ++magenta_pixels;
+  }
+  require(magenta_pixels > 8U,
+          "portable overlay executes after the native scene draw");
 #endif
 
   alpha_batch.capture_rgba8 = false;
