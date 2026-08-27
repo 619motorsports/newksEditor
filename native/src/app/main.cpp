@@ -76,7 +76,7 @@ void usage(std::ostream& output) {
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
-              "                       [--hdr [--exposure <value>]]\n"
+              "                       [--hdr [--exposure <value>] [--fxaa]]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
               "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
@@ -540,6 +540,7 @@ struct WindowWorkspaceOptions {
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
     bool sunHeightSpecified = false;
     bool hdr = false;
+    bool fxaa = false;
     std::optional<float> exposure;
     bool builtinVulkanKsPerPixel = false;
     std::optional<std::filesystem::path> d3d12KsPerPixelPackage;
@@ -1308,6 +1309,10 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             if (result.hdr)
                 throw std::runtime_error("duplicate --hdr option");
             result.hdr = true;
+        } else if (option == "--fxaa") {
+            if (result.fxaa)
+                throw std::runtime_error("duplicate --fxaa option");
+            result.fxaa = true;
         } else if (option == "--exposure") {
             if (result.exposure.has_value())
                 throw std::runtime_error("duplicate --exposure option");
@@ -1575,6 +1580,8 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
         throw std::runtime_error("lighting options require a workspace model");
     if (result.exposure.has_value() && !result.hdr)
         throw std::runtime_error("--exposure requires --hdr");
+    if (result.fxaa && !result.hdr)
+        throw std::runtime_error("--fxaa requires --hdr");
     if (result.hdr && !has_model_source)
         throw std::runtime_error(
             "post-processing options require a workspace model");
@@ -2321,6 +2328,7 @@ int run_window(int argc, char** argv) {
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.sky_enabled = true;
+        request.fxaa_enabled = workspace_options.fxaa;
         if (workspace_options.hdr) {
             apex::render::HdrToneMapParameters tone_map;
             tone_map.exposure = workspace_options.exposure.value_or(0.28F);

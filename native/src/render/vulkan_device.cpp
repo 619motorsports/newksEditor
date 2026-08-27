@@ -17,6 +17,7 @@
 
 #if defined(APEX_HAS_VULKAN) && APEX_HAS_VULKAN
 #    include <vulkan/vulkan.h>
+#    include "generated/fxaa_spirv.hpp"
 #    include "generated/hdr_tone_map_spirv.hpp"
 #    include "generated/hdr_bloom_spirv.hpp"
 #    include "generated/portable_sky_spirv.hpp"
@@ -6814,6 +6815,403 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     return true;
 }
 
+bool apply_fxaa_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
+                               Diagnostic& diagnostic) {
+    const std::shared_ptr<VulkanContext>& context = source.context();
+    std::lock_guard command_guard(context->command_mutex);
+    if (context->device == VK_NULL_HANDLE || context->queue == VK_NULL_HANDLE ||
+        context->command_pool == VK_NULL_HANDLE) {
+        diagnostic = {"vulkan_fxaa_uninitialized",
+                      "FXAA requires an initialized Vulkan device context"};
+        return false;
+    }
+    if (!source.initialized() || source.image() == VK_NULL_HANDLE ||
+        source.view() == VK_NULL_HANDLE || source.layout() == VK_IMAGE_LAYOUT_UNDEFINED) {
+        diagnostic = {"fxaa_source_uninitialized",
+                      "FXAA requires an initialized source texture"};
+        return false;
+    }
+    if (destination.image() == VK_NULL_HANDLE || destination.view() == VK_NULL_HANDLE) {
+        diagnostic = {"fxaa_destination_uninitialized",
+                      "FXAA requires an allocated destination texture"};
+        return false;
+    }
+
+    const VkFormat destination_format =
+        vk_texture_format(destination.info().description.format);
+    const VkImageLayout source_old_layout = source.layout();
+    const VkImageLayout destination_old_layout = destination.layout();
+    const VkImageLayout destination_final_layout = texture_final_layout(
+        destination.info().description.usage,
+        destination.info().description.access_policy);
+    struct PushConstants {
+        float inverse_width;
+        float inverse_height;
+        std::uint32_t srgb_destination;
+    } push_constants{
+        1.0F / static_cast<float>(source.info().description.width),
+        1.0F / static_cast<float>(source.info().description.height),
+        (destination.info().description.format == TextureFormat::rgba8_srgb ||
+         destination.info().description.format == TextureFormat::bgra8_srgb)
+            ? 1U
+            : 0U};
+    static_assert(sizeof(PushConstants) == 12U);
+
+    VkShaderModule vertex_shader = VK_NULL_HANDLE;
+    VkShaderModule fragment_shader = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool submitted = false;
+    bool completed = false;
+
+    const auto cleanup = [&] {
+        if (fence != VK_NULL_HANDLE) vkDestroyFence(context->device, fence, nullptr);
+        if (command != VK_NULL_HANDLE)
+            vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
+        if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(context->device, pipeline, nullptr);
+        if (pipeline_layout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(context->device, pipeline_layout, nullptr);
+        if (framebuffer != VK_NULL_HANDLE)
+            vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+        if (render_pass != VK_NULL_HANDLE)
+            vkDestroyRenderPass(context->device, render_pass, nullptr);
+        if (descriptor_pool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(context->device, descriptor_pool, nullptr);
+        if (descriptor_set_layout != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(context->device, descriptor_set_layout, nullptr);
+        if (sampler != VK_NULL_HANDLE) vkDestroySampler(context->device, sampler, nullptr);
+        if (fragment_shader != VK_NULL_HANDLE)
+            vkDestroyShaderModule(context->device, fragment_shader, nullptr);
+        if (vertex_shader != VK_NULL_HANDLE)
+            vkDestroyShaderModule(context->device, vertex_shader, nullptr);
+    };
+    const auto fail = [&](const char* operation, VkResult result) {
+        diagnostic = vk_error(operation, result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost"
+                                                          : "vulkan_fxaa_failed";
+        cleanup();
+        return false;
+    };
+    const auto create_shader = [&](const void* bytes, std::size_t size,
+                                   VkShaderModule& output) -> VkResult {
+        if (size == 0U || size % sizeof(std::uint32_t) != 0U || bytes == nullptr ||
+            reinterpret_cast<std::uintptr_t>(bytes) % alignof(std::uint32_t) != 0U)
+            return VK_ERROR_INVALID_SHADER_NV;
+        VkShaderModuleCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        info.codeSize = size;
+        info.pCode = reinterpret_cast<const std::uint32_t*>(bytes);
+        return vkCreateShaderModule(context->device, &info, nullptr, &output);
+    };
+
+    VkResult result = create_shader(generated::hdr_tone_map_vertex_spirv,
+                                    generated::hdr_tone_map_vertex_spirv_size,
+                                    vertex_shader);
+    if (result != VK_SUCCESS)
+        return fail("vkCreateShaderModule(fxaa vertex)", result);
+    result = create_shader(generated::fxaa_fragment_spirv,
+                           generated::fxaa_fragment_spirv_size,
+                           fragment_shader);
+    if (result != VK_SUCCESS)
+        return fail("vkCreateShaderModule(fxaa fragment)", result);
+
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    // The recovered runtime uses anisotropic repeat filtering. A bounded
+    // linear-repeat sampler is the portable Vulkan approximation; the shader
+    // explicitly samples mip zero for the full-resolution FXAA source.
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.maxLod = 0.0F;
+    sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    result = vkCreateSampler(context->device, &sampler_info, nullptr, &sampler);
+    if (result != VK_SUCCESS) return fail("vkCreateSampler(fxaa)", result);
+
+    VkDescriptorSetLayoutBinding sampler_binding{};
+    sampler_binding.binding = 0U;
+    sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler_binding.descriptorCount = 1U;
+    sampler_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo descriptor_layout_info{};
+    descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    descriptor_layout_info.bindingCount = 1U;
+    descriptor_layout_info.pBindings = &sampler_binding;
+    result = vkCreateDescriptorSetLayout(context->device, &descriptor_layout_info, nullptr,
+                                          &descriptor_set_layout);
+    if (result != VK_SUCCESS)
+        return fail("vkCreateDescriptorSetLayout(fxaa)", result);
+
+    VkDescriptorPoolSize descriptor_pool_size{};
+    descriptor_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptor_pool_size.descriptorCount = 1U;
+    VkDescriptorPoolCreateInfo descriptor_pool_info{};
+    descriptor_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    descriptor_pool_info.maxSets = 1U;
+    descriptor_pool_info.poolSizeCount = 1U;
+    descriptor_pool_info.pPoolSizes = &descriptor_pool_size;
+    result = vkCreateDescriptorPool(context->device, &descriptor_pool_info, nullptr,
+                                     &descriptor_pool);
+    if (result != VK_SUCCESS) return fail("vkCreateDescriptorPool(fxaa)", result);
+
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo descriptor_allocation{};
+    descriptor_allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    descriptor_allocation.descriptorPool = descriptor_pool;
+    descriptor_allocation.descriptorSetCount = 1U;
+    descriptor_allocation.pSetLayouts = &descriptor_set_layout;
+    result = vkAllocateDescriptorSets(context->device, &descriptor_allocation, &descriptor_set);
+    if (result != VK_SUCCESS)
+        return fail("vkAllocateDescriptorSets(fxaa)", result);
+    VkDescriptorImageInfo image_info{sampler, source.view(),
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet descriptor_write{};
+    descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptor_write.dstSet = descriptor_set;
+    descriptor_write.dstBinding = 0U;
+    descriptor_write.descriptorCount = 1U;
+    descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptor_write.pImageInfo = &image_info;
+    vkUpdateDescriptorSets(context->device, 1U, &descriptor_write, 0U, nullptr);
+
+    VkAttachmentDescription color_attachment{};
+    color_attachment.format = destination_format;
+    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference color_reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1U;
+    subpass.pColorAttachments = &color_reference;
+    VkRenderPassCreateInfo render_pass_info{};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1U;
+    render_pass_info.pAttachments = &color_attachment;
+    render_pass_info.subpassCount = 1U;
+    render_pass_info.pSubpasses = &subpass;
+    result = vkCreateRenderPass(context->device, &render_pass_info, nullptr, &render_pass);
+    if (result != VK_SUCCESS) return fail("vkCreateRenderPass(fxaa)", result);
+
+    VkFramebufferCreateInfo framebuffer_info{};
+    framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebuffer_info.renderPass = render_pass;
+    framebuffer_info.attachmentCount = 1U;
+    framebuffer_info.width = destination.info().description.width;
+    framebuffer_info.height = destination.info().description.height;
+    framebuffer_info.layers = 1U;
+    const VkImageView destination_view = destination.view();
+    framebuffer_info.pAttachments = &destination_view;
+    result = vkCreateFramebuffer(context->device, &framebuffer_info, nullptr, &framebuffer);
+    if (result != VK_SUCCESS) return fail("vkCreateFramebuffer(fxaa)", result);
+
+    VkPushConstantRange push_range{};
+    push_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_range.offset = 0U;
+    push_range.size = sizeof(PushConstants);
+    VkPipelineLayoutCreateInfo pipeline_layout_info{};
+    pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.setLayoutCount = 1U;
+    pipeline_layout_info.pSetLayouts = &descriptor_set_layout;
+    pipeline_layout_info.pushConstantRangeCount = 1U;
+    pipeline_layout_info.pPushConstantRanges = &push_range;
+    result = vkCreatePipelineLayout(context->device, &pipeline_layout_info, nullptr,
+                                    &pipeline_layout);
+    if (result != VK_SUCCESS) return fail("vkCreatePipelineLayout(fxaa)", result);
+
+    VkPipelineShaderStageCreateInfo shader_stages[2]{};
+    shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stages[0].module = vertex_shader;
+    shader_stages[0].pName = "main";
+    shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shader_stages[1].module = fragment_shader;
+    shader_stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport viewport{0.0F,
+                        0.0F,
+                        static_cast<float>(destination.info().description.width),
+                        static_cast<float>(destination.info().description.height),
+                        0.0F, 1.0F};
+    VkRect2D scissor{{0, 0}, {destination.info().description.width,
+                              destination.info().description.height}};
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1U;
+    viewport_state.pViewports = &viewport;
+    viewport_state.scissorCount = 1U;
+    viewport_state.pScissors = &scissor;
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterization.lineWidth = 1.0F;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1U;
+    blend.pAttachments = &blend_attachment;
+    VkGraphicsPipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 2U;
+    pipeline_info.pStages = shader_stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &rasterization;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.layout = pipeline_layout;
+    pipeline_info.renderPass = render_pass;
+    pipeline_info.subpass = 0U;
+    pipeline_info.basePipelineIndex = -1;
+    result = vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1U, &pipeline_info,
+                                       nullptr, &pipeline);
+    if (result != VK_SUCCESS) return fail("vkCreateGraphicsPipelines(fxaa)", result);
+
+    VkCommandBufferAllocateInfo command_allocation{};
+    command_allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_allocation.commandPool = context->command_pool;
+    command_allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_allocation.commandBufferCount = 1U;
+    result = vkAllocateCommandBuffers(context->device, &command_allocation, &command);
+    if (result != VK_SUCCESS) return fail("vkAllocateCommandBuffers(fxaa)", result);
+    VkCommandBufferBeginInfo command_begin{};
+    command_begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    command_begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(command, &command_begin);
+    if (result != VK_SUCCESS) return fail("vkBeginCommandBuffer(fxaa)", result);
+
+    struct LayoutState {
+        VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkAccessFlags access = 0U;
+    };
+    const auto old_state = [](VkImageLayout layout) {
+        switch (layout) {
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return LayoutState{VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT};
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return LayoutState{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return LayoutState{VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT};
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return LayoutState{VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
+        case VK_IMAGE_LAYOUT_GENERAL:
+            return LayoutState{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return LayoutState{VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_ACCESS_MEMORY_READ_BIT};
+        default:
+            return LayoutState{};
+        }
+    };
+    const auto transition = [&](VkImage image, VkImageLayout old_layout,
+                                VkImageLayout new_layout, VkAccessFlags destination_access,
+                                VkPipelineStageFlags destination_stage) {
+        if (old_layout == new_layout) return;
+        const LayoutState source_state = old_state(old_layout);
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = source_state.access;
+        barrier.dstAccessMask = destination_access;
+        barrier.oldLayout = old_layout;
+        barrier.newLayout = new_layout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1U;
+        barrier.subresourceRange.layerCount = 1U;
+        vkCmdPipelineBarrier(command, source_state.stage, destination_stage, 0U, 0U, nullptr,
+                             0U, nullptr, 1U, &barrier);
+    };
+    transition(source.image(), source_old_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    transition(destination.image(), destination_old_layout,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+    VkRenderPassBeginInfo render_begin{};
+    render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_begin.renderPass = render_pass;
+    render_begin.framebuffer = framebuffer;
+    render_begin.renderArea = scissor;
+    vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0U, 1U,
+                            &descriptor_set, 0U, nullptr);
+    vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0U,
+                       sizeof(push_constants), &push_constants);
+    vkCmdDraw(command, 3U, 1U, 0U, 0U);
+    vkCmdEndRenderPass(command);
+    transition(source.image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, source_old_layout,
+               old_state(source_old_layout).access, old_state(source_old_layout).stage);
+    transition(destination.image(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               destination_final_layout, old_state(destination_final_layout).access,
+               old_state(destination_final_layout).stage);
+    result = vkEndCommandBuffer(command);
+    if (result != VK_SUCCESS) return fail("vkEndCommandBuffer(fxaa)", result);
+
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+    if (result != VK_SUCCESS) return fail("vkCreateFence(fxaa)", result);
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1U;
+    submit.pCommandBuffers = &command;
+    result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+    submitted = result == VK_SUCCESS;
+    if (result == VK_SUCCESS) {
+        result = vkWaitForFences(context->device, 1U, &fence, VK_TRUE, UINT64_MAX);
+        completed = result == VK_SUCCESS;
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain != VK_SUCCESS) {
+            source.mark_layout(VK_IMAGE_LAYOUT_UNDEFINED);
+            destination.mark_layout(VK_IMAGE_LAYOUT_UNDEFINED);
+            return fail("vkWaitForFences(fxaa)", drain);
+        }
+        completed = true;
+    }
+    if (result != VK_SUCCESS && !completed) return fail("vkQueueSubmit(fxaa)", result);
+    source.mark_layout(source_old_layout);
+    destination.mark_layout(destination_final_layout);
+    destination.mark_initialized();
+    cleanup();
+    diagnostic = {};
+    return true;
+}
+
 struct RawVulkanSampler {
     std::shared_ptr<VulkanContext> context;
     VkSampler sampler = VK_NULL_HANDLE;
@@ -8669,6 +9067,40 @@ public:
                                      diagnostic))
             return {HdrToneMapStatus::execution_failed, std::move(diagnostic)};
         return {HdrToneMapStatus::ready, {}};
+    }
+
+    FxaaResult apply_fxaa(Texture& source, Texture& destination) override {
+        Diagnostic diagnostic;
+        const FxaaStatus validation = validate_fxaa_request(source, destination, diagnostic);
+        if (validation != FxaaStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (source.backend() != Backend::Vulkan || destination.backend() != Backend::Vulkan)
+            return {FxaaStatus::unsupported,
+                    {"fxaa_backend_mismatch",
+                     "FXAA requires Vulkan textures on this device"}};
+        auto* vulkan_source = dynamic_cast<VulkanTexture*>(&source);
+        auto* vulkan_destination = dynamic_cast<VulkanTexture*>(&destination);
+        if (vulkan_source == nullptr || vulkan_destination == nullptr)
+            return {FxaaStatus::unsupported,
+                    {"fxaa_texture_type_unsupported",
+                     "The Vulkan device received an unknown FXAA texture handle"}};
+        if (vulkan_source->context().get() != context_.get() ||
+            vulkan_destination->context().get() != context_.get())
+            return {FxaaStatus::unsupported,
+                    {"fxaa_context_mismatch",
+                     "FXAA textures must belong to this Vulkan device"}};
+        if (!vulkan_source->initialized())
+            return {FxaaStatus::invalid_request,
+                    {"fxaa_source_uninitialized",
+                     "FXAA requires an initialized source texture"}};
+        if (context_->device == VK_NULL_HANDLE || context_->queue == VK_NULL_HANDLE ||
+            context_->command_pool == VK_NULL_HANDLE)
+            return {FxaaStatus::unsupported,
+                    {"vulkan_fxaa_uninitialized",
+                     "FXAA requires an initialized Vulkan device context"}};
+        if (!apply_fxaa_vulkan_texture(*vulkan_source, *vulkan_destination, diagnostic))
+            return {FxaaStatus::execution_failed, std::move(diagnostic)};
+        return {FxaaStatus::ready, {}};
     }
 
     DepthAttachmentResult create_depth_attachment(

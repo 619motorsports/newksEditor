@@ -863,6 +863,94 @@ HdrToneMapStatus validate_hdr_tone_map_request(
     return HdrToneMapStatus::ready;
 }
 
+FxaaStatus validate_fxaa_request(
+    const Texture& source, const Texture& destination,
+    Diagnostic& diagnostic) {
+    if (&source == &destination) {
+        diagnostic = {"fxaa_alias_invalid",
+                      "FXAA requires different source and destination textures"};
+        return FxaaStatus::invalid_request;
+    }
+    if (source.backend() != destination.backend()) {
+        diagnostic = {"fxaa_backend_mismatch",
+                      "FXAA textures must use the same graphics backend"};
+        return FxaaStatus::unsupported;
+    }
+    const TextureDescription& input = source.info().description;
+    const TextureDescription& output = destination.info().description;
+    if (input.width == 0U || input.height == 0U || output.width == 0U ||
+        output.height == 0U) {
+        diagnostic = {"fxaa_dimensions_invalid",
+                      "FXAA texture dimensions must be non-zero"};
+        return FxaaStatus::invalid_request;
+    }
+    if (input.width > max_texture_dimension ||
+        input.height > max_texture_dimension ||
+        output.width > max_texture_dimension ||
+        output.height > max_texture_dimension) {
+        diagnostic = {"fxaa_dimension_limit",
+                      "FXAA texture dimensions exceed the backend-neutral safety limit"};
+        return FxaaStatus::invalid_request;
+    }
+    if (input.format != TextureFormat::rgba8_unorm) {
+        diagnostic = {"fxaa_source_format_unsupported",
+                      "FXAA requires an RGBA8 UNORM source texture"};
+        return FxaaStatus::unsupported;
+    }
+    const bool output_format_supported =
+        output.format == TextureFormat::rgba8_unorm ||
+        output.format == TextureFormat::rgba8_srgb ||
+        output.format == TextureFormat::bgra8_unorm ||
+        output.format == TextureFormat::bgra8_srgb;
+    if (!output_format_supported) {
+        diagnostic = {"fxaa_destination_format_unsupported",
+                      "FXAA requires an RGBA8 or BGRA8 destination texture"};
+        return FxaaStatus::unsupported;
+    }
+    const auto valid_image = [](const TextureDescription& description) {
+        return description.shape == TextureShape::texture_2d &&
+               description.array_layers == 1U &&
+               description.mip_levels == 1U && description.samples == 1U;
+    };
+    if (!valid_image(input)) {
+        diagnostic = {"fxaa_source_shape_invalid",
+                      "FXAA requires a one-layer, one-mip, single-sample 2D source"};
+        return FxaaStatus::invalid_request;
+    }
+    if (!valid_image(output)) {
+        diagnostic = {"fxaa_destination_shape_invalid",
+                      "FXAA requires a one-layer, one-mip, single-sample 2D destination"};
+        return FxaaStatus::invalid_request;
+    }
+    if (input.width != output.width || input.height != output.height) {
+        diagnostic = {"fxaa_dimensions_mismatch",
+                      "FXAA source and destination dimensions must match"};
+        return FxaaStatus::invalid_request;
+    }
+    const auto has_usage = [](TextureUsage usage, TextureUsage bit) {
+        return static_cast<std::uint32_t>(usage & bit) != 0U;
+    };
+    if (!has_usage(input.usage, TextureUsage::sampled) ||
+        input.access_policy != TextureAccessPolicy::render_then_sample) {
+        diagnostic = {"fxaa_source_usage_invalid",
+                      "FXAA requires sampled, render-then-sample source usage"};
+        return FxaaStatus::invalid_request;
+    }
+    if (!has_usage(output.usage, TextureUsage::color_attachment) ||
+        !has_usage(output.usage, TextureUsage::transfer_source)) {
+        diagnostic = {"fxaa_destination_usage_invalid",
+                      "FXAA requires color-attachment and transfer-source destination usage"};
+        return FxaaStatus::invalid_request;
+    }
+    if (output.mutability != TextureMutability::mutable_data) {
+        diagnostic = {"fxaa_destination_mutability_invalid",
+                      "FXAA requires a mutable destination texture"};
+        return FxaaStatus::invalid_request;
+    }
+    diagnostic = {};
+    return FxaaStatus::ready;
+}
+
 bool build_portable_sky_shader_constants(
     const PortableSkyParameters& parameters,
     PortableSkyShaderConstants& constants, Diagnostic& diagnostic) noexcept {
@@ -5465,6 +5553,20 @@ const char* hdr_tone_map_status_name(HdrToneMapStatus status) noexcept {
     case HdrToneMapStatus::unsupported:
         return "unsupported";
     case HdrToneMapStatus::execution_failed:
+        return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* fxaa_status_name(FxaaStatus status) noexcept {
+    switch (status) {
+    case FxaaStatus::ready:
+        return "ready";
+    case FxaaStatus::invalid_request:
+        return "invalid_request";
+    case FxaaStatus::unsupported:
+        return "unsupported";
+    case FxaaStatus::execution_failed:
         return "execution_failed";
     }
     return "unknown";

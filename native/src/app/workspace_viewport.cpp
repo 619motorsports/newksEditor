@@ -570,6 +570,21 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     return WorkspaceViewportFrameStatus::execution_failed;
 }
 
+[[nodiscard]] WorkspaceViewportFrameStatus fxaaStatus(
+    render::FxaaStatus status) noexcept {
+    switch (status) {
+    case render::FxaaStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::FxaaStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::FxaaStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::FxaaStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
 [[nodiscard]] WorkspaceViewportFrameStatus luminanceStatus(
     render::HdrLuminanceStatus status) noexcept {
     switch (status) {
@@ -1078,9 +1093,11 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::Texture> color,
     std::unique_ptr<render::Texture> resolved_color,
     std::unique_ptr<render::Texture> tone_mapped_color,
+    std::unique_ptr<render::Texture> fxaa_color,
     std::optional<render::HdrToneMapParameters> hdr_tone_map,
     render::HdrExposureMode hdr_exposure_mode,
     bool sky_enabled,
+    bool fxaa_enabled,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -1101,9 +1118,11 @@ WorkspaceViewport::WorkspaceViewport(
     : device_(device), backend_(backend), presentation_(presentation),
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
       tone_mapped_color_(std::move(tone_mapped_color)),
+      fxaa_color_(std::move(fxaa_color)),
       hdr_tone_map_(std::move(hdr_tone_map)),
       hdr_exposure_mode_(hdr_exposure_mode),
       sky_enabled_(sky_enabled),
+      fxaa_enabled_(fxaa_enabled),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
@@ -1454,6 +1473,12 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         request.hdr_tone_map.has_value()
             ? &*request.hdr_tone_map
             : hdr_tone_map_.has_value() ? &*hdr_tone_map_ : nullptr;
+    if (fxaa_enabled_ && effective_hdr_tone_map == nullptr) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_fxaa_requires_hdr",
+            "FXAA requires a prepared HDR tone-map stage");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
     if (effective_hdr_tone_map != nullptr) {
         if (tone_mapped_color_ == nullptr) {
             output_diagnostic = diagnostic(
@@ -1468,6 +1493,18 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             output_diagnostic);
         if (validation != render::HdrToneMapStatus::ready)
             return toneMapStatus(validation);
+        if (fxaa_enabled_) {
+            if (fxaa_color_ == nullptr) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_fxaa_target_missing",
+                    "The prepared FXAA viewport has no output texture");
+                return WorkspaceViewportFrameStatus::invalid;
+            }
+            const auto fxaa_validation = render::validate_fxaa_request(
+                *tone_mapped_color_, *fxaa_color_, output_diagnostic);
+            if (fxaa_validation != render::FxaaStatus::ready)
+                return fxaaStatus(fxaa_validation);
+        }
     }
     if (reflection_capture_.has_value() &&
         (request.multimap_reflection_cube.texture != nullptr ||
@@ -2272,6 +2309,15 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             return toneMapStatus(tone_mapped.status);
         }
         presentation_color = tone_mapped_color_.get();
+        if (fxaa_enabled_) {
+            const auto fxaa = device.apply_fxaa(
+                *presentation_color, *fxaa_color_);
+            if (!fxaa.ok()) {
+                output_diagnostic = fxaa.diagnostic;
+                return fxaaStatus(fxaa.status);
+            }
+            presentation_color = fxaa_color_.get();
+        }
     }
     const auto presented = device.present_texture(target, *presentation_color);
     if (presented.ok() && pending_reflection_capture.has_value()) {
@@ -2310,6 +2356,13 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_hdr_exposure_requires_hdr",
                 "Automatic exposure requires HDR tone mapping");
+            return result;
+        }
+        if (request.fxaa_enabled && !request.hdr_tone_map.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_fxaa_requires_hdr",
+                "FXAA requires HDR tone mapping");
             return result;
         }
         const bool builtin_vulkan_source =
@@ -2686,14 +2739,23 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
 
         std::unique_ptr<render::Texture> tone_mapped_color;
+        std::unique_ptr<render::Texture> fxaa_color;
         if (request.hdr_tone_map.has_value()) {
             render::TextureDescription tone_mapped_description;
             tone_mapped_description.width = request.presentation.width;
             tone_mapped_description.height = request.presentation.height;
-            tone_mapped_description.format = request.presentation.format;
+            tone_mapped_description.format = request.fxaa_enabled
+                                                  ? render::TextureFormat::rgba8_unorm
+                                                  : request.presentation.format;
             tone_mapped_description.usage =
                 render::TextureUsage::color_attachment |
                 render::TextureUsage::transfer_source;
+            if (request.fxaa_enabled) {
+                tone_mapped_description.usage =
+                    tone_mapped_description.usage | render::TextureUsage::sampled;
+                tone_mapped_description.access_policy =
+                    render::TextureAccessPolicy::render_then_sample;
+            }
             tone_mapped_description.mutability =
                 render::TextureMutability::mutable_data;
             auto tone_mapped = device.create_texture(tone_mapped_description);
@@ -2720,6 +2782,39 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 return result;
             }
             tone_mapped_color = std::move(tone_mapped.texture);
+
+            if (request.fxaa_enabled) {
+                render::TextureDescription fxaa_description;
+                fxaa_description.width = request.presentation.width;
+                fxaa_description.height = request.presentation.height;
+                fxaa_description.format = request.presentation.format;
+                fxaa_description.usage =
+                    render::TextureUsage::color_attachment |
+                    render::TextureUsage::transfer_source;
+                fxaa_description.mutability =
+                    render::TextureMutability::mutable_data;
+                auto fxaa = device.create_texture(fxaa_description);
+                if (!fxaa.ok()) {
+                    result.status =
+                        fxaa.status == render::TextureStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : WorkspaceViewportStatus::unsupported;
+                    result.diagnostic = std::move(fxaa.diagnostic);
+                    return result;
+                }
+                render::Diagnostic fxaa_diagnostic;
+                const auto fxaa_validation = render::validate_fxaa_request(
+                    *tone_mapped_color, *fxaa.texture, fxaa_diagnostic);
+                if (fxaa_validation != render::FxaaStatus::ready) {
+                    result.status =
+                        fxaa_validation == render::FxaaStatus::unsupported
+                            ? WorkspaceViewportStatus::unsupported
+                            : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(fxaa_diagnostic);
+                    return result;
+                }
+                fxaa_color = std::move(fxaa.texture);
+            }
         }
 
         render::DepthAttachmentDescription depth_description;
@@ -3570,7 +3665,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             &device, device.info().backend, request.presentation,
             std::move(color.texture),
             std::move(resolved_color), std::move(tone_mapped_color),
-            request.hdr_tone_map, request.hdr_exposure_mode, request.sky_enabled,
+            std::move(fxaa_color), request.hdr_tone_map,
+            request.hdr_exposure_mode, request.sky_enabled, request.fxaa_enabled,
             std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),

@@ -549,6 +549,25 @@ struct HdrToneMapResult {
     }
 };
 
+// A bounded fullscreen anti-aliasing pass over a full-resolution RGBA8
+// tone-map result. The recovered arithmetic is source-equivalent. Backend
+// sampler and presentation-format behavior remain portable approximations.
+enum class FxaaStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+struct FxaaResult {
+    FxaaStatus status = FxaaStatus::unsupported;
+    Diagnostic diagnostic;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == FxaaStatus::ready;
+    }
+};
+
 // A bounded, synchronous clear/readback operation for 2D RGBA8 textures.
 // The returned bytes are tightly packed canonical RGBA8, independent of the
 // backend's native channel order. This is an execution contract only; it is
@@ -1671,6 +1690,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_parameters(
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
 
+[[nodiscard]] FxaaStatus validate_fxaa_request(
+    const Texture& source, const Texture& destination,
+    Diagnostic& diagnostic);
+
 // Build the bounded portable sky ABI. This function normalizes the camera and
 // sun bases once so both backends receive the same finite values.
 [[nodiscard]] bool build_portable_sky_shader_constants(
@@ -1871,6 +1894,18 @@ public:
                  "This backend has not enabled HDR tone mapping"}};
     }
 
+    [[nodiscard]] virtual FxaaResult apply_fxaa(
+        Texture& source, Texture& destination) {
+        Diagnostic diagnostic;
+        const FxaaStatus validation =
+            validate_fxaa_request(source, destination, diagnostic);
+        if (validation != FxaaStatus::ready)
+            return {validation, std::move(diagnostic)};
+        return {FxaaStatus::unsupported,
+                {"fxaa_unsupported",
+                 "This backend has not enabled FXAA"}};
+    }
+
     [[nodiscard]] virtual HdrLuminanceResult measure_hdr_luminance(
         Texture& source) {
         Diagnostic diagnostic;
@@ -2058,6 +2093,7 @@ struct DeviceResult {
     PresentationFrameStatus status) noexcept;
 [[nodiscard]] const char* hdr_tone_map_status_name(
     HdrToneMapStatus status) noexcept;
+[[nodiscard]] const char* fxaa_status_name(FxaaStatus status) noexcept;
 [[nodiscard]] const char* hdr_luminance_status_name(
     HdrLuminanceStatus status) noexcept;
 

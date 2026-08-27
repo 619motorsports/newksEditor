@@ -1695,3 +1695,70 @@ if(accepted_hdr_position EQUAL -1)
   message(FATAL_ERROR
     "accepted HDR options did not reach workspace loading: ${accepted_hdr_output}${accepted_hdr_error}")
 endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --fxaa --fxaa
+  RESULT_VARIABLE duplicate_fxaa_result
+  ERROR_VARIABLE duplicate_fxaa_error
+)
+if(NOT duplicate_fxaa_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate FXAA option returned ${duplicate_fxaa_result}: ${duplicate_fxaa_error}")
+endif()
+string(FIND "${duplicate_fxaa_error}"
+  "duplicate --fxaa option" duplicate_fxaa_position)
+if(duplicate_fxaa_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate FXAA option was not diagnosed: ${duplicate_fxaa_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --fxaa
+  RESULT_VARIABLE detached_fxaa_result
+  ERROR_VARIABLE detached_fxaa_error
+)
+if(NOT detached_fxaa_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached FXAA option returned ${detached_fxaa_result}: ${detached_fxaa_error}")
+endif()
+string(FIND "${detached_fxaa_error}"
+  "--fxaa requires --hdr" detached_fxaa_position)
+if(detached_fxaa_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached FXAA option was not diagnosed: ${detached_fxaa_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --hdr --fxaa
+  RESULT_VARIABLE detached_hdr_fxaa_result
+  ERROR_VARIABLE detached_hdr_fxaa_error
+)
+if(NOT detached_hdr_fxaa_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached HDR FXAA options returned ${detached_hdr_fxaa_result}: ${detached_hdr_fxaa_error}")
+endif()
+string(FIND "${detached_hdr_fxaa_error}"
+  "post-processing options require a workspace model"
+  detached_hdr_fxaa_position)
+if(detached_hdr_fxaa_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached HDR FXAA options were not diagnosed: ${detached_hdr_fxaa_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --model missing-fxaa-workspace.kn5 --hdr --fxaa
+  RESULT_VARIABLE accepted_fxaa_result
+  OUTPUT_VARIABLE accepted_fxaa_output
+  ERROR_VARIABLE accepted_fxaa_error
+)
+if(NOT accepted_fxaa_result STREQUAL "1")
+  message(FATAL_ERROR
+    "accepted FXAA option returned ${accepted_fxaa_result}: ${accepted_fxaa_error}")
+endif()
+string(FIND "${accepted_fxaa_error}" "cannot open" accepted_fxaa_position)
+if(accepted_fxaa_position EQUAL -1)
+  message(FATAL_ERROR
+    "accepted FXAA option did not reach workspace loading: ${accepted_fxaa_output}${accepted_fxaa_error}")
+endif()

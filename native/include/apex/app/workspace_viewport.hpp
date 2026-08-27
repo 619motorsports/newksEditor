@@ -151,6 +151,9 @@ struct WorkspaceViewportPrepareRequest {
     // Draw the portable WebGL-aligned sky before retained scene geometry.
     // Clouds remain a separate, not-yet-retained scene pass.
     bool sky_enabled = false;
+    // Apply the recovered post-tone-map FXAA pass. This requires HDR tone
+    // mapping and keeps the default LDR path unchanged.
+    bool fxaa_enabled = false;
     // A presentation target is single-sample. Four-sample scenes resolve to
     // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
@@ -527,9 +530,11 @@ private:
         std::unique_ptr<render::Texture> color,
         std::unique_ptr<render::Texture> resolved_color,
         std::unique_ptr<render::Texture> tone_mapped_color,
+        std::unique_ptr<render::Texture> fxaa_color,
         std::optional<render::HdrToneMapParameters> hdr_tone_map,
         render::HdrExposureMode hdr_exposure_mode,
         bool sky_enabled,
+        bool fxaa_enabled,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -556,9 +561,11 @@ private:
     std::unique_ptr<render::Texture> color_;
     std::unique_ptr<render::Texture> resolved_color_;
     std::unique_ptr<render::Texture> tone_mapped_color_;
+    std::unique_ptr<render::Texture> fxaa_color_;
     std::optional<render::HdrToneMapParameters> hdr_tone_map_;
     render::HdrExposureMode hdr_exposure_mode_ = render::HdrExposureMode::manual;
     bool sky_enabled_ = false;
+    bool fxaa_enabled_ = false;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;

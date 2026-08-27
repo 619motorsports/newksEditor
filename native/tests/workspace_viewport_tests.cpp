@@ -369,6 +369,22 @@ public:
         return {HdrToneMapStatus::ready, {}};
     }
 
+    FxaaResult apply_fxaa(Texture &source, Texture &destination) override {
+        ++fxaa_calls;
+        events.push_back("fxaa");
+        fxaa_sources.push_back(&source);
+        fxaa_destinations.push_back(&destination);
+        Diagnostic diagnostic;
+        const auto validation =
+            validate_fxaa_request(source, destination, diagnostic);
+        if (validation != FxaaStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (fxaa_status != FxaaStatus::ready)
+            return {fxaa_status,
+                    {"fake_fxaa_failed", "injected FXAA failure"}};
+        return {FxaaStatus::ready, {}};
+    }
+
     PresentationFrameResult present_texture(PresentationTarget &,
                                             Texture &texture) override {
         ++present_calls;
@@ -401,7 +417,9 @@ public:
     std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
     std::size_t tone_map_calls = 0U;
+    std::size_t fxaa_calls = 0U;
     HdrToneMapStatus tone_map_status = HdrToneMapStatus::ready;
+    FxaaStatus fxaa_status = FxaaStatus::ready;
     bool fail_luminance = false;
     float measured_luminance = 0.16F;
     std::vector<std::size_t> draw_counts;
@@ -441,6 +459,8 @@ public:
     std::vector<Texture *> tone_map_sources;
     std::vector<Texture *> tone_map_destinations;
     std::vector<HdrToneMapParameters> tone_map_parameters;
+    std::vector<Texture *> fxaa_sources;
+    std::vector<Texture *> fxaa_destinations;
     std::vector<Texture *> draw_targets;
     std::vector<Texture *> mip_targets;
     std::vector<Texture *> luminance_sources;
@@ -2143,6 +2163,160 @@ void draws_automatic_exposure_before_tone_map() {
                     device.tone_map_calls == 1U && device.present_calls == 1U,
                 "automatic exposure failure prevents tone mapping and presentation");
     }
+}
+
+void draws_opt_in_fxaa_after_hdr_postprocessing() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        {
+            auto value = fixture();
+            auto request = request_for(value);
+            request.fxaa_enabled = true;
+            FakeDevice device(backend);
+            auto rejected = apex::app::prepareWorkspaceViewport(
+                device, value.document, request);
+            require(!rejected.ok() &&
+                        rejected.diagnostic.code ==
+                            "workspace_viewport_fxaa_requires_hdr" &&
+                        device.texture_calls == 0U,
+                    "LDR viewport rejects FXAA before allocation");
+        }
+        for (const std::uint32_t samples : {1U, 4U}) {
+            auto value = fixture();
+            if (backend == Backend::D3D12) {
+                for (auto &module : value.modules) {
+                    module.format = PipelineShaderFormat::dxbc;
+                    module.bytes = dxbc_shader_bytes();
+                }
+            }
+            auto request = request_for(value);
+            request.color_samples = samples;
+            request.fxaa_enabled = true;
+            request.hdr_tone_map = HdrToneMapParameters{};
+            FakeDevice device(backend);
+            auto prepared = apex::app::prepareWorkspaceViewport(
+                device, value.document, request);
+            if (!prepared.ok())
+                throw std::runtime_error("FXAA viewport preparation: " +
+                                         prepared.diagnostic.code);
+
+            FakeTarget target(request.presentation, backend);
+            WorkspaceViewportFrameRequest frame;
+            frame.camera.clip_space = backend == Backend::Vulkan
+                                          ? CameraClipSpace::vulkan
+                                          : CameraClipSpace::d3d12;
+            frame.frame_constants = KsPerPixelFrameConstants{};
+            Diagnostic diagnostic;
+            const auto status = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            require(status == WorkspaceViewportFrameStatus::ready &&
+                        device.fxaa_calls == 1U &&
+                        device.fxaa_sources.size() == 1U &&
+                        device.fxaa_destinations.size() == 1U &&
+                        device.fxaa_sources.front() !=
+                            device.fxaa_destinations.front(),
+                    "FXAA viewport runs with distinct source and destination");
+            const std::vector<std::string> expected = {
+                "color", "tone_map", "fxaa", "present"};
+            require(device.events == expected,
+                    "FXAA follows HDR tone mapping in order");
+            require(device.fxaa_sources.front()->info().description.format ==
+                        TextureFormat::rgba8_unorm &&
+                    device.fxaa_destinations.front()->info()
+                            .description.format == request.presentation.format,
+                    "FXAA uses the RGBA8 post-process source and display target");
+            require(device.tone_map_destinations.front() ==
+                        device.fxaa_sources.front(),
+                    "HDR tone mapping feeds the FXAA source");
+
+            const std::size_t present_before_failure = device.present_calls;
+            device.fxaa_status = FxaaStatus::execution_failed;
+            const auto failed_fxaa = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            require(failed_fxaa == WorkspaceViewportFrameStatus::execution_failed &&
+                        diagnostic.code == "fake_fxaa_failed" &&
+                        device.present_calls == present_before_failure,
+                    "FXAA failure prevents presentation");
+
+            device.fxaa_status = FxaaStatus::ready;
+            const std::size_t fxaa_before_draw_failure = device.fxaa_calls;
+            device.fail_draw = true;
+            const auto failed_draw = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            require(failed_draw == WorkspaceViewportFrameStatus::execution_failed &&
+                        diagnostic.code == "fake_draw_failed" &&
+                        device.fxaa_calls == fxaa_before_draw_failure,
+                    "scene draw failure prevents FXAA");
+            device.fail_draw = false;
+
+            const std::size_t fxaa_before_tone_map_failure = device.fxaa_calls;
+            device.tone_map_status = HdrToneMapStatus::execution_failed;
+            const auto failed_tone_map = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            require(failed_tone_map == WorkspaceViewportFrameStatus::execution_failed &&
+                        diagnostic.code == "fake_tone_map_failed" &&
+                        device.fxaa_calls == fxaa_before_tone_map_failure,
+                    "tone-map failure prevents FXAA");
+            device.tone_map_status = HdrToneMapStatus::ready;
+
+            device.fail_present = true;
+            const auto failed_present = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            require(failed_present == WorkspaceViewportFrameStatus::execution_failed &&
+                        diagnostic.code == "fake_present_failed" &&
+                        device.fxaa_calls > fxaa_before_draw_failure,
+                    "presentation failure is reported after FXAA");
+        }
+    }
+}
+
+void reallocates_fxaa_targets_after_viewport_resize() {
+    auto value = fixture();
+    auto request = request_for(value);
+    request.presentation.width = 16U;
+    request.presentation.height = 8U;
+    request.hdr_tone_map = HdrToneMapParameters{};
+    request.fxaa_enabled = true;
+    FakeDevice device;
+    auto first = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(first.ok(), "initial FXAA viewport preparation succeeds");
+
+    FakeTarget first_target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    require(first.viewport->drawAndPresent(device, first_target, frame,
+                                           diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+            "initial FXAA viewport frame succeeds");
+    require(device.fxaa_destinations.size() == 1U,
+            "initial FXAA destination is recorded");
+    Texture *old_destination = device.fxaa_destinations.front();
+    require(old_destination->info().description.width == 16U &&
+                old_destination->info().description.height == 8U,
+            "initial FXAA target has the initial viewport dimensions");
+
+    request.presentation.width = 32U;
+    request.presentation.height = 16U;
+    auto resized = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(resized.ok(), "resized FXAA viewport preparation succeeds");
+    FakeTarget resized_target(request.presentation);
+    require(resized.viewport->drawAndPresent(device, resized_target, frame,
+                                             diagnostic) ==
+                WorkspaceViewportFrameStatus::ready,
+            "resized FXAA viewport frame succeeds");
+    require(device.fxaa_destinations.size() == 2U &&
+                device.fxaa_destinations.back() != old_destination &&
+                device.fxaa_destinations.back()->info().description.width ==
+                    32U &&
+                device.fxaa_destinations.back()->info().description.height ==
+                    16U,
+            "resize allocates a distinct FXAA target with new dimensions");
+    require(old_destination->info().description.width == 16U &&
+                old_destination->info().description.height == 8U,
+            "resize does not mutate the old prepared FXAA target");
 }
 
 void rejects_invalid_viewport_hdr_requests() {
@@ -6888,6 +7062,8 @@ int main() {
         draws_four_sample_viewport_through_retained_resolve();
         draws_opt_in_hdr_viewport_before_presentation();
         draws_automatic_exposure_before_tone_map();
+        draws_opt_in_fxaa_after_hdr_postprocessing();
+        reallocates_fxaa_targets_after_viewport_resize();
         rejects_invalid_viewport_hdr_requests();
         draws_builtin_vulkan_source_through_hdr_tone_map();
         draws_selected_axis_inside_the_scene_batch();
