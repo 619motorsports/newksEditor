@@ -85,3 +85,7 @@ The source-drift test compares these values with the maintained files and embedd
 The built-in selector accepts an exact material-family name and a static mesh. Caller shader modules take precedence.
 
 The selector rejects reflection, directional-shadow receiver, damage, wireframe, skinned, and transparent paths. These paths require explicit shader modules.
+
+The stock-scene and workspace-viewport facades forward the selector without adding pass capabilities.
+
+The native shell exposes this path as `--builtin-multimap-nm-detail`. The option supports Vulkan and D3D12 and selects a four-sample viewport.

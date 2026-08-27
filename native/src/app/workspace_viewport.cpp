@@ -2835,6 +2835,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             builtin_d3d12_native_base ||
             builtin_d3d12_native_alpha_to_coverage ||
             builtin_d3d12_native_combined;
+        const bool builtin_multimap_source =
+            request.builtin_multimap_source ==
+            render::BuiltinStockMultiMapSourceSelector::normal_detail;
         if (request.builtin_vulkan_source !=
                 render::BuiltinVulkanStockSourceSelector::disabled &&
             !builtin_vulkan_source) {
@@ -2851,6 +2854,15 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_d3d12_native_selector_invalid",
                 "The installed D3D12 stock selector is invalid");
+            return result;
+        }
+        if (request.builtin_multimap_source !=
+                render::BuiltinStockMultiMapSourceSelector::disabled &&
+            !builtin_multimap_source) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_builtin_multimap_selector_invalid",
+                "The built-in MultiMap source selector is invalid");
             return result;
         }
         if (builtin_vulkan_source && builtin_d3d12_native) {
@@ -3576,6 +3588,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             request.builtin_d3d12_native_programs;
         scene_request.builtin_d3d12_native_sampler_settings =
             request.builtin_d3d12_native_sampler_settings;
+        scene_request.builtin_multimap_source =
+            request.builtin_multimap_source;
         scene_request.overrides_by_material = material_overrides;
         scene_request.evaluate_damage_preview = request.evaluate_damage_preview;
         scene_request.damage_broken_visible = request.damage_broken_visible;

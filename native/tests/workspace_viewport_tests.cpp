@@ -682,6 +682,38 @@ void configure_multimap_reflection(Fixture& value) {
     value.module_set.multimap_reflection = true;
 }
 
+void configure_multimap_normal_detail(Fixture& value, bool alpha_tested) {
+    auto& model = value.document.assembly.model;
+    auto& material = model.materials.front();
+    material.shader = alpha_tested
+        ? "ksPerPixelMultiMap_AT_NMDetail"
+        : "ksPerPixelMultiMap_NMDetail";
+    material.serializedBlendMode = alpha_tested ? 2U : 0U;
+    material.properties = {
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 1.0F, {}, {}, {}},
+        {"detailUVMultiplier", 1.0F, {}, {}, {}},
+        {"normalDetailStrength", 1.0F, {}, {}, {}},
+    };
+    if (alpha_tested)
+        material.properties.push_back({"ksAlphaRef", 0.5F, {}, {}, {}});
+    material.resources.clear();
+    model.textures.clear();
+    const std::array<const char*, 5U> slots = {
+        "txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
+    for (std::size_t index = 0U; index < slots.size(); ++index) {
+        const std::string texture =
+            std::string("multimap_") + std::to_string(index) + ".dds";
+        material.resources.push_back(
+            {slots[index], static_cast<std::uint32_t>(index), texture});
+        model.textures.push_back(
+            {true, texture, 152U, diffuse_dds(), {}});
+    }
+    value.document.scene.snapshot.materials.front().shader = material.shader;
+    value.module_set.key = material.shader;
+}
+
 Fixture car_lod_fixture() {
     auto result = fixture();
     auto& model = result.document.assembly.model;
@@ -6703,6 +6735,70 @@ void prepares_and_draws_builtin_vulkan_source_viewport() {
             "production weather and camera builders drive installed-editor source shadows");
 }
 
+void prepares_and_draws_builtin_multimap_source_viewport() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        for (const bool alpha_tested : {false, true}) {
+            auto value = fixture();
+            configure_multimap_normal_detail(value, alpha_tested);
+            auto request = request_for(value);
+            request.shader_modules = {};
+            request.builtin_multimap_source =
+                BuiltinStockMultiMapSourceSelector::normal_detail;
+            request.color_samples = alpha_tested ? 4U : 1U;
+            FakeDevice device(backend);
+            auto prepared = apex::app::prepareWorkspaceViewport(
+                device, value.document, request);
+            if (!prepared.ok())
+                throw std::runtime_error(
+                    "built-in viewport MultiMap source preparation: " +
+                    prepared.diagnostic.code + " " +
+                    prepared.diagnostic.message);
+            require(prepared.viewport->preparation().resources != nullptr &&
+                        prepared.viewport->preparation().resources
+                                ->unique_pipeline_count() == 1U &&
+                        prepared.viewport->preparation().resources
+                                ->owned_texture_count() == 5U &&
+                        prepared.viewport->preparation().resources
+                                ->stock_vulkan_source_program_count() == 0U &&
+                        prepared.viewport->preparation().resources
+                                ->stock_d3d12_native_program_count() == 0U &&
+                        device.created_depth_attachments.size() == 1U,
+                    "viewport forwards the bounded MultiMap source without adding shadow ownership");
+
+            FakeTarget target(request.presentation, backend);
+            WorkspaceViewportFrameRequest frame;
+            frame.camera.clip_space = backend == Backend::Vulkan
+                ? CameraClipSpace::vulkan
+                : CameraClipSpace::d3d12;
+            frame.frame_constants = KsPerPixelFrameConstants{};
+            Diagnostic diagnostic;
+            const auto status = prepared.viewport->drawAndPresent(
+                device, target, frame, diagnostic);
+            if (status != WorkspaceViewportFrameStatus::ready)
+                throw std::runtime_error(
+                    "built-in viewport MultiMap source draw: " +
+                    diagnostic.code + " " + diagnostic.message);
+            require(device.draw_calls == 1U && device.present_calls == 1U,
+                    "both backends draw the selected MultiMap source viewport");
+        }
+    }
+
+    auto invalid_value = fixture();
+    auto invalid_request = request_for(invalid_value);
+    invalid_request.builtin_multimap_source =
+        static_cast<BuiltinStockMultiMapSourceSelector>(255U);
+    FakeDevice invalid_device;
+    const auto invalid = apex::app::prepareWorkspaceViewport(
+        invalid_device, invalid_value.document, invalid_request);
+    require(!invalid.ok() &&
+                invalid.diagnostic.code ==
+                    "workspace_viewport_builtin_multimap_selector_invalid" &&
+                invalid_device.buffer_calls == 0U &&
+                invalid_device.texture_calls == 0U &&
+                invalid_device.depth_calls == 0U,
+            "invalid viewport MultiMap selectors fail before allocation");
+}
+
 void rejects_invalid_builtin_vulkan_source_frames_before_draw() {
     auto value = fixture();
     auto request = request_for(value);
@@ -7985,6 +8081,7 @@ int main() {
         camera_controller_supports_keyboard_translation();
         schedules_directional_shadows_before_color_and_reuses_maps();
         prepares_and_draws_builtin_vulkan_source_viewport();
+        prepares_and_draws_builtin_multimap_source_viewport();
         rejects_invalid_builtin_vulkan_source_frames_before_draw();
         preserves_portable_and_d3d12_viewport_paths();
         rejects_invalid_d3d12_native_viewport_selection_before_allocation();

@@ -79,6 +79,7 @@ void usage(std::ostream& output) {
               "                       [--cloud-assets <directory>]\n"
               "                       [--hdr [--exposure <value>] [--fxaa]]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
+              "                       [--builtin-multimap-nm-detail]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
               "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
               "                       [--shader-family <name> --shader-vertex <file> --shader-fragment <file>]\n"
@@ -546,6 +547,7 @@ struct WindowWorkspaceOptions {
     bool fxaa = false;
     std::optional<float> exposure;
     bool builtinVulkanKsPerPixel = false;
+    bool builtinMultimapNmDetail = false;
     std::optional<std::filesystem::path> d3d12KsPerPixelPackage;
     std::optional<std::filesystem::path> d3d12KsPerPixelAtPackage;
     std::vector<WindowShaderSpec> shaders;
@@ -1339,6 +1341,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                 throw std::runtime_error(
                     "duplicate --builtin-vulkan-ks-per-pixel option");
             result.builtinVulkanKsPerPixel = true;
+        } else if (option == "--builtin-multimap-nm-detail") {
+            if (result.builtinMultimapNmDetail)
+                throw std::runtime_error(
+                    "duplicate --builtin-multimap-nm-detail option");
+            result.builtinMultimapNmDetail = true;
         } else if (option == "--d3d12-ks-per-pixel-package") {
             if (result.d3d12KsPerPixelPackage.has_value())
                 throw std::runtime_error(
@@ -1454,6 +1461,7 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
     const bool has_model_source = model_source_count != 0U;
     if (!has_model_source &&
         (result.builtinVulkanKsPerPixel ||
+         result.builtinMultimapNmDetail ||
          has_d3d12_native_package(result) ||
          !result.shaders.empty() ||
          has_directional_shadow_modules(result) ||
@@ -2016,6 +2024,7 @@ void load_window_workspace(const WindowWorkspaceOptions& options,
                 "ksPerPixelAT");
     }
     if (options.shaders.empty() && !options.builtinVulkanKsPerPixel &&
+        !options.builtinMultimapNmDetail &&
         !has_d3d12_native_package(options))
         throw std::runtime_error("workspace rendering requires caller-supplied shader modules");
 
@@ -2408,6 +2417,11 @@ int run_window(int argc, char** argv) {
         if (workspace_options.builtinVulkanKsPerPixel) {
             request.builtin_vulkan_source =
                 apex::render::BuiltinVulkanStockSourceSelector::ks_per_pixel;
+        }
+        if (workspace_options.builtinMultimapNmDetail) {
+            request.builtin_multimap_source =
+                apex::render::BuiltinStockMultiMapSourceSelector::normal_detail;
+            request.color_samples = 4U;
         }
         if (has_d3d12_native_package(workspace_options)) {
             if (workspace_options.d3d12KsPerPixelPackage.has_value() &&

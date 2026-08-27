@@ -675,6 +675,8 @@ StockSceneExecutionResult prepare_stock_scene_execution(
             request.builtin_d3d12_native_programs;
         material_request.builtin_d3d12_native_sampler_settings =
             request.builtin_d3d12_native_sampler_settings;
+        material_request.builtin_multimap_source =
+            request.builtin_multimap_source;
         material_request.overrides_by_material = material_overrides;
         material_request.targets = request.targets;
         material_request.wireframe = request.wireframe;

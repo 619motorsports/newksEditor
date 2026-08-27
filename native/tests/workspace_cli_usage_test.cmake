@@ -81,6 +81,61 @@ if(duplicate_source_position EQUAL -1)
 endif()
 
 execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --builtin-multimap-nm-detail
+  RESULT_VARIABLE detached_multimap_source_result
+  ERROR_VARIABLE detached_multimap_source_error
+)
+if(NOT detached_multimap_source_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached built-in MultiMap source returned ${detached_multimap_source_result}: ${detached_multimap_source_error}")
+endif()
+string(FIND "${detached_multimap_source_error}"
+  "shader modules require a workspace model"
+  detached_multimap_source_position)
+if(detached_multimap_source_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached built-in MultiMap source was not diagnosed: ${detached_multimap_source_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
+          --builtin-multimap-nm-detail --builtin-multimap-nm-detail
+  RESULT_VARIABLE duplicate_multimap_source_result
+  ERROR_VARIABLE duplicate_multimap_source_error
+)
+if(NOT duplicate_multimap_source_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate built-in MultiMap source returned ${duplicate_multimap_source_result}: ${duplicate_multimap_source_error}")
+endif()
+string(FIND "${duplicate_multimap_source_error}"
+  "duplicate --builtin-multimap-nm-detail option"
+  duplicate_multimap_source_position)
+if(duplicate_multimap_source_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate built-in MultiMap source was not diagnosed: ${duplicate_multimap_source_error}")
+endif()
+
+foreach(multimap_backend IN ITEMS vulkan d3d12)
+  execute_process(
+    COMMAND "${APEX_NATIVE_COMMAND}" --window "${multimap_backend}"
+            --model missing.kn5 --builtin-multimap-nm-detail
+    RESULT_VARIABLE multimap_backend_result
+    ERROR_VARIABLE multimap_backend_error
+  )
+  if(NOT multimap_backend_result STREQUAL "1")
+    message(FATAL_ERROR
+      "${multimap_backend} MultiMap source returned ${multimap_backend_result}: ${multimap_backend_error}")
+  endif()
+  string(FIND "${multimap_backend_error}"
+    "cannot open missing.kn5" multimap_backend_position)
+  if(multimap_backend_position EQUAL -1)
+    message(FATAL_ERROR
+      "${multimap_backend} MultiMap source was rejected before model loading: ${multimap_backend_error}")
+  endif()
+endforeach()
+
+execute_process(
   COMMAND "${APEX_NATIVE_COMMAND}" --window d3d12
           --model missing.kn5 --builtin-vulkan-ks-per-pixel
   RESULT_VARIABLE d3d_source_result

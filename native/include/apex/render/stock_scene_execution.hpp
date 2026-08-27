@@ -50,6 +50,10 @@ struct StockSceneExecutionRequest {
         builtin_d3d12_native_programs{};
     StockKsPerPixelNativeSamplerSettings
         builtin_d3d12_native_sampler_settings{};
+    // Select the portable source-equivalent NMDetail package for either
+    // backend. Exact packet-family and pass exclusions remain authoritative.
+    BuiltinStockMultiMapSourceSelector builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::disabled;
     std::span<const MaterialBindingOverrides> overrides_by_material{};
     // When enabled, resolve the source-evidenced F4 state at this facade
     // boundary. The resolver's complete material table is merged after any

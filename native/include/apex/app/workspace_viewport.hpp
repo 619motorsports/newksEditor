@@ -227,6 +227,10 @@ struct WorkspaceViewportPrepareRequest {
         builtin_d3d12_native_programs{};
     render::StockKsPerPixelNativeSamplerSettings
         builtin_d3d12_native_sampler_settings{};
+    // Explicit source-equivalent package for static NMDetail and AT_NMDetail
+    // packets. It supports Vulkan and D3D12 without adding pass capabilities.
+    render::BuiltinStockMultiMapSourceSelector builtin_multimap_source =
+        render::BuiltinStockMultiMapSourceSelector::disabled;
     std::span<const render::MaterialBindingOverrides> overrides_by_material{};
     // Presence requires at least one external request. The matching file
     // overrides are consumed into owned embedded payloads before render

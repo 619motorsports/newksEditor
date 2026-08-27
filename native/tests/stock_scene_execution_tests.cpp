@@ -199,6 +199,41 @@ Fixture damage_fixture() {
     return result;
 }
 
+Fixture multimap_detail_fixture(
+    std::string shader = "ksPerPixelMultiMap_NMDetail") {
+    Fixture result = fixture();
+    auto& material = result.model.materials.front();
+    material.shader = std::move(shader);
+    material.serializedBlendMode =
+        material.shader == "ksPerPixelMultiMap_AT_NMDetail" ? 2U : 0U;
+    material.properties = {
+        {"fresnelMaxLevel", 0.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 1.0F, {}, {}, {}},
+        {"detailUVMultiplier", 1.0F, {}, {}, {}},
+        {"normalDetailStrength", 1.0F, {}, {}, {}},
+    };
+    if (material.serializedBlendMode != 0U)
+        material.properties.push_back({"ksAlphaRef", 0.5F, {}, {}, {}});
+    material.resources.clear();
+    result.model.textures.clear();
+    const std::array<const char*, 5U> slots = {
+        "txDiffuse", "txNormal", "txMaps", "txDetail", "txNormalDetail"};
+    for (std::size_t index = 0U; index < slots.size(); ++index) {
+        const std::string texture =
+            std::string("multimap_") + std::to_string(index);
+        material.resources.push_back(
+            {slots[index], static_cast<std::uint32_t>(index), texture});
+        result.model.textures.push_back(
+            {true, texture, 4U, {}, std::nullopt});
+    }
+    result.scene.materials.front().shader = material.shader;
+    result.module_set.key = material.shader;
+    for (auto& node : result.scene.nodes)
+        node.transparent = false;
+    return result;
+}
+
 StockSceneExecutionRequest request_for(Fixture& fixture_value) {
     StockSceneExecutionRequest request;
     request.model = &fixture_value.model;
@@ -264,6 +299,37 @@ void test_d3d12_native_selector_reaches_material_handoff() {
                     "stock_material_d3d12_native_program_count_invalid" &&
                 device.buffer_calls == 0U,
             "stock-scene D3D12 selector must reach material validation before allocation");
+}
+
+void test_builtin_multimap_source_selector_reaches_material_handoff() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        Fixture fixture_value = multimap_detail_fixture();
+        auto request = request_for(fixture_value);
+        request.shader_modules = {};
+        request.builtin_multimap_source =
+            BuiltinStockMultiMapSourceSelector::normal_detail;
+        FakeDevice device(backend);
+        const auto result = prepare_stock_scene_execution(device, request);
+        require(result.ok() && result.resources->unique_pipeline_count() == 1U &&
+                    result.resources->stock_vulkan_source_program_count() == 0U &&
+                    result.resources->stock_d3d12_native_program_count() == 0U,
+                "stock-scene MultiMap source selector must reach material execution on both backends");
+    }
+
+    Fixture reflected = multimap_detail_fixture();
+    auto reflected_request = request_for(reflected);
+    reflected_request.shader_modules = {};
+    reflected_request.builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::normal_detail;
+    reflected_request.multimap_reflection = true;
+    FakeDevice reflected_device;
+    const auto reflected_result = prepare_stock_scene_execution(
+        reflected_device, reflected_request);
+    require(!reflected_result.ok() &&
+                reflected_result.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                reflected_device.buffer_calls == 0U,
+            "stock-scene MultiMap source selector must preserve the reflection exclusion");
 }
 
 void test_directional_shadow_receiver_reaches_material_handoff() {
@@ -826,6 +892,7 @@ int main() {
         test_success_and_plan_evidence();
         test_builtin_vulkan_source_selector_reaches_material_handoff();
         test_d3d12_native_selector_reaches_material_handoff();
+        test_builtin_multimap_source_selector_reaches_material_handoff();
         test_directional_shadow_receiver_reaches_material_handoff();
         test_multimap_reflection_reaches_material_handoff();
         test_alpha_shadow_constants_reach_static_scene_handoff();
