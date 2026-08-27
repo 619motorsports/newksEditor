@@ -653,6 +653,87 @@ void rejectsOversizedUploadSubresourceLists() {
             "an oversized upload list is rejected before iteration");
 }
 
+void validatesTextureAccessPolicies() {
+    constexpr TextureUsage render_then_sample_usage =
+        TextureUsage::sampled | TextureUsage::color_attachment |
+        TextureUsage::transfer_source;
+    TextureDescription render_then_sample;
+    render_then_sample.width = 4U;
+    render_then_sample.height = 4U;
+    render_then_sample.format = TextureFormat::rgba8_unorm;
+    render_then_sample.usage = render_then_sample_usage;
+    render_then_sample.mutability = TextureMutability::mutable_data;
+    render_then_sample.access_policy = TextureAccessPolicy::render_then_sample;
+
+    Diagnostic diagnostic;
+    require(validate_texture_description(render_then_sample, {}, diagnostic) ==
+                TextureStatus::ready,
+            "render-then-sample accepts its exact mutable uncompressed contract");
+    require(validate_texture_upload_plan(render_then_sample, {}, diagnostic) ==
+                TextureStatus::ready,
+            "render-then-sample upload validation accepts its exact contract");
+
+    TextureDescription legacy{
+        4U, 4U, 1U, 1U, TextureFormat::rgba8_unorm, TextureUsage::sampled,
+        TextureMemory::device_local, TextureMutability::immutable};
+    require(legacy.access_policy == TextureAccessPolicy::fixed_usage &&
+                validate_texture_description(legacy, {}, diagnostic) ==
+                    TextureStatus::ready,
+            "the appended access policy preserves the fixed-usage default");
+
+    TextureDescription unknown_policy = render_then_sample;
+    unknown_policy.access_policy =
+        static_cast<TextureAccessPolicy>(0xffU);
+    require(validate_texture_description(unknown_policy, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_unknown",
+            "an unknown texture access policy is rejected with a stable diagnostic");
+    require(validate_texture_upload_plan(unknown_policy, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_unknown",
+            "upload validation rejects an unknown texture access policy");
+
+    TextureDescription invalid_usage = render_then_sample;
+    invalid_usage.usage = TextureUsage::sampled | TextureUsage::color_attachment;
+    require(validate_texture_description(invalid_usage, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_usage_invalid",
+            "render-then-sample rejects missing transfer-source usage");
+    invalid_usage.usage = render_then_sample_usage | TextureUsage::storage;
+    require(validate_texture_upload_plan(invalid_usage, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_usage_invalid",
+            "render-then-sample rejects extra usage bits");
+
+    TextureDescription invalid_mutability = render_then_sample;
+    invalid_mutability.mutability = TextureMutability::immutable;
+    require(validate_texture_description(invalid_mutability, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_mutability_invalid",
+            "render-then-sample requires mutable data");
+
+    TextureDescription invalid_samples = render_then_sample;
+    invalid_samples.samples = 4U;
+    require(validate_texture_upload_plan(invalid_samples, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_samples_invalid",
+            "render-then-sample requires one sample");
+
+    TextureDescription compressed = render_then_sample;
+    compressed.format = TextureFormat::bc1_unorm;
+    require(validate_texture_description(compressed, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_format_invalid",
+            "render-then-sample rejects compressed formats");
+
+    TextureDescription unknown_format = render_then_sample;
+    unknown_format.format = TextureFormat::unknown;
+    require(validate_texture_upload_plan(unknown_format, {}, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_access_policy_format_invalid",
+            "render-then-sample rejects unknown formats");
+}
+
 void validatesExplicitCubeTextureContracts() {
     constexpr std::array<CubeFace, texture_cube_face_count> faces = {
         CubeFace::positive_x, CubeFace::negative_x, CubeFace::positive_y,
@@ -777,6 +858,7 @@ int main() {
         plansPortableDecodedTextureResources();
         plansPortableJpegResources();
         rejectsOversizedUploadSubresourceLists();
+        validatesTextureAccessPolicies();
         validatesExplicitCubeTextureContracts();
         std::cout << "texture upload tests passed\n";
         return 0;

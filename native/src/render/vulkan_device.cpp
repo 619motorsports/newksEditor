@@ -882,7 +882,11 @@ VkImageUsageFlags vk_texture_usage(TextureUsage usage) {
     return flags;
 }
 
-VkImageLayout texture_final_layout(TextureUsage usage) {
+VkImageLayout texture_final_layout(
+    TextureUsage usage,
+    TextureAccessPolicy access_policy = TextureAccessPolicy::fixed_usage) {
+    if (access_policy == TextureAccessPolicy::render_then_sample)
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     const auto raw = static_cast<std::uint32_t>(usage);
     if ((raw & static_cast<std::uint32_t>(TextureUsage::storage)) != 0U)
         return VK_IMAGE_LAYOUT_GENERAL;
@@ -1539,7 +1543,8 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
                                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                                         static_cast<std::uint32_t>(copies.size()), copies.data());
             barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.newLayout = texture_final_layout(
+                description.usage, description.access_policy);
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1562,7 +1567,9 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
             if (result == VK_SUCCESS) {
                 result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
                 completed = result == VK_SUCCESS;
-                if (completed) current_layout = texture_final_layout(description.usage);
+                if (completed)
+                    current_layout = texture_final_layout(
+                        description.usage, description.access_policy);
             }
             vkDestroyFence(context->device, fence, nullptr);
         }
@@ -1573,7 +1580,8 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             result = drain;
         } else {
-            current_layout = texture_final_layout(description.usage);
+            current_layout = texture_final_layout(
+                description.usage, description.access_policy);
         }
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
@@ -1583,7 +1591,9 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
         diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "texture_upload_failed";
         return false;
     }
-    if (!completed) current_layout = texture_final_layout(description.usage);
+    if (!completed)
+        current_layout = texture_final_layout(
+            description.usage, description.access_policy);
     return true;
 }
 
@@ -1676,7 +1686,8 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
                                    staging.buffer, 1, &copy);
 
             barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.newLayout = texture_final_layout(description.usage);
+            barrier.newLayout = texture_final_layout(
+                description.usage, description.access_policy);
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
@@ -1706,13 +1717,15 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
     if (submitted && !completed) {
         const VkResult drain = vkDeviceWaitIdle(context->device);
         if (drain == VK_SUCCESS) {
-            current_layout = texture_final_layout(description.usage);
+            current_layout = texture_final_layout(
+                description.usage, description.access_policy);
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             result = drain;
         }
     } else if (completed) {
-        current_layout = texture_final_layout(description.usage);
+        current_layout = texture_final_layout(
+            description.usage, description.access_policy);
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1, &command);
     if (result != VK_SUCCESS) {
@@ -3652,7 +3665,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                                    readback.buffer, 1U, &copy);
             if (description.samples == 1U) {
                 barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                barrier.newLayout = texture_final_layout(description.usage);
+                barrier.newLayout = texture_final_layout(
+                    description.usage, description.access_policy);
                 barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
                 barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                 vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -3683,7 +3697,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
     if (submitted && !completed) {
         const VkResult drain = vkDeviceWaitIdle(context->device);
         if (drain == VK_SUCCESS) {
-            current_layout = texture_final_layout(description.usage);
+            current_layout = texture_final_layout(
+                description.usage, description.access_policy);
             if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3691,7 +3706,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             result = drain;
         }
     } else if (completed) {
-        current_layout = texture_final_layout(description.usage);
+        current_layout = texture_final_layout(
+            description.usage, description.access_policy);
         if (depth_attachment != nullptr) depth_attachment->mark_rendered(clear_depth);
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
@@ -4309,7 +4325,9 @@ bool draw_indexed_batch_and_readback(
             if (description.samples == 1U || retained_resolve_image != nullptr) {
                 barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                 barrier.newLayout = description.samples == 1U
-                                        ? texture_final_layout(description.usage)
+                                        ? texture_final_layout(
+                                              description.usage,
+                                              description.access_policy)
                                         : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                 barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
                 barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -4342,7 +4360,8 @@ bool draw_indexed_batch_and_readback(
     if (submitted && !completed) {
         const VkResult drain = vkDeviceWaitIdle(context->device);
         if (drain == VK_SUCCESS) {
-            current_layout = texture_final_layout(description.usage);
+            current_layout = texture_final_layout(
+                description.usage, description.access_policy);
             if (retained_resolve_layout != nullptr)
                 *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             if (retained_resolve_initialized != nullptr)
@@ -4364,7 +4383,8 @@ bool draw_indexed_batch_and_readback(
             result = drain;
         }
     } else if (completed) {
-        current_layout = texture_final_layout(description.usage);
+        current_layout = texture_final_layout(
+            description.usage, description.access_policy);
         if (retained_resolve_layout != nullptr)
             *retained_resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         if (retained_resolve_initialized != nullptr)

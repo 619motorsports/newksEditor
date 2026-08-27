@@ -413,7 +413,11 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   }
 
   TextureDescription capture_description = target_description;
+  capture_description.usage =
+      TextureUsage::sampled | TextureUsage::color_attachment |
+      TextureUsage::transfer_source;
   capture_description.shape = TextureShape::texture_cube;
+  capture_description.access_policy = TextureAccessPolicy::render_then_sample;
   TextureResult capture_target = device.create_texture(capture_description);
   require(capture_target.ok(), "reflection draw creates a cube capture target");
 
@@ -465,6 +469,51 @@ void exercise_reflection_draw(Device &device, const Backend backend,
         std::to_integer<std::uint8_t>(captured.rgba8[capture_center + channel]);
     require(std::abs(actual - static_cast<int>(rounded)) <= 1,
             "cube-face batch targets and reads the selected face");
+  }
+
+  capture_batch.target_subresource.cube_face = CubeFace::positive_x;
+  const IndexedStaticMeshBatchResult captured_positive_x =
+      device.draw_indexed_static_mesh_batch_and_readback(
+          *capture_target.texture, capture_batch);
+  if (!captured_positive_x.ok())
+    throw std::runtime_error(
+        "Positive-X cube-face draw failed: " +
+        captured_positive_x.diagnostic.code + ": " +
+        captured_positive_x.diagnostic.message);
+
+  request.multimap_reflection_binding.cube.texture = capture_target.texture.get();
+  const IndexedStaticMeshDrawResult sampled_capture =
+      device.draw_indexed_static_mesh_and_readback(*target.texture, request);
+  if (!sampled_capture.ok())
+    throw std::runtime_error(
+        "Render-then-sample reflection draw failed: " +
+        sampled_capture.diagnostic.code + ": " +
+        sampled_capture.diagnostic.message);
+
+  StockMultiMapReflectionInput sampled_capture_input = capture_expected_input;
+  for (std::size_t channel = 0U; channel < 3U; ++channel) {
+    const long captured_channel = std::lround(
+        std::clamp(expected_capture_rgba[channel], 0.0F, 1.0F) * 255.0F);
+    sampled_capture_input.cube_rgb[channel] =
+        static_cast<float>(captured_channel) / 255.0F;
+  }
+  const StockMultiMapReflectionResult sampled_capture_expected =
+      evaluate_stock_multimap_reflection(sampled_capture_input);
+  require(sampled_capture_expected.ready,
+          "render-then-sample resolves its recovered expected value");
+  const std::array<float, 4U> expected_sampled_capture_rgba = {
+      sampled_capture_expected.rgb[0U], sampled_capture_expected.rgb[1U],
+      sampled_capture_expected.rgb[2U], sampled_capture_expected.alpha};
+  for (std::size_t channel = 0U;
+       channel < expected_sampled_capture_rgba.size(); ++channel) {
+    const long rounded =
+        std::lround(std::clamp(expected_sampled_capture_rgba[channel], 0.0F,
+                              1.0F) *
+                    255.0F);
+    const int actual = std::to_integer<std::uint8_t>(
+        sampled_capture.rgba8[capture_center + channel]);
+    require(std::abs(actual - static_cast<int>(rounded)) <= 2,
+            "a rendered cube face is sampled after its final transition");
   }
 }
 

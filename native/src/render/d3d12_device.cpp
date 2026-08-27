@@ -919,7 +919,13 @@ d3d12_texture_srv_description(const TextureDescription& description,
     return true;
 }
 
-[[nodiscard]] D3D12_RESOURCE_STATES texture_state(TextureUsage usage) noexcept {
+[[nodiscard]] D3D12_RESOURCE_STATES texture_state(
+    TextureUsage usage,
+    TextureAccessPolicy access_policy = TextureAccessPolicy::fixed_usage) noexcept {
+    if (access_policy == TextureAccessPolicy::render_then_sample)
+        return static_cast<D3D12_RESOURCE_STATES>(
+            static_cast<UINT>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) |
+            static_cast<UINT>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
     const auto raw = static_cast<std::uint32_t>(usage);
     if ((raw & static_cast<std::uint32_t>(TextureUsage::color_attachment)) != 0U)
         return D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -982,8 +988,11 @@ d3d12_texture_srv_description(const TextureDescription& description,
     return flags;
 }
 
-[[nodiscard]] bool valid_d3d12_texture_usage(TextureUsage usage, Diagnostic& diagnostic) noexcept {
-    const auto raw = static_cast<std::uint32_t>(usage);
+[[nodiscard]] bool valid_d3d12_texture_usage(
+    const TextureDescription& description, Diagnostic& diagnostic) noexcept {
+    if (description.access_policy == TextureAccessPolicy::render_then_sample)
+        return true;
+    const auto raw = static_cast<std::uint32_t>(description.usage);
     const auto transfer_destination = static_cast<std::uint32_t>(TextureUsage::transfer_destination);
     const auto storage = static_cast<std::uint32_t>(TextureUsage::storage);
     const auto color_attachment = static_cast<std::uint32_t>(TextureUsage::color_attachment);
@@ -1350,12 +1359,14 @@ bool clear_texture_readback(const std::shared_ptr<D3D12Context>& context,
     target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     target.PlacedFootprint = footprint;
     list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
-    if (texture_state(description.usage) != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    if (texture_state(description.usage, description.access_policy) !=
+        D3D12_RESOURCE_STATE_COPY_SOURCE) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = destination;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barrier.Transition.StateAfter = texture_state(description.usage);
+        barrier.Transition.StateAfter =
+            texture_state(description.usage, description.access_policy);
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1, &barrier);
     }
@@ -1379,7 +1390,8 @@ bool clear_texture_readback(const std::shared_ptr<D3D12Context>& context,
     }
     ID3D12CommandList* command_lists[] = {list.Get()};
     context->queue->ExecuteCommandLists(1, command_lists);
-    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    const D3D12_RESOURCE_STATES final_state =
+        texture_state(description.usage, description.access_policy);
     bool submitted = true;
     constexpr UINT64 fence_value = 1;
     result = context->queue->Signal(fence.Get(), fence_value);
@@ -2452,7 +2464,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
             }
         }
     }
-    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    const D3D12_RESOURCE_STATES final_state =
+        texture_state(description.usage, description.access_policy);
     if (description.samples > 1U) {
         D3D12_RESOURCE_BARRIER resolve_source{};
         resolve_source.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -3872,7 +3885,8 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
-    const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+    const D3D12_RESOURCE_STATES final_state =
+        texture_state(description.usage, description.access_policy);
     constexpr D3D12_RESOURCE_STATES resolve_final_state =
         D3D12_RESOURCE_STATE_RENDER_TARGET;
     if (description.samples > 1U) {
@@ -4563,8 +4577,11 @@ public:
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
-        const bool uploaded = execute_texture_upload(context_, resource_.Get(), info_.description, uploads,
-                                                     state_, texture_state(info_.description.usage), diagnostic);
+        const bool uploaded = execute_texture_upload(
+            context_, resource_.Get(), info_.description, uploads, state_,
+            texture_state(info_.description.usage,
+                          info_.description.access_policy),
+            diagnostic);
         initialized_ = initialized_ || uploaded;
         return uploaded;
     }
@@ -6914,7 +6931,7 @@ public:
         const TextureStatus validation = validate_texture_description(description, initial_uploads, diagnostic);
         if (validation != TextureStatus::ready)
             return {validation, std::move(diagnostic), nullptr};
-        if (!valid_d3d12_texture_usage(description.usage, diagnostic))
+        if (!valid_d3d12_texture_usage(description, diagnostic))
             return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         if (description.memory != TextureMemory::device_local) {
             return {TextureStatus::unsupported,
@@ -6964,7 +6981,8 @@ public:
                                              description.samples, diagnostic))
                 return {TextureStatus::unsupported, std::move(diagnostic), nullptr};
         }
-        const D3D12_RESOURCE_STATES final_state = texture_state(description.usage);
+        const D3D12_RESOURCE_STATES final_state =
+            texture_state(description.usage, description.access_policy);
         const bool needs_upload = !initial_uploads.subresources.empty();
         const D3D12_RESOURCE_STATES initial_state = needs_upload ? D3D12_RESOURCE_STATE_COPY_DEST : final_state;
         D3D12_RESOURCE_DESC resource_description{};

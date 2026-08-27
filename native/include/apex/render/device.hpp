@@ -265,6 +265,11 @@ enum class TextureShape : std::uint8_t {
     texture_cube,
 };
 
+enum class TextureAccessPolicy : std::uint8_t {
+    fixed_usage,
+    render_then_sample,
+};
+
 enum class TextureSampleViewKind : std::uint8_t {
     texture_2d,
     texture_2d_array,
@@ -297,6 +302,10 @@ struct TextureDescription {
     // For texture_cube, array_layers is the logical cube count. Backends own
     // six physical layers per cube; a six-layer texture_2d remains a 2D array.
     TextureShape shape = TextureShape::texture_2d;
+    // fixed_usage preserves the existing resource-state contract. The
+    // render_then_sample opt-in reserves an exact mutable render target that
+    // can transition to sampled use after rendering completes.
+    TextureAccessPolicy access_policy = TextureAccessPolicy::fixed_usage;
 };
 
 struct TextureUpload {

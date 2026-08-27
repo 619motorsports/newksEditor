@@ -118,6 +118,49 @@ TextureStatus validate_texture_shape_contract(const TextureDescription& descript
     return TextureStatus::ready;
 }
 
+TextureStatus validate_texture_access_policy_contract(
+    const TextureDescription& description, Diagnostic& diagnostic) {
+    switch (description.access_policy) {
+    case TextureAccessPolicy::fixed_usage:
+        return TextureStatus::ready;
+    case TextureAccessPolicy::render_then_sample:
+        break;
+    default:
+        diagnostic = {"texture_access_policy_unknown",
+                      "The texture access policy is not recognized by the native contract"};
+        return TextureStatus::invalid_description;
+    }
+
+    constexpr std::uint32_t required_usage =
+        static_cast<std::uint32_t>(TextureUsage::sampled) |
+        static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+        static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if (static_cast<std::uint32_t>(description.usage) != required_usage) {
+        diagnostic = {"texture_access_policy_usage_invalid",
+                      "The render-then-sample policy requires exactly sampled, color-attachment, and transfer-source usage"};
+        return TextureStatus::invalid_description;
+    }
+    if (description.mutability != TextureMutability::mutable_data) {
+        diagnostic = {"texture_access_policy_mutability_invalid",
+                      "The render-then-sample policy requires mutable texture data"};
+        return TextureStatus::invalid_description;
+    }
+    if (description.samples != 1U) {
+        diagnostic = {"texture_access_policy_samples_invalid",
+                      "The render-then-sample policy requires a single-sample texture"};
+        return TextureStatus::invalid_description;
+    }
+    const TextureFormatInfo format = texture_format_info(description.format);
+    if (!texture_format_is_known(description.format) ||
+        format.classification != TextureFormatClass::uncompressed ||
+        format.bytes_per_pixel == 0U) {
+        diagnostic = {"texture_access_policy_format_invalid",
+                      "The render-then-sample policy requires a known uncompressed color format"};
+        return TextureStatus::invalid_description;
+    }
+    return TextureStatus::ready;
+}
+
 TextureStatus validate_texture_scalar_float_contract(const TextureDescription& description,
                                                       Diagnostic& diagnostic) {
     if (description.format != TextureFormat::r32_sfloat) return TextureStatus::ready;
@@ -336,6 +379,9 @@ TextureStatus validate_texture_upload_plan(const TextureDescription& description
     }
     const TextureStatus shape_status = validate_texture_shape_contract(description, diagnostic);
     if (shape_status != TextureStatus::ready) return shape_status;
+    const TextureStatus access_policy_status =
+        validate_texture_access_policy_contract(description, diagnostic);
+    if (access_policy_status != TextureStatus::ready) return access_policy_status;
     const TextureStatus sample_status =
         validate_texture_sample_contract(description, !uploads.subresources.empty(), diagnostic);
     if (sample_status != TextureStatus::ready) return sample_status;
@@ -457,6 +503,9 @@ TextureStatus validate_texture_description(const TextureDescription& description
     }
     const TextureStatus shape_status = validate_texture_shape_contract(description, diagnostic);
     if (shape_status != TextureStatus::ready) return shape_status;
+    const TextureStatus access_policy_status =
+        validate_texture_access_policy_contract(description, diagnostic);
+    if (access_policy_status != TextureStatus::ready) return access_policy_status;
     const TextureStatus sample_status =
         validate_texture_sample_contract(description, !initial_uploads.subresources.empty(), diagnostic);
     if (sample_status != TextureStatus::ready) return sample_status;
