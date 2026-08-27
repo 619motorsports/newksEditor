@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -131,10 +132,66 @@ void weatherAndExposure() {
             "bright pass threshold");
     require(std::abs(ksEditorBloomCompositeScale() - 0.01064F) < 1e-6F,
             "bloom composite metadata");
-    const auto kernel = ksEditorBloomGaussianKernel();
-    require(kernel.sample_count >= 1u && kernel.sample_count <= 15u &&
-                std::abs(kernel.weights[0]) > 0.0F && finite(kernel.channel_sigmas),
-            "bounded bloom kernel");
+    require(ksEditorGlareBrightPass({2.0F, 10.0F, 20.0F}, 0.5F) ==
+                LightingVec3{0.0F, 0.0F, 5.0F},
+            "bright pass exposure gain");
+    require(ksEditorGlareBrightPass({200000.0F, -1.0F,
+                                     std::numeric_limits<float>::quiet_NaN()},
+                                    1.0F, 0.0F, 2.0F) ==
+                LightingVec3{64000.0F, 0.0F, 0.0F},
+            "bright pass clamps untrusted HDR values");
+
+    constexpr std::array<float, 5> expected_sigma = {
+        1.045F, 2.09F, 4.18F, 8.36F, 16.72F};
+    constexpr std::array<std::uint32_t, 5> expected_sample_count = {
+        5U, 7U, 13U, 15U, 15U};
+    std::array<BloomKernelMetadata, 5> kernels{};
+    for (std::size_t level = 0; level < kernels.size(); ++level) {
+        kernels[level] = ksEditorBloomGaussianKernel(static_cast<std::int32_t>(level));
+        require(std::abs(kernels[level].sigma - expected_sigma[level]) < 1e-5F &&
+                    kernels[level].sample_count == expected_sample_count[level] &&
+                    finite(kernels[level].channel_sigmas) &&
+                    finite(kernels[level].offsets) && finite(kernels[level].weights),
+                "five-level bloom kernel metadata");
+    }
+    require(std::abs(kernels[0].channel_sigmas[0] - 1.045F) < 1e-5F &&
+                std::abs(kernels[0].channel_sigmas[1] - 0.91756099F) < 1e-5F &&
+                std::abs(kernels[0].channel_sigmas[2] - 0.79012197F) < 1e-5F &&
+                kernels[0].channel_sigmas[3] == 0.0F,
+            "bloom chromatic dispersion metadata");
+    constexpr std::array<float, 5> expected_offsets = {
+        0.0F, 1.357276F, -1.357276F, 3.264512F, -3.264512F};
+    constexpr std::array<float, 5> expected_weights = {
+        0.381763F, 0.302666F, 0.302666F, 0.006448F, 0.006448F};
+    for (std::size_t index = 0; index < expected_offsets.size(); ++index) {
+        require(std::abs(kernels[0].offsets[index] - expected_offsets[index]) < 1e-5F &&
+                    std::abs(kernels[0].weights[index] - expected_weights[index]) < 1e-5F,
+                "bloom Gaussian tap oracle");
+    }
+    require(std::abs(kernels[0].offsets[0]) < 1e-6F &&
+                std::abs(kernels[0].weights[0] +
+                         2.0F * (kernels[0].weights[1] + kernels[0].weights[3]) -
+                         0.9999918F) < 2e-5F &&
+                std::abs(std::accumulate(kernels[4].weights.begin(),
+                                         kernels[4].weights.end(), 0.0F) - 1.0F) < 1e-5F,
+            "bloom Gaussian normalization");
+    for (const auto& kernel_level : kernels) {
+        for (std::size_t tap = 1; tap + 1 < kernel_level.sample_count; tap += 2) {
+            require(std::abs(kernel_level.offsets[tap] +
+                             kernel_level.offsets[tap + 1]) < 1e-5F &&
+                        std::abs(kernel_level.weights[tap] -
+                                 kernel_level.weights[tap + 1]) < 1e-6F,
+                    "bloom Gaussian taps remain symmetric");
+        }
+    }
+    const auto malformed_kernel = ksEditorBloomGaussianKernel(
+        -1, std::numeric_limits<float>::quiet_NaN(), -1.0F, -2,
+        std::numeric_limits<float>::infinity(),
+        {std::numeric_limits<float>::quiet_NaN(), -1.0F, 1.0F, 0.0F});
+    require(malformed_kernel.sigma == 0.0F && malformed_kernel.sample_count == 15U &&
+                finite(malformed_kernel.channel_sigmas) &&
+                finite(malformed_kernel.offsets) && finite(malformed_kernel.weights),
+            "malformed bloom kernel parameters stay bounded");
 
     expectParseError([] { static_cast<void>(parseKsWeatherLighting("[HEADER]\nVERSION=2", weather, "bad")); },
                      "unsupported weather version must fail");

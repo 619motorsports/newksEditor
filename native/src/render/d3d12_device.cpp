@@ -1,5 +1,6 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/lighting.hpp"
 #include "d3d12_stock_ks_per_pixel.hpp"
 #include "d3d12_stock_ks_per_pixel_batch.hpp"
 #include "d3d12_stock_ks_per_pixel_status.hpp"
@@ -21,6 +22,7 @@
 #    define NOMINMAX
 #    include <windows.h>
 #    include <d3d12.h>
+#    include <d3dcompiler.h>
 #    include <dxgi1_6.h>
 #    include <wrl/client.h>
 #    include "generated/d3d12_hdr_tone_map_dxbc.hpp"
@@ -153,6 +155,15 @@ struct D3D12Context {
     ComPtr<ID3D12RootSignature> hdr_tone_map_root_signature;
     std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
         hdr_tone_map_pipelines;
+    ComPtr<ID3D12RootSignature> hdr_bloom_root_signature;
+    ComPtr<ID3DBlob> hdr_bloom_vertex_shader;
+    ComPtr<ID3DBlob> hdr_bloom_pixel_shader;
+    ComPtr<ID3D12PipelineState> hdr_bloom_generate_pipeline;
+    ComPtr<ID3D12PipelineState> hdr_bloom_add_pipeline;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
+        hdr_bloom_screen_pipelines;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>>
+        hdr_bloom_tone_map_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -1343,6 +1354,1004 @@ d3d12_texture_srv_description(const TextureDescription& description,
         return false;
     }
     texture_resource_state = final_state;
+    diagnostic = {};
+    return true;
+}
+
+// The public tone-map contract intentionally keeps bloom handles private. The
+// D3D12 implementation therefore builds a short-lived five-level chain here.
+// This shader is source-equivalent to the production WebGL topology, not a
+// claim of recovered Yebis bytecode. Runtime compilation is used only for this
+// optional path so the existing checked-in tone-map artifacts remain stable.
+constexpr char kD3d12BloomShader[] = R"HLSL(
+// Portable five-level bloom and bloom-aware tone-map shader.
+// Keep this source synchronized with kD3d12BloomShader in d3d12_device.cpp.
+Texture2D<float4> source_texture : register(t0);
+Texture2D<float4> bloom_texture : register(t1);
+SamplerState linear_clamp : register(s0);
+
+cbuffer BloomParameters : register(b0) {
+    uint mode;
+    float exposure;
+    float threshold;
+    float remap;
+    float texel_x;
+    float texel_y;
+    float sigma;
+    uint sample_count;
+    float composite_scale;
+    float gamma_value;
+    float saturation;
+    float curve_scale;
+    float curve_shoulder;
+    uint srgb_destination;
+    float dither_scale;
+};
+
+cbuffer BloomKernel : register(b1) {
+    float4 kernel_offsets[4];
+    float4 kernel_weights[4];
+};
+
+static const float dither_rgba8[16] = {
+    7.0F, 135.0F, 39.0F, 167.0F, 199.0F, 71.0F, 231.0F, 103.0F,
+    55.0F, 183.0F, 23.0F, 151.0F, 247.0F, 119.0F, 215.0F, 87.0F};
+
+float decode_srgb_component(float encoded) {
+    return encoded <= 0.04045F ? encoded / 12.92F :
+                                 pow((encoded + 0.055F) / 1.055F, 2.4F);
+}
+
+float3 decode_srgb(float3 encoded) {
+    return float3(decode_srgb_component(encoded.r),
+                  decode_srgb_component(encoded.g),
+                  decode_srgb_component(encoded.b));
+}
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VertexOutput vertex_main(uint vertex_id : SV_VertexID) {
+    VertexOutput output;
+    output.uv = float2((vertex_id << 1U) & 2U, vertex_id & 2U);
+    output.position = float4(output.uv * float2(2.0F, -2.0F) +
+                             float2(-1.0F, 1.0F), 0.0F, 1.0F);
+    return output;
+}
+
+float3 bright_pass(float3 rgb) {
+    return min(max(rgb * exposure - threshold.xxx, 0.0F) * remap.xxx,
+               64000.0F.xxx);
+}
+
+float4 pixel_main(VertexOutput input) : SV_Target0 {
+    if (mode == 0U) {
+        return float4(bright_pass(source_texture.SampleLevel(
+                                      linear_clamp, input.uv, 0.0F).rgb), 1.0F);
+    }
+    if (mode == 1U) {
+        float2 offset = float2(texel_x, texel_y) * 0.5F;
+        float3 value = source_texture.SampleLevel(linear_clamp,
+                                                  input.uv + float2(-offset.x, -offset.y), 0.0F).rgb;
+        value += source_texture.SampleLevel(linear_clamp,
+                                            input.uv + float2(offset.x, -offset.y), 0.0F).rgb;
+        value += source_texture.SampleLevel(linear_clamp,
+                                            input.uv + float2(-offset.x, offset.y), 0.0F).rgb;
+        value += source_texture.SampleLevel(linear_clamp,
+                                            input.uv + offset, 0.0F).rgb;
+        return float4(value * 0.25F, 1.0F);
+    }
+    if (mode == 2U) {
+        float3 value = 0.0F.xxx;
+        for (uint tap = 0U; tap < 15U; ++tap) {
+            if (tap >= sample_count) continue;
+            uint vector_index = tap >> 2U;
+            uint component_index = tap & 3U;
+            float distance = kernel_offsets[vector_index][component_index];
+            float weight = kernel_weights[vector_index][component_index];
+            value += source_texture.SampleLevel(
+                         linear_clamp, input.uv + float2(texel_x, texel_y) * distance,
+                         0.0F).rgb * weight;
+        }
+        return float4(value, 1.0F);
+    }
+    if (mode == 3U) {
+        return float4(min(source_texture.SampleLevel(
+                              linear_clamp, input.uv, 0.0F).rgb * composite_scale,
+                          64000.0F.xxx), 1.0F);
+    }
+    if (mode == 5U) {
+        float4 source = source_texture.SampleLevel(linear_clamp, input.uv, 0.0F);
+        float3 rgb = max(source.rgb, 0.0F);
+        float luminance = dot(rgb, float3(0.2126F, 0.7152F, 0.0722F));
+        float3 value = max(1.0F / 16384.0F,
+                           lerp(luminance.xxx, rgb, saturation) * exposure);
+        float3 decay = exp(-value * curve_scale);
+        float3 shoulder = 1.0F - decay * curve_shoulder;
+        float3 curve = saturate((1.0F - decay) * shoulder * shoulder);
+        float3 mapped = curve;
+        float3 glare = saturate(bloom_texture.SampleLevel(
+            linear_clamp, input.uv, 0.0F).rgb);
+        float3 encoded = pow(min(1.0F, mapped + (1.0F - mapped) * glare +
+                                      1.0F / 4194304.0F),
+                             1.0F / gamma_value);
+        uint2 pixel = uint2(input.position.xy);
+        uint dither_index = (pixel.y & 3U) * 4U + (pixel.x & 3U);
+        encoded += (dither_rgba8[dither_index] / 255.0F - 0.5F) * dither_scale;
+        return float4(srgb_destination != 0U ? decode_srgb(encoded) : encoded,
+                      source.a);
+    }
+    float3 glare = saturate(source_texture.SampleLevel(
+                                linear_clamp, input.uv, 0.0F).rgb);
+    return float4(glare, 1.0F);
+}
+)HLSL";
+
+using D3DCompileProc = HRESULT(WINAPI *)(LPCVOID, SIZE_T, LPCSTR,
+                                          const D3D_SHADER_MACRO *,
+                                          ID3DInclude *, LPCSTR, LPCSTR, UINT,
+                                          UINT, ID3DBlob **, ID3DBlob **);
+
+[[nodiscard]] bool compile_d3d12_bloom_shader(
+    LPCSTR entry, LPCSTR target, ComPtr<ID3DBlob>& bytecode,
+    Diagnostic& diagnostic) {
+    HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (compiler == nullptr) {
+        diagnostic = {"d3d12_hdr_bloom_shader_unavailable",
+                      "D3D12 HDR bloom requires d3dcompiler_47.dll"};
+        return false;
+    }
+    const auto compile = reinterpret_cast<D3DCompileProc>(
+        GetProcAddress(compiler, "D3DCompile"));
+    if (compile == nullptr) {
+        FreeLibrary(compiler);
+        diagnostic = {"d3d12_hdr_bloom_shader_unavailable",
+                      "D3D12 HDR bloom could not locate D3DCompile"};
+        return false;
+    }
+    ComPtr<ID3DBlob> errors;
+    const HRESULT result = compile(
+        kD3d12BloomShader, sizeof(kD3d12BloomShader) - 1U,
+        "apex_d3d12_hdr_bloom.hlsl", nullptr, nullptr, entry, target, 0U,
+        0U, &bytecode, &errors);
+    if (FAILED(result)) {
+        std::string message = "D3D12 HDR bloom shader compilation failed";
+        if (errors != nullptr && errors->GetBufferPointer() != nullptr)
+            message += ": " + std::string(
+                static_cast<const char *>(errors->GetBufferPointer()),
+                errors->GetBufferSize());
+        FreeLibrary(compiler);
+        diagnostic = {"d3d12_hdr_bloom_shader_failed", std::move(message)};
+        return false;
+    }
+    FreeLibrary(compiler);
+    return true;
+}
+
+[[nodiscard]] bool prepare_d3d12_hdr_bloom_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT target_format,
+    bool additive, bool screen, bool tone_map, ID3D12PipelineState *&pipeline,
+    Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context == nullptr || context->device == nullptr ||
+        target_format == DXGI_FORMAT_UNKNOWN) {
+        diagnostic = {"d3d12_hdr_bloom_pipeline_failed",
+                      "D3D12 HDR bloom received an invalid device or format"};
+        return false;
+    }
+    if (context->hdr_bloom_root_signature == nullptr) {
+        if (!compile_d3d12_bloom_shader("vertex_main", "vs_5_0",
+                                        context->hdr_bloom_vertex_shader,
+                                        diagnostic) ||
+            !compile_d3d12_bloom_shader("pixel_main", "ps_5_0",
+                                        context->hdr_bloom_pixel_shader,
+                                        diagnostic))
+            return false;
+        D3D12_DESCRIPTOR_RANGE source_range{};
+        source_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        source_range.NumDescriptors = 2U;
+        source_range.BaseShaderRegister = 0U;
+        source_range.OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER source_parameter{};
+        source_parameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        source_parameter.DescriptorTable.NumDescriptorRanges = 1U;
+        source_parameter.DescriptorTable.pDescriptorRanges = &source_range;
+        source_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_PARAMETER constants_parameter{};
+        constants_parameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        constants_parameter.Constants.ShaderRegister = 0U;
+        constants_parameter.Constants.Num32BitValues = 16U;
+        constants_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_PARAMETER kernel_parameter{};
+        kernel_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        kernel_parameter.Descriptor.ShaderRegister = 1U;
+        kernel_parameter.Descriptor.RegisterSpace = 0U;
+        kernel_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MaxAnisotropy = 1U;
+        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister = 0U;
+        const std::array<D3D12_ROOT_PARAMETER, 3U> parameters = {
+            source_parameter, constants_parameter, kernel_parameter};
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters = static_cast<UINT>(parameters.size());
+        root_description.pParameters = parameters.data();
+        root_description.NumStaticSamplers = 1U;
+        root_description.pStaticSamplers = &sampler;
+        root_description.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS);
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(HDR bloom)", result);
+            diagnostic.code = "d3d12_hdr_bloom_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->hdr_bloom_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(HDR bloom)", result);
+            diagnostic.code = "d3d12_hdr_bloom_pipeline_failed";
+            return false;
+        }
+    }
+    if (tone_map) {
+        for (const auto& cached : context->hdr_bloom_tone_map_pipelines)
+            if (cached.first == target_format) {
+                pipeline = cached.second.Get();
+                return true;
+            }
+    }
+    if (!tone_map && !additive && !screen && context->hdr_bloom_generate_pipeline != nullptr) {
+        pipeline = context->hdr_bloom_generate_pipeline.Get();
+        return true;
+    }
+    if (!tone_map && additive && !screen && context->hdr_bloom_add_pipeline != nullptr) {
+        pipeline = context->hdr_bloom_add_pipeline.Get();
+        return true;
+    }
+    if (screen) {
+        for (const auto& cached : context->hdr_bloom_screen_pipelines)
+            if (cached.first == target_format) {
+                pipeline = cached.second.Get();
+                return true;
+            }
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->hdr_bloom_root_signature.Get();
+    description.VS = {context->hdr_bloom_vertex_shader->GetBufferPointer(),
+                      context->hdr_bloom_vertex_shader->GetBufferSize()};
+    description.PS = {context->hdr_bloom_pixel_shader->GetBufferPointer(),
+                      context->hdr_bloom_pixel_shader->GetBufferSize()};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.DepthStencilState.DepthEnable = FALSE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = target_format;
+    description.SampleDesc.Count = 1U;
+    auto& blend = description.BlendState.RenderTarget[0U];
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    blend.BlendEnable = screen || additive;
+    if (screen) {
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_INV_SRC_COLOR;
+    } else {
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_ONE;
+    }
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_pipeline_failed";
+        return false;
+    }
+    pipeline = created.Get();
+    if (tone_map)
+        context->hdr_bloom_tone_map_pipelines.emplace_back(target_format,
+                                                            std::move(created));
+    else if (screen)
+        context->hdr_bloom_screen_pipelines.emplace_back(target_format,
+                                                          std::move(created));
+    else if (!additive)
+        context->hdr_bloom_generate_pipeline = std::move(created);
+    else
+        context->hdr_bloom_add_pipeline = std::move(created);
+    return true;
+}
+
+struct D3D12BloomImage {
+    ComPtr<ID3D12Resource> resource;
+    std::uint32_t width = 0U;
+    std::uint32_t height = 0U;
+};
+
+[[nodiscard]] bool create_d3d12_bloom_image(
+    const std::shared_ptr<D3D12Context>& context, std::uint32_t width,
+    std::uint32_t height, D3D12BloomImage& image, Diagnostic& diagnostic) {
+    if (width == 0U || height == 0U ||
+        width > max_texture_dimension || height > max_texture_dimension) {
+        diagnostic = {"d3d12_hdr_bloom_dimensions_invalid",
+                      "D3D12 HDR bloom dimensions are outside the bounded range"};
+        return false;
+    }
+    D3D12_RESOURCE_DESC description{};
+    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    description.Width = width;
+    description.Height = height;
+    description.DepthOrArraySize = 1U;
+    description.MipLevels = 1U;
+    description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    description.SampleDesc.Count = 1U;
+    description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = description.Format;
+    const HRESULT result = context->device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+        IID_PPV_ARGS(&image.resource));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommittedResource(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_allocation_failed";
+        return false;
+    }
+    image.width = width;
+    image.height = height;
+    return true;
+}
+
+[[nodiscard]] bool execute_d3d12_hdr_bloom(
+    const std::shared_ptr<D3D12Context>& context, ID3D12Resource* source,
+    D3D12_RESOURCE_STATES& source_state, const TextureDescription& source_description,
+    float exposure, const HdrBloomParameters& parameters,
+    ComPtr<ID3D12Resource>& composite,
+    Diagnostic& diagnostic) {
+    if (context == nullptr || source == nullptr || context->device == nullptr ||
+        context->queue == nullptr || source_description.width == 0U ||
+        source_description.height == 0U) {
+        diagnostic = {"d3d12_hdr_bloom_execution_failed",
+                      "D3D12 HDR bloom received an invalid resource or context"};
+        return false;
+    }
+    constexpr std::size_t kLevels = 5U;
+    std::array<D3D12BloomImage, kLevels> horizontal{};
+    std::array<D3D12BloomImage, kLevels> vertical{};
+    if (!validate_hdr_bloom_resource_budget(
+            source_description.width, source_description.height, 0U,
+            diagnostic)) {
+        diagnostic.message = "D3D12 " + diagnostic.message;
+        return false;
+    }
+    const std::uint64_t composite_bytes =
+        static_cast<std::uint64_t>(source_description.width) *
+        source_description.height * 4ULL * sizeof(std::uint16_t);
+    if (!validate_hdr_bloom_resource_budget(
+            source_description.width, source_description.height,
+            composite_bytes, diagnostic)) {
+        diagnostic.message =
+            "D3D12 " + diagnostic.message;
+        return false;
+    }
+    std::uint32_t width = std::max(1U, (source_description.width + 3U) / 4U);
+    std::uint32_t height = std::max(1U, (source_description.height + 3U) / 4U);
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        if (!create_d3d12_bloom_image(context, width, height, horizontal[level],
+                                       diagnostic) ||
+            !create_d3d12_bloom_image(context, width, height, vertical[level],
+                                       diagnostic))
+            return false;
+        width = std::max(1U, (width + 1U) / 2U);
+        height = std::max(1U, (height + 1U) / 2U);
+    }
+    D3D12_RESOURCE_DESC composite_description{};
+    composite_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    composite_description.Width = source_description.width;
+    composite_description.Height = source_description.height;
+    composite_description.DepthOrArraySize = 1U;
+    composite_description.MipLevels = 1U;
+    composite_description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    composite_description.SampleDesc.Count = 1U;
+    composite_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    composite_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = composite_description.Format;
+    HRESULT result = context->device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &composite_description,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear,
+        IID_PPV_ARGS(&composite));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommittedResource(HDR bloom composite)", result);
+        diagnostic.code = "d3d12_hdr_bloom_allocation_failed";
+        return false;
+    }
+
+    std::lock_guard command_guard(context->command_mutex);
+    ID3D12PipelineState* generate_pipeline = nullptr;
+    if (!prepare_d3d12_hdr_bloom_pipeline(
+            context, DXGI_FORMAT_R16G16B16A16_FLOAT, false, false, false,
+            generate_pipeline, diagnostic))
+        return false;
+    ID3D12PipelineState* add_pipeline = nullptr;
+    if (!prepare_d3d12_hdr_bloom_pipeline(
+            context, DXGI_FORMAT_R16G16B16A16_FLOAT, true, false, false,
+            add_pipeline, diagnostic))
+        return false;
+
+    constexpr UINT kGenerationOperations = 15U;
+    constexpr UINT kCompositeOperations = 5U;
+    constexpr UINT kSrvPerOperation = 2U;
+    D3D12_DESCRIPTOR_HEAP_DESC srv_description{};
+    srv_description.NumDescriptors =
+        (kGenerationOperations + kCompositeOperations) * kSrvPerOperation;
+    srv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srv_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    result = context->device->CreateDescriptorHeap(&srv_description,
+                                                     IID_PPV_ARGS(&srv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_descriptor_failed";
+        return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+    rtv_description.NumDescriptors = kGenerationOperations + kCompositeOperations;
+    rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(&rtv_description,
+                                                    IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR bloom RTV)", result);
+        diagnostic.code = "d3d12_hdr_bloom_descriptor_failed";
+        return false;
+    }
+    const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT rtv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    if (srv_stride == 0U || rtv_stride == 0U) {
+        diagnostic = {"d3d12_hdr_bloom_descriptor_failed",
+                      "D3D12 returned a zero HDR bloom descriptor stride"};
+        return false;
+    }
+    const auto srv_at = [&](UINT index) {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            srv_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(index) * srv_stride;
+        return handle;
+    };
+    const auto rtv_at = [&](UINT index) {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(index) * rtv_stride;
+        return handle;
+    };
+    const auto make_srv = [&](ID3D12Resource* resource, UINT index) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Texture2D.MipLevels = 1U;
+        context->device->CreateShaderResourceView(resource, &view,
+                                                   srv_at(index * kSrvPerOperation));
+        context->device->CreateShaderResourceView(resource, &view,
+                                                   srv_at(index * kSrvPerOperation + 1U));
+    };
+    const auto make_rtv = [&](ID3D12Resource* resource, UINT index) {
+        D3D12_RENDER_TARGET_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        context->device->CreateRenderTargetView(resource, &view, rtv_at(index));
+    };
+    // Descriptor zero is the source for the bright pass. The remaining
+    // generation descriptors follow the exact recording order: four
+    // downsample operations, then two blur operations per level.
+    make_srv(source, 0U);
+    make_rtv(horizontal[0U].resource.Get(), 0U);
+    UINT operation = 1U;
+    for (std::size_t level = 1U; level < kLevels; ++level) {
+        make_srv(horizontal[level - 1U].resource.Get(), operation);
+        make_rtv(horizontal[level].resource.Get(), operation);
+        ++operation;
+    }
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        make_srv(horizontal[level].resource.Get(), operation);
+        make_rtv(vertical[level].resource.Get(), operation);
+        ++operation;
+        make_srv(vertical[level].resource.Get(), operation);
+        make_rtv(horizontal[level].resource.Get(), operation);
+        ++operation;
+    }
+    operation = kGenerationOperations;
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        make_srv(horizontal[level].resource.Get(), operation);
+        make_rtv(composite.Get(), operation);
+        ++operation;
+    }
+    constexpr UINT kConstantBufferStride = 256U;
+    constexpr UINT kConstantBufferCount = kGenerationOperations + kCompositeOperations;
+    D3D12_HEAP_PROPERTIES constants_heap{};
+    constants_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC constants_description{};
+    constants_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    constants_description.Width = static_cast<UINT64>(kConstantBufferStride) *
+                                  kConstantBufferCount;
+    constants_description.Height = 1U;
+    constants_description.DepthOrArraySize = 1U;
+    constants_description.MipLevels = 1U;
+    constants_description.SampleDesc.Count = 1U;
+    constants_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> constants_upload;
+    result = context->device->CreateCommittedResource(
+        &constants_heap, D3D12_HEAP_FLAG_NONE, &constants_description,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&constants_upload));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommittedResource(HDR bloom kernel)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    void* constants_mapping = nullptr;
+    result = constants_upload->Map(0U, nullptr, &constants_mapping);
+    if (FAILED(result) || constants_mapping == nullptr) {
+        diagnostic = hresult_error("ID3D12Resource::Map(HDR bloom kernel)",
+                                   FAILED(result) ? result : E_FAIL);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    std::memset(constants_mapping, 0U,
+                static_cast<std::size_t>(constants_description.Width));
+    const auto write_kernel = [&](UINT operation_index, std::size_t level) {
+        const auto kernel = ksEditorBloomGaussianKernel(
+            static_cast<std::int32_t>(level), parameters.kernel_threshold,
+            parameters.radius_scale, parameters.source_level,
+            parameters.display_scale);
+        auto* bytes = static_cast<std::byte *>(constants_mapping) +
+                      static_cast<std::size_t>(operation_index) *
+                          kConstantBufferStride;
+        std::memcpy(bytes, kernel.offsets.data(), 15U * sizeof(float));
+        std::memcpy(bytes + 64U, kernel.weights.data(), 15U * sizeof(float));
+    };
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        write_kernel(5U + static_cast<UINT>(level) * 2U, level);
+        write_kernel(6U + static_cast<UINT>(level) * 2U, level);
+    }
+    constants_upload->Unmap(0U, nullptr);
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandAllocator(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+        generate_pipeline, IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandList(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    auto transition = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                          D3D12_RESOURCE_STATES after) {
+        if (before == after) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = after;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    };
+    transition(source, source_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    ID3D12DescriptorHeap* heaps[] = {srv_heap.Get()};
+    list->SetDescriptorHeaps(1U, heaps);
+    list->SetGraphicsRootSignature(context->hdr_bloom_root_signature.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const auto set_constants = [&](std::uint32_t mode, float texel_x,
+                                   float texel_y, float sigma,
+                                   std::uint32_t sample_count,
+                                   float composite_scale) {
+        std::array<std::uint32_t, 16U> constants{};
+        constants[0U] = mode;
+        const auto set_float = [&](std::size_t index, float value) {
+            std::memcpy(&constants[index], &value, sizeof(value));
+        };
+        set_float(1U, exposure);
+        set_float(2U, parameters.threshold);
+        set_float(3U, parameters.remap);
+        set_float(4U, texel_x);
+        set_float(5U, texel_y);
+        set_float(6U, sigma);
+        constants[7U] = sample_count;
+        set_float(8U, composite_scale);
+        list->SetGraphicsRoot32BitConstants(1U, 16U, constants.data(), 0U);
+    };
+    const auto draw = [&](ID3D12Resource* destination, UINT srv_index,
+                          UINT rtv_index, std::uint32_t draw_width,
+                          std::uint32_t draw_height,
+                          UINT constants_index,
+                          std::uint32_t mode, float texel_x, float texel_y,
+                          float sigma, std::uint32_t sample_count,
+                          float composite_scale) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = destination;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_at(rtv_index);
+        list->OMSetRenderTargets(1U, &rtv, FALSE, nullptr);
+        const D3D12_VIEWPORT viewport = {0.0F, 0.0F,
+                                         static_cast<float>(draw_width),
+                                         static_cast<float>(draw_height), 0.0F,
+                                         1.0F};
+        const D3D12_RECT scissor = {0L, 0L, static_cast<LONG>(draw_width),
+                                    static_cast<LONG>(draw_height)};
+        list->RSSetViewports(1U, &viewport);
+        list->RSSetScissorRects(1U, &scissor);
+        D3D12_GPU_DESCRIPTOR_HANDLE srv =
+            srv_heap->GetGPUDescriptorHandleForHeapStart();
+        srv.ptr += static_cast<UINT64>(srv_index * kSrvPerOperation) * srv_stride;
+        list->SetGraphicsRootDescriptorTable(0U, srv);
+        list->SetGraphicsRootConstantBufferView(
+            2U, constants_upload->GetGPUVirtualAddress() +
+                    static_cast<UINT64>(constants_index) * kConstantBufferStride);
+        set_constants(mode, texel_x, texel_y, sigma, sample_count,
+                      composite_scale);
+        list->DrawInstanced(3U, 1U, 0U, 0U);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1U, &barrier);
+    };
+    // Bright pass.
+    list->SetPipelineState(generate_pipeline);
+    draw(horizontal[0U].resource.Get(), 0U, 0U, horizontal[0U].width,
+         horizontal[0U].height, 0U, 0U, 0.0F, 0.0F, 1.0F, 1U, 0.0F);
+    // Downsample and separable blur. The source and destination images are
+    // single-mip resources, so each operation has an explicit state edge.
+    for (std::size_t level = 1U; level < kLevels; ++level) {
+        list->SetPipelineState(generate_pipeline);
+        const UINT operation_index = static_cast<UINT>(level);
+        draw(horizontal[level].resource.Get(), operation_index, operation_index,
+             horizontal[level].width,
+             horizontal[level].height, operation_index, 1U,
+             1.0F / static_cast<float>(horizontal[level - 1U].width),
+             1.0F / static_cast<float>(horizontal[level - 1U].height), 1.0F, 1U,
+             0.0F);
+    }
+    list->SetPipelineState(generate_pipeline);
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        const auto kernel = ksEditorBloomGaussianKernel(
+            static_cast<std::int32_t>(level), parameters.kernel_threshold,
+            parameters.radius_scale, parameters.source_level,
+            parameters.display_scale);
+        const UINT horizontal_operation = 5U + static_cast<UINT>(level) * 2U;
+        draw(vertical[level].resource.Get(), horizontal_operation,
+             horizontal_operation, vertical[level].width, vertical[level].height,
+             horizontal_operation, 2U,
+             1.0F / static_cast<float>(horizontal[level].width), 0.0F,
+             kernel.sigma, kernel.sample_count, 0.0F);
+        draw(horizontal[level].resource.Get(), horizontal_operation + 1U,
+             horizontal_operation + 1U, horizontal[level].width,
+             horizontal[level].height, horizontal_operation + 1U, 2U, 0.0F,
+             1.0F / static_cast<float>(vertical[level].height), kernel.sigma,
+             kernel.sample_count, 0.0F);
+    }
+    list->SetPipelineState(add_pipeline);
+    transition(composite.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const D3D12_CPU_DESCRIPTOR_HANDLE composite_rtv = rtv_at(kGenerationOperations);
+    list->OMSetRenderTargets(1U, &composite_rtv, FALSE, nullptr);
+    const float clear_color[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+    list->ClearRenderTargetView(composite_rtv, clear_color, 0U, nullptr);
+    transition(composite.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    for (std::size_t level = 0U; level < kLevels; ++level) {
+        list->SetPipelineState(add_pipeline);
+        draw(composite.Get(), kGenerationOperations + static_cast<UINT>(level),
+             kGenerationOperations + static_cast<UINT>(level),
+             source_description.width, source_description.height,
+             kGenerationOperations + static_cast<UINT>(level), 3U,
+             0.0F, 0.0F, 1.0F, 1U, parameters.composite_scale);
+    }
+    transition(source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               source_state);
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12GraphicsCommandList::Close(HDR bloom)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE,
+                                           IID_PPV_ARGS(&fence));
+    HANDLE event = result == S_OK ? CreateEventW(nullptr, FALSE, FALSE, nullptr)
+                                  : nullptr;
+    if (event == nullptr) {
+        diagnostic = {"d3d12_hdr_bloom_execution_failed",
+                      "D3D12 HDR bloom could not create its completion event"};
+        return false;
+    }
+    ID3D12CommandList* lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, lists);
+    result = context->queue->Signal(fence.Get(), 1U);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < 1U)
+        result = fence->SetEventOnCompletion(1U, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < 1U &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        source_state = drained ? source_state : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 HDR bloom fence", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    diagnostic = {};
+    return true;
+}
+
+[[nodiscard]] bool execute_d3d12_hdr_bloom_tone_map(
+    const std::shared_ptr<D3D12Context>& context, ID3D12Resource* source,
+    D3D12_RESOURCE_STATES& source_state, ID3D12Resource* bloom,
+    ID3D12Resource* destination, D3D12_RESOURCE_STATES& destination_state,
+    const TextureDescription& destination_description,
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
+    if (context == nullptr || source == nullptr || bloom == nullptr ||
+        destination == nullptr || context->device == nullptr ||
+        context->queue == nullptr) {
+        diagnostic = {"d3d12_hdr_bloom_execution_failed",
+                      "D3D12 HDR bloom tone mapping received an invalid resource or context"};
+        return false;
+    }
+    std::lock_guard command_guard(context->command_mutex);
+    ID3D12PipelineState* pipeline = nullptr;
+    const DXGI_FORMAT destination_format =
+        dxgi_texture_format(destination_description.format);
+    if (!prepare_d3d12_hdr_bloom_pipeline(context, destination_format, false,
+                                           false, true, pipeline, diagnostic))
+        return false;
+    D3D12_DESCRIPTOR_HEAP_DESC srv_description{};
+    srv_description.NumDescriptors = 2U;
+    srv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srv_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    HRESULT result = context->device->CreateDescriptorHeap(
+        &srv_description, IID_PPV_ARGS(&srv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR bloom tone map)", result);
+        diagnostic.code = "d3d12_hdr_bloom_descriptor_failed";
+        return false;
+    }
+    const UINT srv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT rtv_stride = context->device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    if (srv_stride == 0U || rtv_stride == 0U) {
+        diagnostic = {"d3d12_hdr_bloom_descriptor_failed",
+                      "D3D12 returned a zero bloom tone-map descriptor stride"};
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC source_view{};
+    source_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    source_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    source_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    source_view.Texture2D.MipLevels = 1U;
+    const D3D12_CPU_DESCRIPTOR_HANDLE first_srv =
+        srv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateShaderResourceView(source, &source_view, first_srv);
+    D3D12_CPU_DESCRIPTOR_HANDLE second_srv = first_srv;
+    second_srv.ptr += srv_stride;
+    context->device->CreateShaderResourceView(bloom, &source_view, second_srv);
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
+    rtv_description.NumDescriptors = 1U;
+    rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    result = context->device->CreateDescriptorHeap(&rtv_description,
+                                                    IID_PPV_ARGS(&rtv_heap));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateDescriptorHeap(HDR bloom tone map RTV)", result);
+        diagnostic.code = "d3d12_hdr_bloom_descriptor_failed";
+        return false;
+    }
+    D3D12_RENDER_TARGET_VIEW_DESC destination_view{};
+    destination_view.Format = destination_format;
+    destination_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    const D3D12_CPU_DESCRIPTOR_HANDLE destination_rtv =
+        rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    context->device->CreateRenderTargetView(destination, &destination_view,
+                                               destination_rtv);
+    D3D12_HEAP_PROPERTIES constants_heap{};
+    constants_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC constants_description{};
+    constants_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    constants_description.Width = 256U;
+    constants_description.Height = 1U;
+    constants_description.DepthOrArraySize = 1U;
+    constants_description.MipLevels = 1U;
+    constants_description.SampleDesc.Count = 1U;
+    constants_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> constants_upload;
+    result = context->device->CreateCommittedResource(
+        &constants_heap, D3D12_HEAP_FLAG_NONE, &constants_description,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&constants_upload));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommittedResource(HDR bloom tone-map constants)",
+            result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandAllocator(HDR bloom tone map)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), pipeline,
+        IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateCommandList(HDR bloom tone map)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    const auto transition = [&](ID3D12Resource* resource,
+                                D3D12_RESOURCE_STATES before,
+                                D3D12_RESOURCE_STATES after) {
+        if (before == after) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = after;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    };
+    const D3D12_RESOURCE_STATES shader_state =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const D3D12_RESOURCE_STATES original_source_state = source_state;
+    const D3D12_RESOURCE_STATES original_destination_state = destination_state;
+    transition(source, original_source_state, shader_state);
+    transition(bloom, shader_state, shader_state);
+    transition(destination, original_destination_state,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    ID3D12DescriptorHeap* heaps[] = {srv_heap.Get()};
+    list->SetDescriptorHeaps(1U, heaps);
+    list->SetGraphicsRootSignature(context->hdr_bloom_root_signature.Get());
+    list->SetPipelineState(pipeline);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1U, &destination_rtv, FALSE, nullptr);
+    const D3D12_VIEWPORT viewport = {0.0F, 0.0F,
+                                     static_cast<float>(destination_description.width),
+                                     static_cast<float>(destination_description.height),
+                                     0.0F, 1.0F};
+    const D3D12_RECT scissor = {0L, 0L,
+                                static_cast<LONG>(destination_description.width),
+                                static_cast<LONG>(destination_description.height)};
+    list->RSSetViewports(1U, &viewport);
+    list->RSSetScissorRects(1U, &scissor);
+    list->SetGraphicsRootDescriptorTable(
+        0U, srv_heap->GetGPUDescriptorHandleForHeapStart());
+    list->SetGraphicsRootConstantBufferView(2U,
+                                             constants_upload->GetGPUVirtualAddress());
+    std::array<std::uint32_t, 16U> constants{};
+    const auto set_float = [&](std::size_t index, float value) {
+        std::memcpy(&constants[index], &value, sizeof(value));
+    };
+    constants[0U] = 5U;
+    set_float(1U, parameters.exposure);
+    set_float(2U, parameters.bloom.threshold);
+    set_float(3U, parameters.bloom.remap);
+    set_float(8U, parameters.bloom.composite_scale);
+    set_float(9U, parameters.gamma);
+    set_float(10U, parameters.saturation);
+    set_float(11U, parameters.curve_scale);
+    set_float(12U, parameters.curve_shoulder);
+    constants[13U] = destination_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                             destination_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                         ? 1U
+                         : 0U;
+    set_float(14U, parameters.dither_scale);
+    list->SetGraphicsRoot32BitConstants(1U, 16U, constants.data(), 0U);
+    list->DrawInstanced(3U, 1U, 0U, 0U);
+    transition(destination, D3D12_RESOURCE_STATE_RENDER_TARGET,
+               original_destination_state);
+    transition(source, shader_state, original_source_state);
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12GraphicsCommandList::Close(HDR bloom tone map)", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE,
+                                           IID_PPV_ARGS(&fence));
+    HANDLE event = result == S_OK ? CreateEventW(nullptr, FALSE, FALSE, nullptr)
+                                  : nullptr;
+    if (event == nullptr) {
+        diagnostic = {"d3d12_hdr_bloom_execution_failed",
+                      "D3D12 HDR bloom tone mapping could not create its event"};
+        return false;
+    }
+    ID3D12CommandList* lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, lists);
+    result = context->queue->Signal(fence.Get(), 1U);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < 1U)
+        result = fence->SetEventOnCompletion(1U, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < 1U &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        source_state = drained ? original_source_state
+                               : D3D12_RESOURCE_STATE_COMMON;
+        destination_state = drained ? original_destination_state
+                                    : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 HDR bloom tone-map fence", result);
+        diagnostic.code = "d3d12_hdr_bloom_execution_failed";
+        return false;
+    }
+    source_state = original_source_state;
+    destination_state = original_destination_state;
     diagnostic = {};
     return true;
 }
@@ -8200,10 +9209,26 @@ public:
                 context_, destination_format, 1U, diagnostic,
                 destination.info().description.usage))
             return {HdrToneMapStatus::unsupported, std::move(diagnostic)};
-        if (!execute_d3d12_hdr_tone_map(
-                context_, d3d_source->resource(), *d3d_source->state_pointer(),
-                d3d_destination->resource(), *d3d_destination->state_pointer(),
-                destination.info().description, parameters, diagnostic))
+        if (parameters.bloom.enabled) {
+            ComPtr<ID3D12Resource> bloom_composite;
+            if (!execute_d3d12_hdr_bloom(
+                    context_, d3d_source->resource(),
+                    *d3d_source->state_pointer(), source.info().description,
+                    parameters.exposure, parameters.bloom, bloom_composite,
+                    diagnostic) ||
+                !execute_d3d12_hdr_bloom_tone_map(
+                    context_, d3d_source->resource(),
+                    *d3d_source->state_pointer(), bloom_composite.Get(),
+                    d3d_destination->resource(),
+                    *d3d_destination->state_pointer(),
+                    destination.info().description, parameters, diagnostic))
+                return {HdrToneMapStatus::execution_failed,
+                        std::move(diagnostic)};
+        } else if (!execute_d3d12_hdr_tone_map(
+                       context_, d3d_source->resource(),
+                       *d3d_source->state_pointer(), d3d_destination->resource(),
+                       *d3d_destination->state_pointer(),
+                       destination.info().description, parameters, diagnostic))
             return {HdrToneMapStatus::execution_failed, std::move(diagnostic)};
         d3d_destination->mark_initialized();
         return {HdrToneMapStatus::ready, {}};

@@ -119,6 +119,8 @@ inline constexpr std::uint64_t max_buffer_bytes = 1ULL << 34U;
 inline constexpr std::uint64_t max_texture_bytes = 1ULL << 34U;
 inline constexpr std::uint32_t max_texture_dimension = 16384U;
 inline constexpr std::uint32_t max_presentation_image_count = 8U;
+inline constexpr std::uint64_t max_hdr_bloom_transient_bytes =
+    512ULL * 1024ULL * 1024ULL;
 
 // These flags report API prerequisites only. They do not prove that a native
 // window, presentation surface, present-capable queue, or swapchain exists.
@@ -507,8 +509,20 @@ struct HdrLuminanceResult {
 
 // A bounded fullscreen conversion from a linear RGBA16F scene texture into
 // an owned RGBA8 or BGRA8 display texture. The pass approximates the selected
-// Yebis curve and uses its recovered fixed-phase 4x4 dither table. Bloom and
-// automatic exposure remain separate passes.
+// Yebis curve and uses its recovered fixed-phase 4x4 dither table. Automatic
+// exposure remains a separate pass. Optional bloom follows the production
+// WebGL five-level glare topology; it is not a claim of exact Yebis parity.
+struct HdrBloomParameters {
+    bool enabled = false;
+    float threshold = 5.0F;
+    float remap = 1.0F;
+    float composite_scale = 0.01064F;
+    float kernel_threshold = 0.002F;
+    float radius_scale = 0.95F;
+    std::int32_t source_level = 2;
+    float display_scale = 2.2F;
+};
+
 struct HdrToneMapParameters {
     float exposure = 1.0F;
     float gamma = 1.2F;
@@ -516,6 +530,7 @@ struct HdrToneMapParameters {
     float curve_scale = 2.6581413745880127F;
     float curve_shoulder = 0.6653175950050354F;
     float dither_scale = 1.0F / 255.0F;
+    HdrBloomParameters bloom;
 };
 
 enum class HdrToneMapStatus : std::uint8_t {
@@ -1625,6 +1640,13 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_parameters(
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
+
+// Checks the five-level, two-image-per-level RGBA16F bloom chain before a
+// backend allocates it. Backends include any additional transient images in
+// additional_bytes.
+[[nodiscard]] bool validate_hdr_bloom_resource_budget(
+    std::uint32_t width, std::uint32_t height,
+    std::uint64_t additional_bytes, Diagnostic& diagnostic) noexcept;
 
 [[nodiscard]] HdrLuminanceStatus validate_hdr_luminance_request(
     const Texture& source, Diagnostic& diagnostic);

@@ -120,6 +120,9 @@ HdrToneMapStatus validate(const TextureDescription& source_description_value,
 }
 
 void accepts_valid_request() {
+    const HdrToneMapParameters defaults;
+    require(!defaults.bloom.enabled,
+            "portable HDR bloom remains an explicit opt-in");
     Diagnostic diagnostic;
     require(validate(source_description(), destination_description(), {},
                      Backend::Vulkan, Backend::Vulkan, &diagnostic) ==
@@ -136,6 +139,13 @@ void rejects_shape_and_dimension_requests() {
     require(validate(source, destination) == HdrToneMapStatus::invalid_request,
             "zero HDR source dimensions are rejected");
     source = source_description();
+
+    source.width = max_texture_dimension + 1U;
+    destination.width = source.width;
+    require(validate(source, destination) == HdrToneMapStatus::invalid_request,
+            "oversized HDR dimensions are rejected before backend allocation");
+    source = source_description();
+    destination = destination_description();
 
     source.shape = TextureShape::texture_cube;
     require(validate(source, destination) == HdrToneMapStatus::invalid_request,
@@ -182,6 +192,27 @@ void rejects_shape_and_dimension_requests() {
     require(validate(source_description(), destination) ==
                 HdrToneMapStatus::invalid_request,
             "mismatched HDR dimensions are rejected");
+}
+
+void bounds_bloom_transient_resources() {
+    Diagnostic diagnostic;
+    require(validate_hdr_bloom_resource_budget(16U, 8U, 0U, diagnostic) &&
+                diagnostic.code.empty(),
+            "small bloom chain fits the transient-resource budget");
+    require(!validate_hdr_bloom_resource_budget(
+                16U, 8U, std::numeric_limits<std::uint64_t>::max(),
+                diagnostic) &&
+                diagnostic.code == "hdr_bloom_allocation_limit",
+            "bloom budget rejects overflowing additional resources");
+    require(!validate_hdr_bloom_resource_budget(
+                max_texture_dimension, max_texture_dimension,
+                max_hdr_bloom_transient_bytes, diagnostic) &&
+                diagnostic.code == "hdr_bloom_allocation_limit",
+            "bloom budget rejects oversized bounded transient resources");
+    require(!validate_hdr_bloom_resource_budget(
+                max_texture_dimension + 1U, 1U, 0U, diagnostic) &&
+                diagnostic.code == "hdr_bloom_dimensions_invalid",
+            "bloom budget rejects dimensions outside the neutral limit");
 }
 
 void rejects_format_usage_and_mutability_requests() {
@@ -250,6 +281,42 @@ void rejects_parameters_backend_and_aliasing() {
     require(validate(source, destination, parameters) ==
                 HdrToneMapStatus::invalid_request,
             "negative dither scale is rejected");
+    parameters = {};
+    parameters.bloom.threshold = -1.0F;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "negative bloom threshold is rejected");
+    parameters = {};
+    parameters.bloom.remap = std::numeric_limits<float>::infinity();
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "nonfinite bloom remap is rejected");
+    parameters = {};
+    parameters.bloom.composite_scale = -1.0F;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "negative bloom composite scale is rejected");
+    parameters = {};
+    parameters.bloom.kernel_threshold =
+        std::numeric_limits<float>::quiet_NaN();
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "nonfinite bloom kernel threshold is rejected");
+    parameters = {};
+    parameters.bloom.radius_scale = -1.0F;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "negative bloom radius is rejected");
+    parameters = {};
+    parameters.bloom.source_level = 5;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "out-of-range bloom source level is rejected");
+    parameters = {};
+    parameters.bloom.display_scale = -1.0F;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "negative bloom display scale is rejected");
 
     require(validate(source, destination, {}, Backend::Vulkan, Backend::D3D12) ==
                 HdrToneMapStatus::unsupported,
@@ -440,6 +507,141 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
                 *resolved_hdr.texture, *display.texture).ok(),
             "backend repeats resolved HDR tone mapping with tracked states");
 
+    IndexedStaticMeshBatchDescription bloom_readback;
+    bloom_readback.load_color = true;
+    bloom_readback.capture_rgba8 = true;
+    HdrToneMapParameters bloom_parameters;
+    bloom_parameters.dither_scale = 0.0F;
+    require(created.device->tone_map_hdr_texture(
+                *resolved_hdr.texture, *display.texture, bloom_parameters).ok(),
+            "backend creates a bloom-disabled reference frame");
+    const IndexedStaticMeshBatchResult bloom_disabled =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *display.texture, bloom_readback);
+    require(bloom_disabled.ok(), "backend reads the bloom-disabled frame");
+
+    bloom_parameters.bloom.enabled = true;
+    bloom_parameters.bloom.threshold = 0.5F;
+    bloom_parameters.bloom.composite_scale = 0.1F;
+    result = created.device->tone_map_hdr_texture(
+        *resolved_hdr.texture, *display.texture, bloom_parameters);
+    if (!result.ok())
+        throw std::runtime_error("resolved HDR bloom failed: " +
+                                 result.diagnostic.code + ": " +
+                                 result.diagnostic.message);
+    const IndexedStaticMeshBatchResult bloom_enabled =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *display.texture, bloom_readback);
+    require(bloom_enabled.ok() &&
+                bloom_enabled.rgba8.size() == bloom_disabled.rgba8.size(),
+            "backend reads the bloom-enabled frame");
+    bool bloom_increased_rgb = false;
+    for (std::size_t index = 0U; index < bloom_enabled.rgba8.size();
+         index += 4U) {
+        for (std::size_t channel = 0U; channel < 3U; ++channel) {
+            bloom_increased_rgb =
+                bloom_increased_rgb ||
+                std::to_integer<std::uint8_t>(
+                    bloom_enabled.rgba8[index + channel]) >
+                    std::to_integer<std::uint8_t>(
+                        bloom_disabled.rgba8[index + channel]);
+        }
+    }
+    require(bloom_increased_rgb,
+            "portable five-level bloom increases a bright HDR fixture");
+    require(created.device->tone_map_hdr_texture(
+                *resolved_hdr.texture, *display.texture, bloom_parameters).ok(),
+            "backend repeats HDR bloom with tracked states");
+    const IndexedStaticMeshBatchResult bloom_repeated =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *display.texture, bloom_readback);
+    require(bloom_repeated.ok() &&
+                bloom_repeated.rgba8 == bloom_enabled.rgba8,
+            "repeated HDR bloom is deterministic");
+    measured = created.device->measure_hdr_luminance(*resolved_hdr.texture);
+    require(measured.ok() &&
+                std::abs(measured.luminance - resolved_luminance) < 0.004F,
+            "HDR bloom leaves source luminance unchanged");
+
+    TextureDescription spatial_bloom_source = source_description();
+    spatial_bloom_source.width = 16U;
+    spatial_bloom_source.height = 8U;
+    std::array<std::uint16_t, 16U * 8U * 4U> spatial_bloom_pixels{};
+    for (std::size_t pixel = 0U; pixel < 16U * 8U; ++pixel)
+        spatial_bloom_pixels[pixel * 4U + 3U] = 0x3c00U;
+    for (std::size_t y = 0U; y < 8U; ++y) {
+        for (std::size_t x = 4U; x < 12U; ++x) {
+            const std::size_t pixel = y * 16U + x;
+            for (std::size_t channel = 0U; channel < 3U; ++channel)
+                spatial_bloom_pixels[pixel * 4U + channel] = 0x4d00U;
+        }
+    }
+    TextureUploadPlan spatial_bloom_upload;
+    spatial_bloom_upload.subresources.push_back(
+        {0U, 0U, 16U, 8U, 16U * 4U * sizeof(std::uint16_t),
+         std::as_bytes(std::span(spatial_bloom_pixels))});
+    TextureResult spatial_hdr = created.device->create_texture(
+        spatial_bloom_source, spatial_bloom_upload);
+    require(spatial_hdr.ok(),
+            "backend creates a localized HDR bloom fixture");
+    TextureDescription spatial_bloom_output = output;
+    spatial_bloom_output.width = 16U;
+    spatial_bloom_output.height = 8U;
+    TextureResult spatial_display =
+        created.device->create_texture(spatial_bloom_output);
+    require(spatial_display.ok(),
+            "backend creates a spatial bloom display target");
+    HdrToneMapParameters spatial_parameters;
+    spatial_parameters.dither_scale = 0.0F;
+    require(created.device->tone_map_hdr_texture(
+                *spatial_hdr.texture, *spatial_display.texture,
+                spatial_parameters).ok(),
+            "backend tone maps the spatial bloom reference");
+    const IndexedStaticMeshBatchResult spatial_disabled =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *spatial_display.texture, bloom_readback);
+    require(spatial_disabled.ok(),
+            "backend reads the spatial bloom reference");
+    spatial_parameters.bloom.enabled = true;
+    spatial_parameters.bloom.threshold = 5.0F;
+    spatial_parameters.bloom.composite_scale = 1.0F;
+    result = created.device->tone_map_hdr_texture(
+        *spatial_hdr.texture, *spatial_display.texture, spatial_parameters);
+    if (!result.ok())
+        throw std::runtime_error("spatial HDR bloom failed: " +
+                                 result.diagnostic.code + ": " +
+                                 result.diagnostic.message);
+    const IndexedStaticMeshBatchResult spatial_enabled =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *spatial_display.texture, bloom_readback);
+    require(spatial_enabled.ok() &&
+                spatial_enabled.rgba8.size() == spatial_disabled.rgba8.size(),
+            "backend reads the spatial bloom result");
+    bool neighbor_increased = false;
+    int maximum_neighbor_delta = -255;
+    int maximum_any_delta = -255;
+    for (std::size_t pixel = 0U; pixel < 16U * 8U; ++pixel) {
+        const std::size_t x = pixel % 16U;
+        const std::size_t offset = pixel * 4U;
+        for (std::size_t channel = 0U; channel < 3U; ++channel) {
+            const int delta =
+                static_cast<int>(std::to_integer<std::uint8_t>(
+                    spatial_enabled.rgba8[offset + channel])) -
+                static_cast<int>(std::to_integer<std::uint8_t>(
+                    spatial_disabled.rgba8[offset + channel]));
+            maximum_any_delta = std::max(maximum_any_delta, delta);
+            if (x >= 4U && x < 12U) continue;
+            maximum_neighbor_delta = std::max(maximum_neighbor_delta, delta);
+            neighbor_increased =
+                neighbor_increased || delta > 0;
+        }
+    }
+    if (!neighbor_increased)
+        throw std::runtime_error(
+            "five-level bloom did not spread a localized HDR impulse; maximum neighbor delta=" +
+            std::to_string(maximum_neighbor_delta) + ", maximum any delta=" +
+            std::to_string(maximum_any_delta));
+
     TextureDescription dither_source = source_description();
     dither_source.width = 4U;
     dither_source.height = 4U;
@@ -527,6 +729,7 @@ int main() {
     try {
         accepts_valid_request();
         rejects_shape_and_dimension_requests();
+        bounds_bloom_transient_resources();
         rejects_format_usage_and_mutability_requests();
         rejects_parameters_backend_and_aliasing();
         status_names_are_stable();

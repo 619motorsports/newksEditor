@@ -141,7 +141,9 @@ struct WorkspaceViewportPortableReflectionCaptureOptions {
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced
-    // tone-map approximation. The default LDR path remains unchanged.
+    // tone-map approximation. HdrToneMapParameters::bloom carries the
+    // optional five-level glare configuration. The default LDR path remains
+    // unchanged.
     std::optional<render::HdrToneMapParameters> hdr_tone_map;
     // Automatic exposure measures the resolved HDR scene synchronously before
     // tone mapping. It is intentionally opt-in and has no temporal history.
@@ -287,8 +289,8 @@ buildWorkspaceViewportStockD3D12NativeFrame(
 
 struct WorkspaceViewportFrameRequest {
     render::CameraFrame camera{};
-    // Override the prepared tone-map values for this frame. An LDR viewport
-    // rejects this value because it has no HDR scene target.
+    // Override the prepared tone-map and optional bloom values for this frame.
+    // An LDR viewport rejects this value because it has no HDR scene target.
     std::optional<render::HdrToneMapParameters> hdr_tone_map;
     // Override the prepared exposure mode for this frame. Automatic exposure
     // requires a prepared HDR scene and performs one synchronous measurement.

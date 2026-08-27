@@ -1,5 +1,6 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "apex/render/lighting.hpp"
 #include "half_float.hpp"
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #if defined(APEX_HAS_VULKAN) && APEX_HAS_VULKAN
 #    include <vulkan/vulkan.h>
 #    include "generated/hdr_tone_map_spirv.hpp"
+#    include "generated/hdr_bloom_spirv.hpp"
 #endif
 
 namespace apex::render {
@@ -5670,6 +5672,492 @@ private:
     std::vector<std::uint8_t> base_mip_initialized_;
 };
 
+struct VulkanBloomTargets {
+    // Each retained level has a ping-pong pair: A is the downsample/vertical
+    // target and B is the horizontal blur target.
+    std::array<RawVulkanImage, 10U> images;
+    std::array<std::uint32_t, 5U> widths{};
+    std::array<std::uint32_t, 5U> heights{};
+};
+
+struct VulkanBloomUniform {
+    std::array<float, 4U> mode_exposure_threshold_remap{};
+    std::array<float, 4U> direction_sample_count_texel_size{};
+    std::array<std::array<float, 4U>, 4U> offsets{};
+    std::array<std::array<float, 4U>, 4U> weights{};
+};
+static_assert(sizeof(VulkanBloomUniform) == 160U);
+
+bool generate_vulkan_bloom(const std::shared_ptr<VulkanContext>& context,
+                           VulkanTexture& source,
+                           float source_exposure,
+                           const HdrBloomParameters& parameters,
+                           VulkanBloomTargets& output,
+                           Diagnostic& diagnostic) {
+    constexpr std::uint32_t level_count = 5U;
+    constexpr std::uint32_t pass_count = 15U;
+    if (context == nullptr || context->device == VK_NULL_HANDLE ||
+        context->queue == VK_NULL_HANDLE || context->command_pool == VK_NULL_HANDLE) {
+        diagnostic = {"vulkan_hdr_bloom_uninitialized",
+                      "HDR bloom requires an initialized Vulkan device context"};
+        return false;
+    }
+    if (source.image() == VK_NULL_HANDLE || source.view() == VK_NULL_HANDLE ||
+        source.layout() == VK_IMAGE_LAYOUT_UNDEFINED) {
+        diagnostic = {"hdr_bloom_source_uninitialized",
+                      "HDR bloom requires an initialized source texture"};
+        return false;
+    }
+    if (!validate_hdr_bloom_resource_budget(
+            source.info().description.width, source.info().description.height,
+            0U, diagnostic)) {
+        diagnostic.message = "Vulkan " + diagnostic.message;
+        return false;
+    }
+
+    TextureDescription bloom_description;
+    bloom_description.width = std::max(1U, (source.info().description.width + 3U) / 4U);
+    bloom_description.height = std::max(1U, (source.info().description.height + 3U) / 4U);
+    bloom_description.format = TextureFormat::rgba16_sfloat;
+    bloom_description.usage = TextureUsage::sampled | TextureUsage::color_attachment;
+    bloom_description.mutability = TextureMutability::mutable_data;
+    bloom_description.access_policy = TextureAccessPolicy::render_then_sample;
+    for (std::uint32_t level = 0U; level < level_count; ++level) {
+        output.widths[level] = bloom_description.width;
+        output.heights[level] = bloom_description.height;
+        for (std::uint32_t side = 0U; side < 2U; ++side) {
+            const std::size_t index = static_cast<std::size_t>(level * 2U + side);
+            if (!create_raw_image(context, bloom_description, output.images[index], diagnostic)) {
+                diagnostic.code = diagnostic.code.empty() ? "vulkan_hdr_bloom_unsupported" : diagnostic.code;
+                return false;
+            }
+        }
+        bloom_description.width = std::max(1U, (bloom_description.width + 1U) / 2U);
+        bloom_description.height = std::max(1U, (bloom_description.height + 1U) / 2U);
+    }
+
+    VkShaderModule shader = VK_NULL_HANDLE;
+    VkShaderModule vertex_shader = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_layout = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    std::array<VkFramebuffer, level_count * 2U> framebuffers{};
+    std::array<VkDescriptorSet, pass_count> descriptor_sets{};
+    std::array<RawVulkanBuffer, pass_count> uniforms;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    const auto cleanup = [&] {
+        if (fence != VK_NULL_HANDLE) vkDestroyFence(context->device, fence, nullptr);
+        if (command != VK_NULL_HANDLE)
+            vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
+        if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(context->device, pipeline, nullptr);
+        if (pipeline_layout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(context->device, pipeline_layout, nullptr);
+        for (VkFramebuffer framebuffer : framebuffers)
+            if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(context->device, framebuffer, nullptr);
+        if (render_pass != VK_NULL_HANDLE) vkDestroyRenderPass(context->device, render_pass, nullptr);
+        if (descriptor_pool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(context->device, descriptor_pool, nullptr);
+        if (descriptor_layout != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(context->device, descriptor_layout, nullptr);
+        if (sampler != VK_NULL_HANDLE) vkDestroySampler(context->device, sampler, nullptr);
+        if (shader != VK_NULL_HANDLE) vkDestroyShaderModule(context->device, shader, nullptr);
+        if (vertex_shader != VK_NULL_HANDLE)
+            vkDestroyShaderModule(context->device, vertex_shader, nullptr);
+    };
+    const auto create_shader = [&](const std::uint32_t* bytes, std::size_t size) -> VkResult {
+        VkShaderModuleCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        info.codeSize = size;
+        info.pCode = bytes;
+        return vkCreateShaderModule(context->device, &info, nullptr, &shader);
+    };
+    VkResult result = create_shader(generated::hdr_bloom_frag_spirv,
+                                    generated::hdr_bloom_frag_spirv_size);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateShaderModule(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    VkShaderModuleCreateInfo vertex_shader_info{};
+    vertex_shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vertex_shader_info.codeSize = generated::hdr_tone_map_vertex_spirv_size;
+    vertex_shader_info.pCode = reinterpret_cast<const std::uint32_t*>(
+        generated::hdr_tone_map_vertex_spirv);
+    result = vkCreateShaderModule(context->device, &vertex_shader_info, nullptr, &vertex_shader);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateShaderModule(hdr bloom vertex)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    VkFormatProperties bloom_format_properties{};
+    vkGetPhysicalDeviceFormatProperties(context->physical_device,
+                                        VK_FORMAT_R16G16B16A16_SFLOAT,
+                                        &bloom_format_properties);
+    const VkFilter bloom_filter =
+        (bloom_format_properties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U
+            ? VK_FILTER_LINEAR
+            : VK_FILTER_NEAREST;
+    sampler_info.magFilter = bloom_filter;
+    sampler_info.minFilter = bloom_filter;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = 0.0F;
+    result = vkCreateSampler(context->device, &sampler_info, nullptr, &sampler);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateSampler(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 2U> bindings{};
+    bindings[0] = {0U, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1U,
+                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[1] = {1U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1U,
+                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo descriptor_info{};
+    descriptor_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    descriptor_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    descriptor_info.pBindings = bindings.data();
+    result = vkCreateDescriptorSetLayout(context->device, &descriptor_info, nullptr,
+                                         &descriptor_layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorSetLayout(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    std::array<VkDescriptorPoolSize, 2U> pool_sizes{
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pass_count},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass_count}};
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = pass_count;
+    pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
+    pool_info.pPoolSizes = pool_sizes.data();
+    result = vkCreateDescriptorPool(context->device, &pool_info, nullptr, &descriptor_pool);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorPool(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    std::array<VkDescriptorSetLayout, pass_count> layouts{};
+    layouts.fill(descriptor_layout);
+    VkDescriptorSetAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = descriptor_pool;
+    allocation.descriptorSetCount = pass_count;
+    allocation.pSetLayouts = layouts.data();
+    result = vkAllocateDescriptorSets(context->device, &allocation, descriptor_sets.data());
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkAllocateDescriptorSets(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    VkBufferUsageFlags uniform_usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    BufferDescription uniform_description;
+    uniform_description.size_bytes = sizeof(VulkanBloomUniform);
+    uniform_description.usage = BufferUsage::uniform;
+    uniform_description.memory = BufferMemory::host_visible;
+    uniform_description.mutability = BufferMutability::mutable_data;
+    for (RawVulkanBuffer& uniform : uniforms) {
+        if (!create_raw_buffer(context, uniform_description, uniform_usage,
+                               BufferMemory::host_visible, uniform, diagnostic)) {
+            diagnostic.code = diagnostic.code.empty() ? "vulkan_hdr_bloom_uniform_failed" : diagnostic.code;
+            cleanup();
+            return false;
+        }
+    }
+
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference reference{0U, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1U;
+    subpass.pColorAttachments = &reference;
+    VkRenderPassCreateInfo render_info{};
+    render_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_info.attachmentCount = 1U;
+    render_info.pAttachments = &attachment;
+    render_info.subpassCount = 1U;
+    render_info.pSubpasses = &subpass;
+    result = vkCreateRenderPass(context->device, &render_info, nullptr, &render_pass);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateRenderPass(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    for (std::uint32_t level = 0U; level < level_count; ++level) {
+        for (std::uint32_t side = 0U; side < 2U; ++side) {
+            const std::size_t index = static_cast<std::size_t>(level * 2U + side);
+            VkFramebufferCreateInfo framebuffer_info{};
+            framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer_info.renderPass = render_pass;
+            framebuffer_info.attachmentCount = 1U;
+            framebuffer_info.pAttachments = &output.images[index].view;
+            framebuffer_info.width = output.widths[level];
+            framebuffer_info.height = output.heights[level];
+            framebuffer_info.layers = 1U;
+            result = vkCreateFramebuffer(context->device, &framebuffer_info, nullptr,
+                                         &framebuffers[index]);
+            if (result != VK_SUCCESS) {
+                diagnostic = vk_error("vkCreateFramebuffer(hdr bloom)", result);
+                diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+                cleanup();
+                return false;
+            }
+        }
+    }
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 1U;
+    layout_info.pSetLayouts = &descriptor_layout;
+    result = vkCreatePipelineLayout(context->device, &layout_info, nullptr, &pipeline_layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreatePipelineLayout(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex_shader;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = shader;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1U;
+    viewport_state.scissorCount = 1U;
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterization.lineWidth = 1.0F;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1U;
+    blend.pAttachments = &blend_attachment;
+    const std::array<VkDynamicState, 2U> dynamic_states = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+    VkGraphicsPipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 2U;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &rasterization;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = pipeline_layout;
+    pipeline_info.renderPass = render_pass;
+    result = vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1U, &pipeline_info,
+                                       nullptr, &pipeline);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateGraphicsPipelines(hdr bloom)", result);
+        diagnostic.code = "vulkan_hdr_bloom_pipeline_failed";
+        cleanup();
+        return false;
+    }
+
+    const auto state_for = [](VkImageLayout layout) {
+        if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            return std::pair<VkPipelineStageFlags, VkAccessFlags>{
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT};
+        if (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            return std::pair<VkPipelineStageFlags, VkAccessFlags>{
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
+        return std::pair<VkPipelineStageFlags, VkAccessFlags>{
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0U};
+    };
+    const auto transition = [&](VkCommandBuffer target, VkImage image,
+                                VkImageLayout old_layout, VkImageLayout new_layout) {
+        if (old_layout == new_layout) return;
+        const auto [source_stage, source_access] = state_for(old_layout);
+        const auto [destination_stage, destination_access] = state_for(new_layout);
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = source_access;
+        barrier.dstAccessMask = destination_access;
+        barrier.oldLayout = old_layout;
+        barrier.newLayout = new_layout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1U;
+        barrier.subresourceRange.layerCount = 1U;
+        vkCmdPipelineBarrier(target, source_stage, destination_stage, 0U, 0U, nullptr,
+                             0U, nullptr, 1U, &barrier);
+    };
+    VkCommandBufferAllocateInfo command_info{};
+    command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_info.commandPool = context->command_pool;
+    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_info.commandBufferCount = 1U;
+    result = vkAllocateCommandBuffers(context->device, &command_info, &command);
+    if (result == VK_SUCCESS) {
+    VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+    }
+    const VkImageLayout source_old_layout = source.layout();
+    std::array<VkImageLayout, level_count * 2U> output_layouts{};
+    output_layouts.fill(VK_IMAGE_LAYOUT_UNDEFINED);
+    if (result == VK_SUCCESS) {
+        transition(command, source.image(), source_old_layout,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        std::uint32_t descriptor_index = 0U;
+        const auto record_pass = [&](std::uint32_t level, std::uint32_t side,
+                                     VkImageView input_view, std::uint32_t mode,
+                                     float exposure, float direction_x, float direction_y,
+                                     const BloomKernelMetadata* kernel) -> bool {
+            VulkanBloomUniform values{};
+            values.mode_exposure_threshold_remap = {
+                static_cast<float>(mode), exposure, parameters.threshold, parameters.remap};
+            values.direction_sample_count_texel_size = {
+                direction_x, direction_y,
+                kernel == nullptr ? 0.0F : static_cast<float>(kernel->sample_count), 0.0F};
+            if (kernel != nullptr) {
+                for (std::size_t i = 0U; i < kernel->offsets.size(); ++i) {
+                    values.offsets[i / 4U][i & 3U] = kernel->offsets[i];
+                    values.weights[i / 4U][i & 3U] = kernel->weights[i];
+                }
+            }
+            if (!write_host_buffer(context, uniforms[descriptor_index], 0U,
+                                   std::span<const std::byte>(
+                                       reinterpret_cast<const std::byte*>(&values), sizeof(values)),
+                                   diagnostic)) return false;
+            VkDescriptorImageInfo source_info{sampler, input_view,
+                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorBufferInfo buffer_info{uniforms[descriptor_index].buffer, 0U, sizeof(values)};
+            std::array<VkWriteDescriptorSet, 2U> writes{};
+            writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                         descriptor_sets[descriptor_index], 0U, 0U, 1U,
+                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &source_info, nullptr, nullptr};
+            writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                         descriptor_sets[descriptor_index], 1U, 0U, 1U,
+                         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buffer_info, nullptr};
+            vkUpdateDescriptorSets(context->device, writes.size(), writes.data(), 0U, nullptr);
+            const std::size_t output_index = static_cast<std::size_t>(level * 2U + side);
+            transition(command, output.images[output_index].image,
+                       output_layouts[output_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            VkRenderPassBeginInfo render_begin{};
+            render_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_begin.renderPass = render_pass;
+            render_begin.framebuffer = framebuffers[output_index];
+            render_begin.renderArea = {{0, 0}, {output.widths[level], output.heights[level]}};
+            vkCmdBeginRenderPass(command, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
+            VkViewport viewport{0.0F, 0.0F, static_cast<float>(output.widths[level]),
+                                static_cast<float>(output.heights[level]), 0.0F, 1.0F};
+            VkRect2D scissor{{0, 0}, {output.widths[level], output.heights[level]}};
+            vkCmdSetViewport(command, 0U, 1U, &viewport);
+            vkCmdSetScissor(command, 0U, 1U, &scissor);
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
+                                    0U, 1U, &descriptor_sets[descriptor_index], 0U, nullptr);
+            vkCmdDraw(command, 3U, 1U, 0U, 0U);
+            vkCmdEndRenderPass(command);
+            output_layouts[output_index] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            ++descriptor_index;
+            return true;
+        };
+        if (record_pass(0U, 0U, source.view(), 0U, source_exposure, 0.0F, 0.0F,
+                        nullptr)) {
+            for (std::uint32_t level = 0U; level < level_count; ++level) {
+                if (level != 0U &&
+                    !record_pass(level, 0U, output.images[(level - 1U) * 2U].view,
+                                 1U, 0.0F, 0.0F, 0.0F, nullptr)) break;
+                const BloomKernelMetadata kernel = ksEditorBloomGaussianKernel(
+                    static_cast<std::int32_t>(level), parameters.kernel_threshold,
+                    parameters.radius_scale, parameters.source_level,
+                    parameters.display_scale);
+                if (!record_pass(level, 1U, output.images[level * 2U].view,
+                                 2U, 0.0F, 1.0F, 0.0F, &kernel)) break;
+                if (!record_pass(level, 0U, output.images[level * 2U + 1U].view,
+                                 2U, 0.0F, 0.0F, 1.0F, &kernel)) break;
+            }
+        }
+        if (descriptor_index != pass_count) {
+            if (diagnostic.code.empty())
+                diagnostic = {"vulkan_hdr_bloom_record_failed", "Vulkan HDR bloom pass recording failed"};
+            result = VK_ERROR_INITIALIZATION_FAILED;
+        } else {
+            transition(command, source.image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       source_old_layout);
+            result = vkEndCommandBuffer(command);
+        }
+    }
+    if (result == VK_SUCCESS) {
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1U;
+            submit.pCommandBuffers = &command;
+            result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+            if (result == VK_SUCCESS) result = vkWaitForFences(context->device, 1U, &fence, VK_TRUE, UINT64_MAX);
+        }
+    }
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("Vulkan HDR bloom execution", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST ? "vulkan_device_lost" : "vulkan_hdr_bloom_failed";
+        cleanup();
+        return false;
+    }
+    source.mark_layout(source_old_layout);
+    cleanup();
+    diagnostic = {};
+    return true;
+}
+
 bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
                              const HdrToneMapParameters& parameters,
                              Diagnostic& diagnostic) {
@@ -5701,6 +6189,14 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
         destination.info().description.usage,
         destination.info().description.access_policy);
 
+    std::optional<VulkanBloomTargets> bloom_targets;
+    if (parameters.bloom.enabled) {
+        bloom_targets.emplace();
+        if (!generate_vulkan_bloom(context, source, parameters.exposure, parameters.bloom,
+                                   *bloom_targets, diagnostic))
+            return false;
+    }
+
     struct PushConstants {
         float exposure;
         float gamma_value;
@@ -5720,6 +6216,25 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
                          : 0U,
                      parameters.dither_scale};
     static_assert(sizeof(PushConstants) == 28U);
+    struct BloomPushConstants {
+        float exposure;
+        float gamma_value;
+        float saturation;
+        float curve_scale;
+        float curve_shoulder;
+        std::uint32_t srgb_destination;
+        float dither_scale;
+        float bloom_scale;
+    } bloom_push_constants{parameters.exposure,
+                           parameters.gamma,
+                           parameters.saturation,
+                           parameters.curve_scale,
+                           parameters.curve_shoulder,
+                           push_constants.srgb_destination,
+                           parameters.dither_scale,
+                           parameters.bloom.composite_scale};
+    static_assert(sizeof(BloomPushConstants) == 32U);
+    const bool bloom_enabled = bloom_targets.has_value();
 
     VkShaderModule vertex_shader = VK_NULL_HANDLE;
     VkShaderModule fragment_shader = VK_NULL_HANDLE;
@@ -5762,7 +6277,7 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
         return false;
     };
 
-    const auto create_shader = [&](const unsigned char* bytes, std::size_t size,
+    const auto create_shader = [&](const void* bytes, std::size_t size,
                                    VkShaderModule& output) -> VkResult {
         if (size == 0U || size % sizeof(std::uint32_t) != 0U ||
             bytes == nullptr || reinterpret_cast<std::uintptr_t>(bytes) % alignof(std::uint32_t) != 0U)
@@ -5777,9 +6292,13 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
                                     generated::hdr_tone_map_vertex_spirv_size,
                                     vertex_shader);
     if (result != VK_SUCCESS) return fail("vkCreateShaderModule(hdr tone-map vertex)", result);
-    result = create_shader(generated::hdr_tone_map_fragment_spirv,
-                           generated::hdr_tone_map_fragment_spirv_size,
-                           fragment_shader);
+    result = bloom_enabled
+                 ? create_shader(generated::hdr_tone_map_bloom_frag_spirv,
+                                 generated::hdr_tone_map_bloom_frag_spirv_size,
+                                 fragment_shader)
+                 : create_shader(generated::hdr_tone_map_fragment_spirv,
+                                 generated::hdr_tone_map_fragment_spirv_size,
+                                 fragment_shader);
     if (result != VK_SUCCESS) return fail("vkCreateShaderModule(hdr tone-map fragment)", result);
 
     VkSamplerCreateInfo sampler_info{};
@@ -5787,8 +6306,18 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     // The one-to-one fullscreen pass does not need interpolation. Nearest
     // filtering keeps this path valid on devices that expose sampled RGBA16F
     // without the optional linear-filter feature.
-    sampler_info.magFilter = VK_FILTER_NEAREST;
-    sampler_info.minFilter = VK_FILTER_NEAREST;
+    VkFormatProperties source_format_properties{};
+    vkGetPhysicalDeviceFormatProperties(context->physical_device,
+                                        vk_texture_format(source.info().description.format),
+                                        &source_format_properties);
+    const VkFilter tone_map_filter =
+        bloom_enabled &&
+                (source_format_properties.optimalTilingFeatures &
+                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U
+            ? VK_FILTER_LINEAR
+            : VK_FILTER_NEAREST;
+    sampler_info.magFilter = tone_map_filter;
+    sampler_info.minFilter = tone_map_filter;
     sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -5798,15 +6327,18 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     result = vkCreateSampler(context->device, &sampler_info, nullptr, &sampler);
     if (result != VK_SUCCESS) return fail("vkCreateSampler(hdr tone-map)", result);
 
-    VkDescriptorSetLayoutBinding sampler_binding{};
-    sampler_binding.binding = 0U;
-    sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampler_binding.descriptorCount = 1U;
-    sampler_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::array<VkDescriptorSetLayoutBinding, 6U> sampler_bindings{};
+    const std::uint32_t sampler_binding_count = bloom_enabled ? 6U : 1U;
+    for (std::uint32_t binding = 0U; binding < sampler_binding_count; ++binding) {
+        sampler_bindings[binding].binding = binding;
+        sampler_bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sampler_bindings[binding].descriptorCount = 1U;
+        sampler_bindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo descriptor_layout_info{};
     descriptor_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    descriptor_layout_info.bindingCount = 1U;
-    descriptor_layout_info.pBindings = &sampler_binding;
+    descriptor_layout_info.bindingCount = sampler_binding_count;
+    descriptor_layout_info.pBindings = sampler_bindings.data();
     result = vkCreateDescriptorSetLayout(context->device, &descriptor_layout_info, nullptr,
                                           &descriptor_set_layout);
     if (result != VK_SUCCESS)
@@ -5814,7 +6346,7 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
 
     VkDescriptorPoolSize descriptor_pool_size{};
     descriptor_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    descriptor_pool_size.descriptorCount = 1U;
+    descriptor_pool_size.descriptorCount = sampler_binding_count;
     VkDescriptorPoolCreateInfo descriptor_pool_info{};
     descriptor_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     descriptor_pool_info.maxSets = 1U;
@@ -5833,18 +6365,25 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     result = vkAllocateDescriptorSets(context->device, &descriptor_allocation, &descriptor_set);
     if (result != VK_SUCCESS)
         return fail("vkAllocateDescriptorSets(hdr tone-map)", result);
-    VkDescriptorImageInfo image_info{};
-    image_info.sampler = sampler;
-    image_info.imageView = source.view();
-    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet descriptor_write{};
-    descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptor_write.dstSet = descriptor_set;
-    descriptor_write.dstBinding = 0U;
-    descriptor_write.descriptorCount = 1U;
-    descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    descriptor_write.pImageInfo = &image_info;
-    vkUpdateDescriptorSets(context->device, 1U, &descriptor_write, 0U, nullptr);
+    std::array<VkDescriptorImageInfo, 6U> image_infos{};
+    image_infos[0] = {sampler, source.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    if (bloom_enabled) {
+        for (std::uint32_t level = 0U; level < 5U; ++level)
+            image_infos[level + 1U] = {
+                sampler, bloom_targets->images[level * 2U].view,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    std::array<VkWriteDescriptorSet, 6U> descriptor_writes{};
+    for (std::uint32_t binding = 0U; binding < sampler_binding_count; ++binding) {
+        descriptor_writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptor_writes[binding].dstSet = descriptor_set;
+        descriptor_writes[binding].dstBinding = binding;
+        descriptor_writes[binding].descriptorCount = 1U;
+        descriptor_writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptor_writes[binding].pImageInfo = &image_infos[binding];
+    }
+    vkUpdateDescriptorSets(context->device, sampler_binding_count, descriptor_writes.data(),
+                           0U, nullptr);
 
     VkAttachmentDescription color_attachment{};
     color_attachment.format = destination_format;
@@ -5885,7 +6424,7 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     VkPushConstantRange push_range{};
     push_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     push_range.offset = 0U;
-    push_range.size = sizeof(PushConstants);
+    push_range.size = bloom_enabled ? sizeof(BloomPushConstants) : sizeof(PushConstants);
     VkPipelineLayoutCreateInfo pipeline_layout_info{};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipeline_layout_info.setLayoutCount = 1U;
@@ -6035,8 +6574,12 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0U, 1U,
                             &descriptor_set, 0U, nullptr);
-    vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0U,
-                       sizeof(push_constants), &push_constants);
+    if (bloom_enabled)
+        vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0U,
+                           sizeof(bloom_push_constants), &bloom_push_constants);
+    else
+        vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0U,
+                           sizeof(push_constants), &push_constants);
     vkCmdDraw(command, 3U, 1U, 0U, 0U);
     vkCmdEndRenderPass(command);
 

@@ -1765,6 +1765,9 @@ void draws_opt_in_hdr_viewport_before_presentation() {
             request.color_samples = color_samples;
             request.hdr_tone_map = HdrToneMapParameters{};
             request.hdr_tone_map->exposure = 0.75F;
+            request.hdr_tone_map->bloom.enabled = true;
+            request.hdr_tone_map->bloom.threshold = 7.0F;
+            request.hdr_tone_map->bloom.composite_scale = 0.25F;
             FakeDevice device(backend);
             auto prepared = apex::app::prepareWorkspaceViewport(
                 device, value.document, request);
@@ -1890,6 +1893,11 @@ void draws_opt_in_hdr_viewport_before_presentation() {
                             std::vector<Texture*>({hdr_source}) &&
                         device.tone_map_destinations ==
                             std::vector<Texture*>({display_target}) &&
+                        device.tone_map_parameters.front().bloom.enabled &&
+                        device.tone_map_parameters.front().bloom.threshold ==
+                            7.0F &&
+                        device.tone_map_parameters.front().bloom.composite_scale ==
+                            0.25F &&
                         device.presented_textures ==
                             std::vector<Texture*>({display_target}) &&
                         device.tone_map_parameters.front().exposure == 0.75F,
@@ -1897,10 +1905,14 @@ void draws_opt_in_hdr_viewport_before_presentation() {
 
             frame.hdr_tone_map = *request.hdr_tone_map;
             frame.hdr_tone_map->exposure = 1.5F;
+            frame.hdr_tone_map->bloom.threshold = 9.0F;
             status = prepared.viewport->drawAndPresent(device, target, frame,
                                                        diagnostic);
             require(status == WorkspaceViewportFrameStatus::ready &&
                         device.tone_map_parameters.back().exposure == 1.5F &&
+                        device.tone_map_parameters.back().bloom.enabled &&
+                        device.tone_map_parameters.back().bloom.threshold ==
+                            9.0F &&
                         device.present_calls == 2U,
                     "HDR frame parameters override the prepared defaults");
 
@@ -1948,6 +1960,9 @@ void draws_automatic_exposure_before_tone_map() {
         auto request = request_for(value);
         request.hdr_tone_map = HdrToneMapParameters{};
         request.hdr_tone_map->exposure = 0.75F;
+        request.hdr_tone_map->bloom.enabled = true;
+        request.hdr_tone_map->bloom.threshold = 7.0F;
+        request.hdr_tone_map->bloom.composite_scale = 0.25F;
         request.hdr_exposure_mode = HdrExposureMode::automatic;
         request.color_samples = 4U;
         FakeDevice device(backend);
@@ -1988,6 +2003,10 @@ void draws_automatic_exposure_before_tone_map() {
                     device.luminance_calls == 1U &&
                     device.luminance_sources == std::vector<Texture*>({hdr_source}) &&
                     device.tone_map_parameters.size() == 1U &&
+                    device.tone_map_parameters.front().bloom.enabled &&
+                    device.tone_map_parameters.front().bloom.threshold == 7.0F &&
+                    device.tone_map_parameters.front().bloom.composite_scale ==
+                        0.25F &&
                     std::abs(device.tone_map_parameters.front().exposure - 0.5F) <
                         1e-6F,
                 "automatic exposure measures the resolved scene before tone mapping");

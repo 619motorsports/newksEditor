@@ -669,6 +669,19 @@ HdrToneMapStatus validate_hdr_tone_map_parameters(
                       "values must be nonnegative, and gamma must be positive"};
         return HdrToneMapStatus::invalid_request;
     }
+    const HdrBloomParameters& bloom = parameters.bloom;
+    if (!std::isfinite(bloom.threshold) || bloom.threshold < 0.0F ||
+        !std::isfinite(bloom.remap) || bloom.remap < 0.0F ||
+        !std::isfinite(bloom.composite_scale) || bloom.composite_scale < 0.0F ||
+        !std::isfinite(bloom.kernel_threshold) || bloom.kernel_threshold < 0.0F ||
+        !std::isfinite(bloom.radius_scale) || bloom.radius_scale < 0.0F ||
+        !std::isfinite(bloom.display_scale) || bloom.display_scale < 0.0F ||
+        bloom.source_level < 0 || bloom.source_level > 4) {
+        diagnostic = {
+            "hdr_bloom_parameters_invalid",
+            "HDR bloom parameters must be finite and nonnegative, and the source level must be between zero and four"};
+        return HdrToneMapStatus::invalid_request;
+    }
     diagnostic = {};
     return HdrToneMapStatus::ready;
 }
@@ -771,6 +784,14 @@ HdrToneMapStatus validate_hdr_tone_map_request(
                       "HDR tone-map texture dimensions must be non-zero"};
         return HdrToneMapStatus::invalid_request;
     }
+    if (input.width > max_texture_dimension ||
+        input.height > max_texture_dimension ||
+        output.width > max_texture_dimension ||
+        output.height > max_texture_dimension) {
+        diagnostic = {"hdr_tone_map_dimension_limit",
+                      "HDR tone-map texture dimensions exceed the backend-neutral safety limit"};
+        return HdrToneMapStatus::invalid_request;
+    }
     if (input.format != TextureFormat::rgba16_sfloat) {
         diagnostic = {"hdr_tone_map_source_format_unsupported",
                       "HDR tone mapping requires an RGBA16F source texture"};
@@ -830,7 +851,56 @@ HdrToneMapStatus validate_hdr_tone_map_request(
                       "HDR tone mapping requires a mutable destination texture"};
         return HdrToneMapStatus::invalid_request;
     }
-    return validate_hdr_tone_map_parameters(parameters, diagnostic);
+    const HdrToneMapStatus parameter_status =
+        validate_hdr_tone_map_parameters(parameters, diagnostic);
+    if (parameter_status != HdrToneMapStatus::ready)
+        return parameter_status;
+    if (parameters.bloom.enabled &&
+        !validate_hdr_bloom_resource_budget(input.width, input.height, 0U,
+                                            diagnostic))
+        return HdrToneMapStatus::invalid_request;
+    diagnostic = {};
+    return HdrToneMapStatus::ready;
+}
+
+bool validate_hdr_bloom_resource_budget(
+    std::uint32_t width, std::uint32_t height,
+    std::uint64_t additional_bytes, Diagnostic& diagnostic) noexcept {
+    if (width == 0U || height == 0U || width > max_texture_dimension ||
+        height > max_texture_dimension) {
+        diagnostic = {"hdr_bloom_dimensions_invalid",
+                      "HDR bloom dimensions are outside the bounded range"};
+        return false;
+    }
+
+    constexpr std::uint64_t bytes_per_level_texel =
+        2ULL * 4ULL * sizeof(std::uint16_t);
+    std::uint64_t total_bytes = additional_bytes;
+    std::uint32_t level_width = (width + 3U) / 4U;
+    std::uint32_t level_height = (height + 3U) / 4U;
+    for (std::uint32_t level = 0U; level < 5U; ++level) {
+        const std::uint64_t level_texels =
+            static_cast<std::uint64_t>(level_width) * level_height;
+        if (level_texels >
+                std::numeric_limits<std::uint64_t>::max() /
+                    bytes_per_level_texel ||
+            level_texels * bytes_per_level_texel >
+                std::numeric_limits<std::uint64_t>::max() - total_bytes) {
+            diagnostic = {"hdr_bloom_allocation_limit",
+                          "HDR bloom transient-resource size overflows byte arithmetic"};
+            return false;
+        }
+        total_bytes += level_texels * bytes_per_level_texel;
+        level_width = std::max(1U, (level_width + 1U) / 2U);
+        level_height = std::max(1U, (level_height + 1U) / 2U);
+    }
+    if (total_bytes > max_hdr_bloom_transient_bytes) {
+        diagnostic = {"hdr_bloom_allocation_limit",
+                      "HDR bloom transient resources exceed the bounded budget"};
+        return false;
+    }
+    diagnostic = {};
+    return true;
 }
 
 DepthAttachmentStatus validate_depth_attachment_description(

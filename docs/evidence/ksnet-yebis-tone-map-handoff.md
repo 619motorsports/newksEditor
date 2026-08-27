@@ -338,9 +338,9 @@ resource bindings, and active constant fields. Some curve semantics remain
 unknown.
 
 The C++ port must keep the current implementation labeled as an approximation.
-The current pass includes fixed-phase dither but omits automatic exposure.
-The default glare composite scale is zero, so the missing glare texture does
-not affect the proven default pixel path.
+The current pass includes fixed-phase dither and portable immediate automatic
+exposure. The optional portable bloom path is disabled by default. Therefore,
+it does not affect the proven default pixel path.
 
 An exact claim still requires vector packing confirmation and native dither
 phase sequencing. A production rendering change also requires a production
