@@ -4138,6 +4138,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     }
 
     D3D12MaterialDescriptorBinding material_binding;
+    const bool has_stock_tyres =
+        pipeline_declares_stock_tyres(*request.pipeline);
     if (!request.pipeline->resources.empty()) {
         D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
         if (indexed_request == nullptr) {
@@ -4148,7 +4150,6 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
         const bool has_material_constants = d3d12_pipeline_has_material_constants(*request.pipeline);
         const bool has_frame_constants = d3d12_pipeline_has_frame_constants(*request.pipeline);
         const bool has_normal_texture = d3d12_pipeline_has_normal_texture(*request.pipeline);
-        const bool has_stock_tyres = pipeline_declares_stock_tyres(*request.pipeline);
         const bool has_maps_texture = d3d12_pipeline_has_maps_texture(*request.pipeline);
         const bool has_detail_texture = d3d12_pipeline_has_detail_texture(*request.pipeline);
         const bool has_normal_detail_texture = d3d12_pipeline_has_normal_detail_texture(*request.pipeline);
@@ -8645,6 +8646,9 @@ bool prepare_d3d12_material_binding(
     UINT cbv_index,
     UINT frame_cbv_index,
     UINT normal_srv_index,
+    UINT tyre_dirty_srv_index,
+    UINT tyre_blur_srv_index,
+    UINT tyre_normal_blur_srv_index,
     UINT maps_srv_index,
     UINT detail_srv_index,
     UINT normal_detail_srv_index,
