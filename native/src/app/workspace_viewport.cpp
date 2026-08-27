@@ -534,6 +534,22 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     return WorkspaceViewportFrameStatus::execution_failed;
 }
 
+[[nodiscard]] WorkspaceViewportFrameStatus textureUpdateStatus(
+    render::TextureStatus status) noexcept {
+    switch (status) {
+    case render::TextureStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::TextureStatus::invalid_description:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::TextureStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::TextureStatus::allocation_failed:
+    case render::TextureStatus::upload_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
 [[nodiscard]] WorkspaceViewportStatus shadowPreparationStatus(
     render::DirectionalShadowMapStatus status) noexcept {
     switch (status) {
@@ -2106,6 +2122,15 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
                 return drawStatus(captured.status);
             }
         }
+        if (capture.cubes[capture.write_cube]->info().description.mip_levels >
+            1U) {
+            const auto generated = device.generate_texture_mips(
+                *capture.cubes[capture.write_cube]);
+            if (!generated.ok()) {
+                output_diagnostic = generated.diagnostic;
+                return textureUpdateStatus(generated.status);
+            }
+        }
         pending_reflection_capture = capture.write_cube;
         frame.multimap_reflection_cube = {
             capture.cubes[*pending_reflection_capture].get(),
@@ -2665,6 +2690,15 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 request.portable_reflection_capture->size;
             cube_description.height = cube_description.width;
             cube_description.format = render::TextureFormat::rgba16_sfloat;
+            if (device.info().backend == render::Backend::Vulkan) {
+                std::uint32_t dimension = cube_description.width;
+                while (dimension != 0U &&
+                       cube_description.mip_levels < 7U) {
+                    dimension >>= 1U;
+                    if (dimension != 0U)
+                        ++cube_description.mip_levels;
+                }
+            }
             cube_description.usage =
                 render::TextureUsage::sampled |
                 render::TextureUsage::color_attachment |
@@ -2698,7 +2732,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 render::SamplerAddressMode::clamp_to_edge;
             sampler_description.address_w =
                 render::SamplerAddressMode::clamp_to_edge;
-            sampler_description.max_lod = 0.0F;
+            sampler_description.max_lod = static_cast<float>(
+                cube_description.mip_levels - 1U);
             auto sampler = device.create_sampler(sampler_description);
             if (!sampler.ok()) {
                 result.status =

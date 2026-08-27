@@ -190,6 +190,16 @@ public:
         return {TextureStatus::ready, {}};
     }
 
+    TextureUpdateResult generate_texture_mips(Texture &texture) override {
+        ++mip_calls;
+        events.push_back("mips");
+        mip_targets.push_back(&texture);
+        if (fail_mip_call == mip_calls)
+            return {TextureStatus::upload_failed,
+                    {"fake_mip_failed", "injected mip failure"}};
+        return {TextureStatus::ready, {}};
+    }
+
     DepthAttachmentResult create_depth_attachment(
         const DepthAttachmentDescription &description) override {
         ++depth_calls;
@@ -329,6 +339,7 @@ public:
 
     bool fail_draw = false;
     std::size_t fail_draw_call = 0U;
+    std::size_t fail_mip_call = 0U;
     bool invalid_draw = false;
     bool unsupported_draw = false;
     bool fail_present = false;
@@ -340,6 +351,7 @@ public:
     std::size_t depth_calls = 0U;
     std::size_t sampler_calls = 0U;
     std::size_t draw_calls = 0U;
+    std::size_t mip_calls = 0U;
     std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
     std::vector<std::size_t> draw_counts;
@@ -377,6 +389,7 @@ public:
     std::vector<bool> capture_requests;
     std::vector<Texture *> presented_textures;
     std::vector<Texture *> draw_targets;
+    std::vector<Texture *> mip_targets;
     std::vector<TextureTargetSubresource> target_subresources;
     std::vector<std::optional<CameraFrame>> draw_camera_frames;
     std::shared_ptr<std::size_t> live_buffer_count =
@@ -1436,7 +1449,7 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     for (const TextureDescription* description : capture_descriptions) {
         require(description->width == 8U && description->height == 8U &&
                     description->format == TextureFormat::rgba16_sfloat &&
-                    description->mip_levels == 1U &&
+                    description->mip_levels == 4U &&
                     description->array_layers == 1U &&
                     description->samples == 1U &&
                     description->mutability == TextureMutability::mutable_data &&
@@ -1451,8 +1464,8 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
                 device.created_depth_descriptions.back().height == 8U &&
                 device.created_depth_descriptions.back().samples == 1U &&
                 !device.sampler_descriptions.empty() &&
-                device.sampler_descriptions.back().max_lod == 0.0F,
-            "capture owns matching depth and a single-mip sampler");
+                device.sampler_descriptions.back().max_lod == 3.0F,
+            "capture owns matching depth and a bounded full-chain sampler");
 
     FakeTarget target(request.presentation);
     WorkspaceViewportFrameRequest frame;
@@ -1463,8 +1476,10 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     require(prepared.viewport->drawAndPresent(device, target, frame,
                                               diagnostic) ==
                 WorkspaceViewportFrameStatus::ready &&
-                device.draw_calls == 7U && device.present_calls == 1U,
-            "six completed faces publish before the main frame and presentation");
+                device.draw_calls == 7U && device.mip_calls == 1U &&
+                device.present_calls == 1U &&
+                device.mip_targets.front() == device.draw_targets.front(),
+            "six completed faces generate mips before the main frame and presentation");
 
     constexpr std::array<CubeFace, texture_cube_face_count> expected_faces = {
         CubeFace::negative_x, CubeFace::positive_x, CubeFace::positive_y,
@@ -1498,6 +1513,20 @@ void captures_and_publishes_six_portable_reflection_faces_atomically() {
     }
     require(device.reflection_textures[6U] == first_candidate,
             "the main draw samples only the fully completed first cube");
+
+    const std::size_t calls_before_mip_failure = device.draw_calls;
+    const std::size_t mips_before_failure = device.mip_calls;
+    const std::size_t presents_before_mip_failure = device.present_calls;
+    device.fail_mip_call = mips_before_failure + 1U;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::execution_failed &&
+                diagnostic.code == "fake_mip_failed" &&
+                device.draw_calls == calls_before_mip_failure + 6U &&
+                device.mip_calls == mips_before_failure + 1U &&
+                device.present_calls == presents_before_mip_failure,
+            "failed mip generation does not draw, present, or publish the main frame");
+    device.fail_mip_call = 0U;
 
     const std::size_t calls_before_main_failure = device.draw_calls;
     const std::size_t presents_before_main_failure = device.present_calls;
