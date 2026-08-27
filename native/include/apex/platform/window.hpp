@@ -96,6 +96,7 @@ enum class WindowKey : std::uint8_t {
     keypad_9,
     left_control,
     right_control,
+    f3,
 };
 
 struct WindowEvent {

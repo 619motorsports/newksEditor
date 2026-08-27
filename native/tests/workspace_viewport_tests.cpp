@@ -676,6 +676,32 @@ Fixture fixture() {
     return result;
 }
 
+Fixture cockpit_fixture() {
+    Fixture result = fixture();
+    auto& model = result.document.assembly.model;
+    auto& high_model = model.root.children.front();
+    high_model.name = "COCKPIT_HR";
+    high_model.active = true;
+    apex::formats::Kn5Node low_model = high_model;
+    low_model.name = "COCKPIT_LR";
+    low_model.active = false;
+    low_model.children.clear();
+    model.root.children.push_back(std::move(low_model));
+
+    auto& scene = result.document.scene.snapshot;
+    auto& high = scene.nodes[1U];
+    high.name = "COCKPIT_HR";
+    high.active = true;
+    const auto high_id = high.id;
+    apex::scene::SceneNode low = high;
+    low.name = "COCKPIT_LR";
+    low.active = false;
+    low.children.clear();
+    const auto low_id = scene.add_node(std::move(low), scene.root);
+    result.document.sceneBinding.file_root_nodes = {high_id, low_id};
+    return result;
+}
+
 void configure_multimap_reflection(Fixture& value) {
     auto& model = value.document.assembly.model;
     auto& material = model.materials.front();
@@ -4590,6 +4616,32 @@ void tracks_focus_safe_skeleton_overlay_input() {
             "F2 input resumes after focus gain");
 }
 
+void tracks_focus_safe_cockpit_resolution_input() {
+    apex::app::WorkspaceCockpitResolutionInputState input;
+    require(!input.highVisible().has_value(),
+            "F3 input starts with authored cockpit visibility");
+    require(input.setPressed(true, true) &&
+                input.highVisible() == std::optional<bool>{false},
+            "first F3 edge toggles authored high-resolution visibility");
+    require(!input.setPressed(true, true) &&
+                input.highVisible() == std::optional<bool>{false},
+            "repeated F3 key-down is idempotent");
+    require(!input.setPressed(false, true),
+            "F3 key-up rearms without changing cockpit visibility");
+    require(input.setPressed(true, true) &&
+                input.highVisible() == std::optional<bool>{true},
+            "second F3 edge toggles the retained resolution state");
+
+    input.setFocused(false);
+    require(!input.setPressed(true, false) &&
+                input.highVisible() == std::optional<bool>{true},
+            "focus loss releases and blocks F3 without changing resolution");
+    input.setFocused(true);
+    require(input.setPressed(true, false) &&
+                input.highVisible() == std::optional<bool>{false},
+            "F3 resumes with one edge after focus returns");
+}
+
 void routes_portable_ai_spline_side_visibility_commands() {
     apex::platform::WindowEvent event;
     event.type = apex::platform::WindowEventType::key_down;
@@ -7886,6 +7938,48 @@ void combines_workspace_lod_and_live_mesh_visibility() {
             "explicit packet visibility bypasses both automatic masks");
 }
 
+void applies_cockpit_resolution_to_both_backend_draw_plans() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        for (const bool high_visible : {false, true}) {
+            auto value = cockpit_fixture();
+            if (backend == Backend::D3D12) {
+                for (auto& module : value.modules) {
+                    module.format = PipelineShaderFormat::dxbc;
+                    module.bytes = dxbc_shader_bytes();
+                }
+            }
+            const auto high_id =
+                value.document.scene.snapshot.nodes[1U].id;
+            const auto low_id =
+                value.document.scene.snapshot.nodes[3U].id;
+            auto request = request_for(value);
+            request.workspace.cockpit_high_visible = high_visible;
+            FakeDevice device(backend);
+            auto prepared = apex::app::prepareWorkspaceViewport(
+                device, value.document, request);
+            require(prepared.ok() &&
+                        value.document.scene.snapshot.nodes[1U].active &&
+                        !value.document.scene.snapshot.nodes[3U].active,
+                    "cockpit viewport preparation preserves authored activity");
+
+            FakeTarget target(request.presentation, backend);
+            WorkspaceViewportFrameRequest frame;
+            frame.camera.clip_space = backend == Backend::Vulkan
+                                          ? CameraClipSpace::vulkan
+                                          : CameraClipSpace::d3d12;
+            frame.frame_constants = KsPerPixelFrameConstants{};
+            Diagnostic diagnostic;
+            require(prepared.viewport->drawAndPresent(
+                        device, target, frame, diagnostic) ==
+                        WorkspaceViewportFrameStatus::ready &&
+                        device.draw_nodes.back() ==
+                            std::vector<apex::scene::NodeId>{
+                                high_visible ? high_id : low_id},
+                    "F3 cockpit selection reaches the shared backend draw plan");
+        }
+    }
+}
+
 void resolves_preview_state_without_mutating_document() {
     auto value = fixture();
     const auto body_id = value.document.scene.snapshot.nodes[1U].id;
@@ -8211,6 +8305,7 @@ int main() {
         replaces_committed_ai_spline_overlays_atomically();
         tracks_recovered_ai_spline_manual_input();
         tracks_focus_safe_skeleton_overlay_input();
+        tracks_focus_safe_cockpit_resolution_input();
         routes_portable_ai_spline_side_visibility_commands();
         publishes_ai_spline_side_visibility_atomically();
         publishes_ai_spline_controller_transactions();
@@ -8229,6 +8324,7 @@ int main() {
         applies_live_camera_mesh_filter_without_resource_rebuild();
         updates_webgl_compatible_transparent_order_per_frame();
         combines_workspace_lod_and_live_mesh_visibility();
+        applies_cockpit_resolution_to_both_backend_draw_plans();
         resolves_preview_state_without_mutating_document();
         rejects_staged_fbx_before_backend_allocation();
         camera_controller_matches_bounded_editor_gestures();

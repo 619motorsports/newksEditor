@@ -216,6 +216,36 @@ private:
     bool focused_ = true;
 };
 
+// The installed editor toggles the exact COCKPIT_HR/COCKPIT_LR pair on the
+// rising edge of F3. Keep the held-key lifecycle outside the renderer so
+// repeated key-down events and focus loss cannot produce extra toggles.
+class WorkspaceCockpitResolutionInputState final {
+public:
+    [[nodiscard]] bool setPressed(bool pressed,
+                                  bool authored_high_visible) noexcept {
+        if (pressed && !focused_) return false;
+        if (pressed_ == pressed) return false;
+        pressed_ = pressed;
+        if (!pressed_) return false;
+        high_visible_ = !high_visible_.value_or(authored_high_visible);
+        return true;
+    }
+
+    void setFocused(bool focused) noexcept {
+        focused_ = focused;
+        if (!focused_) pressed_ = false;
+    }
+
+    [[nodiscard]] std::optional<bool> highVisible() const noexcept {
+        return high_visible_;
+    }
+
+private:
+    std::optional<bool> high_visible_;
+    bool pressed_ = false;
+    bool focused_ = true;
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced

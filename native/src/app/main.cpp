@@ -29,6 +29,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/picking.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
+#include "apex/workspace/workspace_scene.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2364,6 +2365,8 @@ int run_window(int argc, char** argv) {
             clip_space});
     };
     std::unique_ptr<apex::app::WorkspaceViewport> viewport;
+    apex::app::WorkspaceCockpitResolutionInputState
+        cockpit_resolution_input;
     auto prepare_viewport = [&]() {
         if (active_document == nullptr) {
             viewport.reset();
@@ -2653,6 +2656,8 @@ int run_window(int argc, char** argv) {
             request.workspace.lod_index = workspace_options.lodIndex;
             request.workspace.lod_track_camera = track_camera_active;
         }
+        request.workspace.cockpit_high_visible =
+            cockpit_resolution_input.highVisible();
         auto prepared = loaded_workspace.fbxPreview.has_value()
                             ? apex::app::prepareWorkspaceViewport(
                                   *device_result.device,
@@ -2848,6 +2853,29 @@ int run_window(int argc, char** argv) {
                 if (events[index].semantic_key ==
                     apex::platform::WindowKey::f2)
                     (void)skeleton_overlay_input.setPressed(true);
+                if (!events[index].repeat &&
+                    events[index].semantic_key ==
+                        apex::platform::WindowKey::f3 &&
+                    active_document != nullptr) {
+                    apex::workspace::WorkspacePreviewResolutionRequest
+                        preview_request;
+                    preview_request.scene =
+                        &active_document->scene.snapshot;
+                    const auto preview =
+                        apex::workspace::resolveWorkspacePreview(
+                            preview_request);
+                    if (preview.cockpit_available) {
+                        const bool authored_high_visible =
+                            active_document->scene.snapshot
+                                .nodes[static_cast<std::size_t>(
+                                    preview.cockpit_high_root)]
+                                .active;
+                        if (cockpit_resolution_input.setPressed(
+                                true, authored_high_visible) &&
+                            !prepare_viewport())
+                            return 1;
+                    }
+                }
                 if (const auto command =
                         apex::app::workspaceAiSplineSideVisibilityCommand(
                             events[index]);
@@ -2879,6 +2907,9 @@ int run_window(int argc, char** argv) {
                 if (events[index].semantic_key ==
                     apex::platform::WindowKey::f2)
                     (void)skeleton_overlay_input.setPressed(false);
+                if (events[index].semantic_key ==
+                    apex::platform::WindowKey::f3)
+                    (void)cockpit_resolution_input.setPressed(false, false);
                 if (const auto key =
                         workspace_ai_spline_manual_key_for_window_key(
                             events[index].semantic_key);
@@ -2889,11 +2920,13 @@ int run_window(int argc, char** argv) {
                 window_has_keyboard_focus = false;
                 ai_spline_manual_input.setFocused(false);
                 skeleton_overlay_input.setFocused(false);
+                cockpit_resolution_input.setFocused(false);
                 break;
             case apex::platform::WindowEventType::focus_gained:
                 window_has_keyboard_focus = true;
                 ai_spline_manual_input.setFocused(true);
                 skeleton_overlay_input.setFocused(true);
+                cockpit_resolution_input.setFocused(true);
                 break;
             case apex::platform::WindowEventType::mouse_button_down:
                 if (events[index].button ==
