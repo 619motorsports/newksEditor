@@ -12,6 +12,10 @@ target_include_directories(apex_native INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
+if(WIN32)
+  target_compile_definitions(apex_native INTERFACE NOMINMAX)
+endif()
+
 if(MSVC)
   target_compile_options(apex_native INTERFACE /W4 /permissive- /EHsc)
   if(APEX_WARNINGS_AS_ERRORS)
