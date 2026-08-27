@@ -1814,7 +1814,7 @@ void executes_a_validated_native_program_through_the_static_scene_batch() {
         unsupported_format_device, unsupported_format_request);
     require(!unsupported_format.ok() &&
                 unsupported_format.diagnostic.code ==
-                    "static_scene_material_pipeline_unsupported" &&
+                    "stock_material_d3d12_native_target_unsupported" &&
                 unsupported_format_device.shader_calls == 0U &&
                 unsupported_format_device.buffer_calls == 0U &&
                 unsupported_format_device.sampler_calls == 0U,

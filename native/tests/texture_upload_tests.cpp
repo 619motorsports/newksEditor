@@ -672,6 +672,31 @@ void validatesTextureAccessPolicies() {
     require(validate_texture_upload_plan(render_then_sample, {}, diagnostic) ==
                 TextureStatus::ready,
             "render-then-sample upload validation accepts its exact contract");
+    require(validate_texture_mip_generation_description(
+                render_then_sample, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code == "texture_mip_generation_levels_invalid",
+            "mip generation rejects a one-level render target");
+    TextureDescription generated_chain = render_then_sample;
+    generated_chain.mip_levels = 3U;
+    require(validate_texture_mip_generation_description(
+                generated_chain, diagnostic) == TextureStatus::ready,
+            "mip generation accepts a complete four-pixel chain");
+    generated_chain.mip_levels = 4U;
+    require(validate_texture_mip_generation_description(
+                generated_chain, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code ==
+                    "texture_mip_generation_levels_excessive",
+            "mip generation rejects levels beyond the full dimension chain");
+    generated_chain.mip_levels = 3U;
+    generated_chain.access_policy = TextureAccessPolicy::fixed_usage;
+    require(validate_texture_mip_generation_description(
+                generated_chain, diagnostic) ==
+                TextureStatus::invalid_description &&
+                diagnostic.code ==
+                    "texture_mip_generation_access_policy_invalid",
+            "mip generation rejects fixed-state textures");
 
     const TextureFormatInfo rgba16 =
         texture_format_info(TextureFormat::rgba16_sfloat);

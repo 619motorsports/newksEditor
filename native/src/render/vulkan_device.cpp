@@ -1606,6 +1606,181 @@ bool copy_texture_uploads(const std::shared_ptr<VulkanContext>& context,
     return true;
 }
 
+bool generate_texture_mips(const std::shared_ptr<VulkanContext>& context,
+                           RawVulkanImage& image,
+                           const TextureDescription& description,
+                           VkImageLayout& current_layout,
+                           Diagnostic& diagnostic) {
+    const std::uint32_t physical_layers = static_cast<std::uint32_t>(
+        texture_physical_array_layers(description));
+    const VkImageLayout final_layout = texture_final_layout(
+        description.usage, description.access_policy);
+    std::lock_guard command_guard(context->command_mutex);
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1U;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(
+        context->device, &allocation, &command);
+    bool submitted = false;
+    bool completed = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+    }
+    if (result == VK_SUCCESS) {
+        std::array<VkImageMemoryBarrier, 2U> initial{};
+        for (VkImageMemoryBarrier& barrier : initial) {
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = current_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseArrayLayer = 0U;
+            barrier.subresourceRange.layerCount = physical_layers;
+            barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT |
+                                    VK_ACCESS_MEMORY_WRITE_BIT;
+        }
+        initial[0U].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        initial[0U].subresourceRange.baseMipLevel = 0U;
+        initial[0U].subresourceRange.levelCount = 1U;
+        initial[0U].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        initial[1U].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        initial[1U].subresourceRange.baseMipLevel = 1U;
+        initial[1U].subresourceRange.levelCount =
+            description.mip_levels - 1U;
+        initial[1U].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U,
+                             nullptr, 0U, nullptr,
+                             static_cast<std::uint32_t>(initial.size()),
+                             initial.data());
+
+        for (std::uint32_t mip = 1U; mip < description.mip_levels; ++mip) {
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = mip - 1U;
+            blit.srcSubresource.baseArrayLayer = 0U;
+            blit.srcSubresource.layerCount = physical_layers;
+            blit.srcOffsets[1] = {
+                static_cast<std::int32_t>(
+                    std::max(1U, description.width >> (mip - 1U))),
+                static_cast<std::int32_t>(
+                    std::max(1U, description.height >> (mip - 1U))),
+                1};
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = mip;
+            blit.dstSubresource.baseArrayLayer = 0U;
+            blit.dstSubresource.layerCount = physical_layers;
+            blit.dstOffsets[1] = {
+                static_cast<std::int32_t>(
+                    std::max(1U, description.width >> mip)),
+                static_cast<std::int32_t>(
+                    std::max(1U, description.height >> mip)),
+                1};
+            vkCmdBlitImage(command, image.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1U, &blit, VK_FILTER_LINEAR);
+            if (mip + 1U < description.mip_levels) {
+                VkImageMemoryBarrier next{};
+                next.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                next.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                next.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                next.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                next.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                next.image = image.image;
+                next.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                next.subresourceRange.baseMipLevel = mip;
+                next.subresourceRange.levelCount = 1U;
+                next.subresourceRange.baseArrayLayer = 0U;
+                next.subresourceRange.layerCount = physical_layers;
+                next.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                next.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U,
+                                     nullptr, 0U, nullptr, 1U, &next);
+            }
+        }
+
+        std::array<VkImageMemoryBarrier, 2U> finish{};
+        for (VkImageMemoryBarrier& barrier : finish) {
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.newLayout = final_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseArrayLayer = 0U;
+            barrier.subresourceRange.layerCount = physical_layers;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        finish[0U].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        finish[0U].subresourceRange.baseMipLevel = 0U;
+        finish[0U].subresourceRange.levelCount = description.mip_levels - 1U;
+        finish[0U].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        finish[1U].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        finish[1U].subresourceRange.baseMipLevel = description.mip_levels - 1U;
+        finish[1U].subresourceRange.levelCount = 1U;
+        finish[1U].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0U, 0U,
+                             nullptr, 0U, nullptr,
+                             static_cast<std::uint32_t>(finish.size()),
+                             finish.data());
+        result = vkEndCommandBuffer(command);
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1U, &fence,
+                                         VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
+            vkDestroyFence(context->device, fence, nullptr);
+        }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain == VK_SUCCESS) {
+            current_layout = final_layout;
+            completed = true;
+        } else {
+            current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            result = drain;
+        }
+    } else if (completed) {
+        current_layout = final_layout;
+    }
+    if (command != VK_NULL_HANDLE)
+        vkFreeCommandBuffers(context->device, context->command_pool, 1U,
+                             &command);
+    if (result != VK_SUCCESS || !completed) {
+        diagnostic = vk_error("Vulkan texture mip generation", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "texture_mip_generation_failed";
+        return false;
+    }
+    diagnostic = {};
+    return true;
+}
+
 bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
                                 RawVulkanImage& image,
                                 const TextureDescription& description,
@@ -4831,7 +5006,11 @@ public:
                   VkImageLayout layout,
                   bool initialized)
         : context_(std::move(context)), raw_(std::move(raw)), info_({description}),
-          layout_(layout), initialized_(initialized) {}
+          layout_(layout), initialized_(initialized),
+          base_mip_initialized_(
+              static_cast<std::size_t>(
+                  texture_physical_array_layers(description)),
+              initialized ? 1U : 0U) {}
 
     ~VulkanTexture() override = default;
     Backend backend() const noexcept override { return Backend::Vulkan; }
@@ -4842,12 +5021,33 @@ public:
     VkImageLayout layout() const noexcept { return layout_; }
     const VkImageLayout* layout_ptr() const noexcept { return &layout_; }
     bool initialized() const noexcept { return initialized_; }
+    bool base_mip_initialized() const noexcept {
+        return !base_mip_initialized_.empty() &&
+               std::all_of(base_mip_initialized_.begin(),
+                           base_mip_initialized_.end(),
+                           [](std::uint8_t value) { return value != 0U; });
+    }
 
     bool upload(const TextureUploadPlan& uploads, Diagnostic& diagnostic) {
         const bool uploaded = copy_texture_uploads(context_, raw_, info_.description, uploads,
                                                    layout_, diagnostic);
         initialized_ = initialized_ || (uploaded && !uploads.subresources.empty());
+        if (uploaded) {
+            for (const TextureUpload& upload : uploads.subresources) {
+                if (upload.mip_level != 0U) continue;
+                const std::size_t layer = static_cast<std::size_t>(
+                    texture_upload_physical_array_layer(
+                        info_.description, upload));
+                if (layer < base_mip_initialized_.size())
+                    base_mip_initialized_[layer] = 1U;
+            }
+        }
         return uploaded;
+    }
+
+    bool generate_mips(Diagnostic& diagnostic) {
+        return generate_texture_mips(context_, raw_, info_.description,
+                                     layout_, diagnostic);
     }
 
     bool clear_readback(const TextureClearReadbackRequest& request,
@@ -4856,6 +5056,8 @@ public:
         const bool cleared = clear_texture_and_readback(context_, raw_, info_.description, request,
                                                         layout_, output, diagnostic);
         initialized_ = initialized_ || cleared;
+        if (cleared && !base_mip_initialized_.empty())
+            base_mip_initialized_[0U] = 1U;
         return cleared;
     }
 
@@ -4944,6 +5146,8 @@ public:
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr, true, output, diagnostic);
             initialized_ = initialized_ || drawn;
+            if (drawn && !base_mip_initialized_.empty())
+                base_mip_initialized_[0U] = 1U;
             return drawn;
         }
         if (!request.pipeline->resources.empty()) {
@@ -4963,6 +5167,8 @@ public:
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr, true, output, diagnostic);
             initialized_ = initialized_ || drawn;
+            if (drawn && !base_mip_initialized_.empty())
+                base_mip_initialized_[0U] = 1U;
             return drawn;
         }
         const bool drawn = draw_graphics_and_readback(
@@ -4970,6 +5176,8 @@ public:
             depth_attachment, request.load_color, request.clear_depth, request.depth_clear_value,
             request.clear_color, layout_, output, diagnostic);
         initialized_ = initialized_ || drawn;
+        if (drawn && !base_mip_initialized_.empty())
+            base_mip_initialized_[0U] = 1U;
         return drawn;
     }
 
@@ -5149,6 +5357,16 @@ public:
             resolve_target != nullptr ? &resolve_target->initialized_ : nullptr,
             description.capture_rgba8, output, diagnostic);
         initialized_ = initialized_ || drawn;
+        if (drawn) {
+            const std::size_t layer = static_cast<std::size_t>(
+                texture_target_physical_array_layer(
+                    info_.description, description.target_subresource));
+            if (layer < base_mip_initialized_.size())
+                base_mip_initialized_[layer] = 1U;
+            if (resolve_target != nullptr &&
+                !resolve_target->base_mip_initialized_.empty())
+                resolve_target->base_mip_initialized_[0U] = 1U;
+        }
         return drawn;
     }
 
@@ -5158,6 +5376,7 @@ private:
     TextureInfo info_;
     VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     bool initialized_ = false;
+    std::vector<std::uint8_t> base_mip_initialized_;
 };
 
 struct RawVulkanSampler {
@@ -6890,6 +7109,49 @@ public:
         return vulkan_texture->upload(uploads, diagnostic)
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed, std::move(diagnostic)};
+    }
+
+    TextureUpdateResult generate_texture_mips(Texture& texture) override {
+        Diagnostic diagnostic;
+        const TextureStatus validation =
+            validate_texture_mip_generation_description(
+                texture.info().description, diagnostic);
+        if (validation != TextureStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (texture.backend() != Backend::Vulkan)
+            return {TextureStatus::unsupported,
+                    {"texture_backend_mismatch",
+                     "The texture belongs to another graphics backend"}};
+        auto* vulkan_texture = dynamic_cast<VulkanTexture*>(&texture);
+        if (vulkan_texture == nullptr)
+            return {TextureStatus::unsupported,
+                    {"texture_type_unsupported",
+                     "The Vulkan device received an unknown texture handle"}};
+        if (vulkan_texture->context().get() != context_.get())
+            return {TextureStatus::unsupported,
+                    {"texture_context_mismatch",
+                     "The texture belongs to another Vulkan device"}};
+        if (!vulkan_texture->base_mip_initialized())
+            return {TextureStatus::invalid_description,
+                    {"texture_mip_generation_base_uninitialized",
+                     "Texture mip generation requires initialized mip-zero data for every physical layer"}};
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(
+            context_->physical_device,
+            vk_texture_format(texture.info().description.format),
+            &properties);
+        constexpr VkFormatFeatureFlags required =
+            VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+            VK_FORMAT_FEATURE_BLIT_DST_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((properties.optimalTilingFeatures & required) != required)
+            return {TextureStatus::unsupported,
+                    {"vulkan_texture_mip_filter_unsupported",
+                     "The Vulkan device cannot linearly blit the requested texture format"}};
+        return vulkan_texture->generate_mips(diagnostic)
+                   ? TextureUpdateResult{TextureStatus::ready, {}}
+                   : TextureUpdateResult{TextureStatus::upload_failed,
+                                         std::move(diagnostic)};
     }
 
     DepthAttachmentResult create_depth_attachment(

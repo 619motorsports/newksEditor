@@ -210,11 +210,12 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   require(sampler.ok(), "reflection draw creates sampler");
 
   std::array<float, 33U> vertices{};
-  vertices[0U] = -0.8F;
-  vertices[1U] = -0.8F;
-  vertices[11U] = 0.8F;
-  vertices[12U] = -0.8F;
-  vertices[23U] = 0.8F;
+  vertices[0U] = -1.0F;
+  vertices[1U] = -1.0F;
+  vertices[11U] = 3.0F;
+  vertices[12U] = -1.0F;
+  vertices[22U] = -1.0F;
+  vertices[23U] = 3.0F;
   constexpr std::array<std::uint16_t, 3U> indices = {0U, 1U, 2U};
   BufferResult vertex_buffer = device.create_buffer(
       {sizeof(vertices), BufferUsage::vertex, BufferMemory::device_local,
@@ -414,6 +415,7 @@ void exercise_reflection_draw(Device &device, const Backend backend,
 
   TextureDescription capture_description = target_description;
   capture_description.format = TextureFormat::rgba16_sfloat;
+  capture_description.mip_levels = 4U;
   capture_description.usage =
       TextureUsage::sampled | TextureUsage::color_attachment |
       TextureUsage::transfer_source;
@@ -422,6 +424,13 @@ void exercise_reflection_draw(Device &device, const Backend backend,
   TextureResult capture_target = device.create_texture(capture_description);
   require(capture_target.ok(),
           "reflection draw creates an RGBA16F cube capture target");
+  const TextureUpdateResult empty_generation =
+      device.generate_texture_mips(*capture_target.texture);
+  require(!empty_generation.ok() &&
+              empty_generation.status == TextureStatus::invalid_description &&
+              empty_generation.diagnostic.code ==
+                  "texture_mip_generation_base_uninitialized",
+          "cube mip generation rejects an uninitialized base level");
 
   PipelineProgram capture_pipeline = pipeline;
   capture_pipeline.targets.colors.front().format =
@@ -448,6 +457,12 @@ void exercise_reflection_draw(Device &device, const Backend backend,
     throw std::runtime_error(
         "Cube-face reflection draw failed: " + captured.diagnostic.code + ": " +
         captured.diagnostic.message);
+  const TextureUpdateResult partial_generation =
+      device.generate_texture_mips(*capture_target.texture);
+  require(!partial_generation.ok() &&
+              partial_generation.diagnostic.code ==
+                  "texture_mip_generation_base_uninitialized",
+          "cube mip generation requires every base face before execution");
 
   StockMultiMapReflectionInput capture_expected_input;
   capture_expected_input.controls.fresnel_and_additive = capture_values;
@@ -482,6 +497,27 @@ void exercise_reflection_draw(Device &device, const Backend backend,
         "Positive-X cube-face draw failed: " +
         captured_positive_x.diagnostic.code + ": " +
         captured_positive_x.diagnostic.message);
+
+  constexpr std::array<CubeFace, 4U> remaining_faces = {
+      CubeFace::negative_x, CubeFace::positive_y, CubeFace::negative_y,
+      CubeFace::positive_z};
+  for (const CubeFace face : remaining_faces) {
+    capture_batch.target_subresource.cube_face = face;
+    const IndexedStaticMeshBatchResult captured_face =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *capture_target.texture, capture_batch);
+    if (!captured_face.ok())
+      throw std::runtime_error(
+          "Remaining RGBA16F cube-face draw failed: " +
+          captured_face.diagnostic.code + ": " +
+          captured_face.diagnostic.message);
+  }
+  const TextureUpdateResult generated =
+      device.generate_texture_mips(*capture_target.texture);
+  if (!generated.ok())
+    throw std::runtime_error(
+        "RGBA16F cube mip generation failed: " +
+        generated.diagnostic.code + ": " + generated.diagnostic.message);
 
   request.multimap_reflection_binding.cube.texture = capture_target.texture.get();
   const IndexedStaticMeshDrawResult sampled_capture =

@@ -1556,6 +1556,14 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const TextureUploadPlan& uploads,
     Diagnostic& diagnostic);
 
+// Validates the backend-neutral part of whole-texture mip generation. The
+// operation overwrites every level below mip zero and every physical layer;
+// backends additionally validate ownership, initialization, and format
+// filter support before recording commands.
+[[nodiscard]] TextureStatus validate_texture_mip_generation_description(
+    const TextureDescription& description,
+    Diagnostic& diagnostic);
+
 [[nodiscard]] DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description,
     Diagnostic& diagnostic);
@@ -1713,6 +1721,19 @@ public:
     [[nodiscard]] virtual TextureUpdateResult update_texture(
         Texture& texture,
         const TextureUploadPlan& uploads) = 0;
+
+    [[nodiscard]] virtual TextureUpdateResult generate_texture_mips(
+        Texture& texture) {
+        Diagnostic diagnostic;
+        const TextureStatus validation =
+            validate_texture_mip_generation_description(
+                texture.info().description, diagnostic);
+        if (validation != TextureStatus::ready)
+            return {validation, std::move(diagnostic)};
+        return {TextureStatus::unsupported,
+                {"texture_mip_generation_unsupported",
+                 "This backend has not enabled whole-texture mip generation"}};
+    }
 
     // Backends opt into persistent D32 attachments independently. Keeping a
     // default implementation preserves discovery-only and fake devices.

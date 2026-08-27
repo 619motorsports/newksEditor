@@ -606,6 +606,41 @@ TextureStatus validate_texture_update(const Texture& texture,
     return validate_texture_upload_plan(texture.info().description, uploads, diagnostic);
 }
 
+TextureStatus validate_texture_mip_generation_description(
+    const TextureDescription& description, Diagnostic& diagnostic) {
+    if (description.mip_levels < 2U) {
+        diagnostic = {"texture_mip_generation_levels_invalid",
+                      "Texture mip generation requires at least two mip levels"};
+        return TextureStatus::invalid_description;
+    }
+    std::uint32_t maximum_dimension =
+        std::max(description.width, description.height);
+    std::uint32_t full_chain_levels = 0U;
+    while (maximum_dimension != 0U) {
+        ++full_chain_levels;
+        maximum_dimension >>= 1U;
+    }
+    if (description.mip_levels > full_chain_levels) {
+        diagnostic = {"texture_mip_generation_levels_excessive",
+                      "Texture mip generation cannot extend beyond the full dimension chain"};
+        return TextureStatus::invalid_description;
+    }
+    if (description.access_policy != TextureAccessPolicy::render_then_sample) {
+        diagnostic = {"texture_mip_generation_access_policy_invalid",
+                      "Texture mip generation requires the render-then-sample access policy"};
+        return TextureStatus::invalid_description;
+    }
+    Diagnostic description_diagnostic;
+    const TextureStatus description_status =
+        validate_texture_description(description, {}, description_diagnostic);
+    if (description_status != TextureStatus::ready) {
+        diagnostic = std::move(description_diagnostic);
+        return description_status;
+    }
+    diagnostic = {};
+    return TextureStatus::ready;
+}
+
 DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description, Diagnostic& diagnostic) {
     if (description.format != DepthAttachmentFormat::d32_float) {
