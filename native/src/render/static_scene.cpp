@@ -102,6 +102,13 @@ bool finite_material_constants(const KsPerPixelMaterialConstants& constants) noe
     return true;
 }
 
+bool finite_multimap_reflection_constants(
+    const KsPerPixelMultiMapReflectionConstants& constants) noexcept {
+    return std::all_of(constants.fresnel_and_additive.begin(),
+                       constants.fresnel_and_additive.end(),
+                       [](const float value) { return std::isfinite(value); });
+}
+
 bool finite_stock_shadow_constants(
     const StockShadowCasterMaterialConstants& constants) noexcept {
     for (const float value : constants.lighting)
@@ -735,6 +742,10 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                                            invalid_resource_index);
     std::vector<std::size_t> material_constant_for_packet(request.packets.size(),
                                                           invalid_resource_index);
+    std::vector<std::size_t> multimap_reflection_constant_by_material(
+        model.materials.size(), invalid_resource_index);
+    std::vector<std::size_t> multimap_reflection_constant_for_packet(
+        request.packets.size(), invalid_resource_index);
     std::vector<std::size_t> stock_shadow_constant_for_material(
         model.materials.size(), invalid_resource_index);
     std::vector<const formats::Kn5Node*> unique_meshes;
@@ -743,6 +754,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::vector<std::size_t> skinned_packet_indices;
     std::vector<PipelineProgram> pipelines;
     std::vector<KsPerPixelMaterialConstants> material_constants;
+    std::vector<KsPerPixelMultiMapReflectionConstants>
+        multimap_reflection_constants;
     std::vector<StockShadowCasterMaterialConstants> stock_shadow_constants;
     unique_meshes.reserve(request.packets.size());
     representative_packets.reserve(request.packets.size());
@@ -751,6 +764,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     pipelines.reserve(request.packets.size());
     material_constants.reserve(std::min(request.packets.size(),
                                         limits.max_material_constant_buffers));
+    multimap_reflection_constants.reserve(std::min(
+        request.packets.size(), limits.max_material_constant_buffers));
     stock_shadow_constants.reserve(std::min(request.packets.size(),
                                             limits.max_material_constant_buffers));
 
@@ -758,6 +773,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
     std::uint64_t total_index_bytes = 0U;
     std::uint64_t total_shader_bytes = 0U;
     std::uint64_t total_material_constant_bytes = 0U;
+    std::uint64_t total_multimap_reflection_constant_bytes = 0U;
     std::uint64_t total_shadow_material_constant_bytes = 0U;
     std::uint64_t total_stock_native_constant_bytes = 0U;
     std::uint64_t total_update_bytes = 0U;
@@ -1001,6 +1017,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
             requires_directional_shadow_receiver ||
             (!stock_native &&
              pipeline_declares_directional_shadow_receiver(*pipeline));
+        const bool pipeline_has_multimap_reflection =
+            !stock_native && pipeline_declares_multimap_reflection(*pipeline);
         const bool normal_layout =
             material_layout ==
             IndexedPortableResourceLayout::diffuse_normal_with_constants_and_frame;
@@ -1227,7 +1245,7 @@ StaticSceneResourceResult prepare_static_scene_resources(
                                 "static_scene_material_constant_non_finite",
                                 "A used material constant contains a non-finite value");
                 if ((normal_layout || maps_layout || detail_stack_layout || damage_layout ||
-                     damage_dust_layout) &&
+                     damage_dust_layout) && !pipeline_has_multimap_reflection &&
                     constants.fresnel[2] > 0.0F)
                     return fail(StaticSceneResourceStatus::unsupported,
                                 "static_scene_normal_fresnel_unsupported",
@@ -1237,6 +1255,56 @@ StaticSceneResourceResult prepare_static_scene_resources(
             }
             material_constant_for_packet[packet_index] =
                 material_constant_by_material[material_index];
+        }
+        if (pipeline_has_multimap_reflection) {
+            if (!maps_layout && !detail_stack_layout)
+                return fail(
+                    StaticSceneResourceStatus::unsupported,
+                    "static_scene_multimap_reflection_layout_unsupported",
+                    "Portable MultiMap reflection requires a bounded txMaps material layout");
+            if (limits.max_material_constant_buffers == 0U ||
+                limits.max_total_multimap_reflection_constant_bytes == 0U)
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_multimap_reflection_constant_limits_invalid",
+                    "MultiMap reflection-constant limits must be nonzero when a used pipeline declares reflection");
+            if (request.multimap_reflection_constants_by_material.size() !=
+                model.materials.size())
+                return fail(
+                    StaticSceneResourceStatus::invalid_request,
+                    "static_scene_multimap_reflection_constant_table_invalid",
+                    "The MultiMap reflection-constant table must match the final material table");
+            if (multimap_reflection_constant_by_material[material_index] ==
+                invalid_resource_index) {
+                if (multimap_reflection_constants.size() >=
+                    limits.max_material_constant_buffers)
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_multimap_reflection_constant_count_limit",
+                        "Used MultiMap reflection materials exceed the constant-buffer count limit");
+                if (!checked_add(
+                        portable_multimap_reflection_buffer_view_bytes,
+                        total_multimap_reflection_constant_bytes) ||
+                    total_multimap_reflection_constant_bytes >
+                        limits.max_total_multimap_reflection_constant_bytes)
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_multimap_reflection_constant_aggregate_limit",
+                        "Used MultiMap reflection constants exceed the aggregate buffer limit");
+                const KsPerPixelMultiMapReflectionConstants& constants =
+                    request.multimap_reflection_constants_by_material[
+                        material_index];
+                if (!finite_multimap_reflection_constants(constants))
+                    return fail(
+                        StaticSceneResourceStatus::invalid_request,
+                        "static_scene_multimap_reflection_constant_non_finite",
+                        "A used MultiMap reflection constant contains a non-finite value");
+                multimap_reflection_constant_by_material[material_index] =
+                    multimap_reflection_constants.size();
+                multimap_reflection_constants.push_back(constants);
+            }
+            multimap_reflection_constant_for_packet[packet_index] =
+                multimap_reflection_constant_by_material[material_index];
         }
         const PipelineRenderTargetFormat color_format = pipeline->targets.colors.front().format;
         if (batch_color_format.has_value() && *batch_color_format != color_format)
@@ -1611,6 +1679,8 @@ StaticSceneResourceResult prepare_static_scene_resources(
     resources->textures_for_packet_ = std::move(textures_for_packet);
     resources->material_constant_for_packet_ =
         std::move(material_constant_for_packet);
+    resources->multimap_reflection_constant_for_packet_ =
+        std::move(multimap_reflection_constant_for_packet);
     resources->stock_shadow_constant_for_material_ =
         std::move(stock_shadow_constant_for_material);
     resources->texture_count_ = model.textures.size();
@@ -1649,6 +1719,24 @@ StaticSceneResourceResult prepare_static_scene_resources(
         if (!buffer.ok())
             return {map_buffer_status(buffer.status), std::move(buffer.diagnostic), nullptr};
         resources->owned_material_constants_.push_back(std::move(buffer.buffer));
+    }
+    resources->owned_multimap_reflection_constants_.reserve(
+        multimap_reflection_constants.size());
+    for (const KsPerPixelMultiMapReflectionConstants& constants :
+         multimap_reflection_constants) {
+        std::array<std::byte,
+                   portable_multimap_reflection_buffer_view_bytes>
+            bytes{};
+        std::memcpy(bytes.data(), &constants, sizeof(constants));
+        const BufferDescription description{
+            bytes.size(), BufferUsage::uniform, BufferMemory::device_local,
+            BufferMutability::immutable};
+        BufferResult buffer = device.create_buffer(description, bytes);
+        if (!buffer.ok())
+            return {map_buffer_status(buffer.status),
+                    std::move(buffer.diagnostic), nullptr};
+        resources->owned_multimap_reflection_constants_.push_back(
+            std::move(buffer.buffer));
     }
     resources->owned_stock_shadow_constants_.reserve(stock_shadow_constants.size());
     for (const StockShadowCasterMaterialConstants& constants : stock_shadow_constants) {
@@ -2036,6 +2124,8 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
         packets_.size() != pipeline_for_packet_.size() ||
         packets_.size() != textures_for_packet_.size() ||
         packets_.size() != material_constant_for_packet_.size() ||
+        packets_.size() !=
+            multimap_reflection_constant_for_packet_.size() ||
         packets_.size() != skinned_upload_for_packet_.size() ||
         packets_.size() !=
             stock_vulkan_source_program_for_packet_.size() ||
@@ -2232,6 +2322,37 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
                         {}};
         }
     }
+
+    const bool has_multimap_reflection_texture =
+        frame.multimap_reflection_cube.texture != nullptr;
+    const bool has_multimap_reflection_sampler =
+        frame.multimap_reflection_cube.sampler != nullptr;
+    const bool requires_multimap_reflection =
+        !owned_multimap_reflection_constants_.empty();
+    if (has_multimap_reflection_texture !=
+        has_multimap_reflection_sampler)
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {"static_scene_multimap_reflection_cube_incomplete",
+                 "The frame-owned MultiMap reflection cube requires both texture and sampler handles"},
+                {}};
+    const bool has_multimap_reflection_cube =
+        has_multimap_reflection_texture && has_multimap_reflection_sampler;
+    if (requires_multimap_reflection != has_multimap_reflection_cube)
+        return {IndexedStaticMeshBatchStatus::invalid_request,
+                {requires_multimap_reflection
+                     ? "static_scene_multimap_reflection_cube_missing"
+                     : "static_scene_multimap_reflection_cube_unexpected",
+                 requires_multimap_reflection
+                     ? "A prepared MultiMap reflection pipeline requires a frame-owned cube and sampler"
+                     : "A frame-owned MultiMap reflection cube was supplied to a scene without a reflection pipeline"},
+                {}};
+    if (requires_multimap_reflection &&
+        (!device.owns_resource(*frame.multimap_reflection_cube.texture) ||
+         !device.owns_resource(*frame.multimap_reflection_cube.sampler)))
+        return {IndexedStaticMeshBatchStatus::unsupported,
+                {"static_scene_multimap_reflection_cube_device_mismatch",
+                 "The frame-owned MultiMap reflection cube or sampler belongs to another device context"},
+                {}};
 
     const bool has_directional_shadow_maps =
         frame.directional_shadow_maps != nullptr;
@@ -2766,6 +2887,24 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
             draw->material_binding = {
                 owned_material_constants_[material_index].get(), 0U,
                 portable_material_buffer_view_bytes};
+        }
+        const std::size_t reflection_index =
+            multimap_reflection_constant_for_packet_[index];
+        if (reflection_index != invalid_resource_index) {
+            if (reflection_index >=
+                    owned_multimap_reflection_constants_.size() ||
+                owned_multimap_reflection_constants_[reflection_index] ==
+                    nullptr)
+                return {IndexedStaticMeshBatchStatus::invalid_request,
+                        {"static_scene_owned_multimap_reflection_constant_missing",
+                         "A used MultiMap material has no owned reflection constant buffer"},
+                        {}};
+            draw->resource_authority =
+                IndexedResourceAuthority::explicit_bindings;
+            draw->multimap_reflection_binding = {
+                frame.multimap_reflection_cube,
+                {owned_multimap_reflection_constants_[reflection_index].get(),
+                 0U, portable_multimap_reflection_buffer_view_bytes}};
         }
         if (resource_layout == IndexedPortableResourceLayout::diffuse_with_frame ||
             resource_layout == IndexedPortableResourceLayout::diffuse_with_constants_and_frame ||

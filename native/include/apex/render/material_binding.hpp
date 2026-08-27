@@ -182,6 +182,9 @@ struct KsPerPixelMaterialResolveOptions {
     // alpha-to-coverage path. Ordinary ksPerPixel draws use zero.
     bool capture_pass = false;
     bool alpha_to_coverage = false;
+    // The separate bindings 21-23 contract executes MultiMap Fresnel. This
+    // does not enable reflection for ksPerPixelNM or damage-dirt families.
+    bool multimap_reflection = false;
 };
 
 enum class KsPerPixelMaterialResolveStatus : std::uint8_t {
@@ -242,8 +245,9 @@ resolve_stock_shadow_caster_material_constants(const MaterialBinding& binding);
 
 // Resolve the bounded ksPerPixel material-value subset. ksPerPixelNM and the
 // tangent-space ksPerPixelMultiMap families (including their alpha-tested AT
-// variants) are accepted only for tangent-space normals with Fresnel
-// reflection disabled. This copies source semantics from public/app.js;
+// variants) are accepted only for tangent-space normals. Fresnel remains
+// disabled unless the separate portable MultiMap reflection contract is
+// selected. This copies source semantics from public/app.js;
 // the 80-byte layout is the separately documented portable test ABI in
 // render/device.hpp, not a claim about the native stock shader's
 // constant-buffer layout.

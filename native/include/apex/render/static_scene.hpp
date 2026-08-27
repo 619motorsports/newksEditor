@@ -41,6 +41,8 @@ struct StaticSceneResourceLimits {
     std::uint64_t max_total_index_bytes = 256ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_shader_bytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t max_total_material_constant_bytes = 1ULL * 1024ULL * 1024ULL;
+    std::uint64_t max_total_multimap_reflection_constant_bytes =
+        1ULL * 1024ULL * 1024ULL;
     // A selected Vulkan source-equivalent draw owns five aligned native
     // records. This limit is separate from the portable material table.
     std::uint64_t max_total_stock_vulkan_source_constant_bytes =
@@ -111,6 +113,10 @@ struct StaticScenePrepareRequest {
     // declares the portable constants binding requires the complete table.
     // Preparation copies each used value into an owned 256-byte GPU record.
     std::span<const KsPerPixelMaterialConstants> material_constants_by_material{};
+    // Optional semantic reflection records in final material order. A used
+    // pipeline that declares bindings 21-23 requires the complete table.
+    std::span<const KsPerPixelMultiMapReflectionConstants>
+        multimap_reflection_constants_by_material{};
     // Explicit resolved ksShadowGenAT material records, indexed by final
     // material ID. The source host record is 32 bytes; preparation owns one
     // 256-byte aligned uniform allocation for each used alpha caster.
@@ -165,6 +171,10 @@ struct StaticSceneFrameDescription {
     // ordered batch is recorded. It always derives the record's camera
     // position from camera.position.
     std::optional<KsPerPixelFrameConstants> frame_constants;
+    // Frame-owned renderer cubemap. It remains outside KN5 texture tables.
+    // Both handles are required exactly when a prepared pipeline declares
+    // the portable MultiMap reflection extension.
+    IndexedSampledTextureBinding multimap_reflection_cube{};
     struct StockNativeFrame {
         StockKsPerPixelCameraConstants camera{};
         StockKsPerPixelLightingConstants lighting{};
@@ -256,6 +266,10 @@ public:
     [[nodiscard]] std::size_t owned_material_constant_count() const noexcept {
         return owned_material_constants_.size();
     }
+    [[nodiscard]] std::size_t owned_multimap_reflection_constant_count() const
+        noexcept {
+        return owned_multimap_reflection_constants_.size();
+    }
     [[nodiscard]] std::size_t owned_stock_shadow_constant_count() const noexcept {
         return owned_stock_shadow_constants_.size();
     }
@@ -331,9 +345,12 @@ private:
         stock_d3d12_native_resources_for_packet_;
     std::vector<PacketTextureIndices> textures_for_packet_;
     std::vector<std::size_t> material_constant_for_packet_;
+    std::vector<std::size_t> multimap_reflection_constant_for_packet_;
     std::vector<std::size_t> stock_shadow_constant_for_material_;
     std::vector<std::unique_ptr<Texture>> owned_textures_;
     std::vector<std::unique_ptr<Buffer>> owned_material_constants_;
+    std::vector<std::unique_ptr<Buffer>>
+        owned_multimap_reflection_constants_;
     std::vector<std::unique_ptr<Buffer>> owned_stock_shadow_constants_;
     std::unique_ptr<Buffer> owned_frame_constants_;
     std::unique_ptr<Buffer> owned_directional_shadow_constants_;

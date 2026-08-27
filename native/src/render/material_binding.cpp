@@ -610,10 +610,14 @@ KsPerPixelMaterialResolveResult resolve_ks_per_pixel_material_constants(
                              "The bounded normal-map paths support tangent-space normals only"};
         return result;
     }
-    if (normal_variant && result.constants.fresnel[2] > 0.0F) {
+    const bool reflection_enabled =
+        options.multimap_reflection &&
+        (base_multimap_variant || detail_stack_variant);
+    if (normal_variant && !reflection_enabled &&
+        result.constants.fresnel[2] > 0.0F) {
         result.status = KsPerPixelMaterialResolveStatus::unsupported;
         result.diagnostic = {"ks_per_pixel_nm_fresnel_unsupported", "fresnelMaxLevel",
-                             "The bounded normal-map paths require disabled Fresnel reflection"};
+                             "The bounded normal-map path requires disabled Fresnel reflection unless the portable MultiMap reflection contract is selected"};
         return result;
     }
     if (base_multimap_variant && result.constants.detail[0] > 0.5F) {

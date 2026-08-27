@@ -35,6 +35,9 @@ struct StockMaterialShaderModules {
     // The receiver extension is an orthogonal shader-module contract. The
     // selector never mixes receiver and non-receiver modules for one request.
     bool directional_shadow_receiver = false;
+    // Orthogonal portable bindings 21-23 variant. Only the four bounded
+    // MultiMap families can select a module set with this flag.
+    bool multimap_reflection = false;
 };
 
 struct StockMaterialExecutionLimits {
@@ -103,6 +106,9 @@ struct StockMaterialExecutionRequest {
     // declaration. The per-frame resource binding is supplied separately by
     // StaticSceneFrameDescription when the prepared scene is drawn.
     bool directional_shadow_receiver = false;
+    // Select reflection-capable modules and the frame-owned cube extension
+    // for the four bounded MultiMap families only.
+    bool multimap_reflection = false;
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StockMaterialExecutionLimits limits{};

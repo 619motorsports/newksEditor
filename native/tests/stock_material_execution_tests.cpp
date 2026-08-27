@@ -628,6 +628,53 @@ void test_directional_shadow_receiver_module_opt_in() {
             "receiver and non-receiver module sets have independent uniqueness keys");
 }
 
+void test_multimap_reflection_module_opt_in() {
+    FakeDevice device;
+
+    Fixture non_reflection = fixture("ksPerPixelMultiMap");
+    non_reflection.model.materials.front().properties.front().value = 0.2F;
+    auto non_reflection_request = request_for(non_reflection);
+    non_reflection_request.multimap_reflection = true;
+    const auto rejected = prepare_stock_material_execution(
+        device, non_reflection_request);
+    require(rejected.status == StaticSceneResourceStatus::unsupported &&
+                rejected.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                device.buffer_calls == 0U,
+            "reflection-enabled requests reject ordinary MultiMap modules before allocation");
+
+    constexpr std::array<const char*, 4U> families = {
+        "ksPerPixelMultiMap", "ksPerPixelMultiMap_AT",
+        "ksPerPixelMultiMap_NMDetail",
+        "ksPerPixelMultiMap_AT_NMDetail"};
+    for (const char* family : families) {
+        Fixture reflected = fixture(family);
+        reflected.model.materials.front().properties.front().value = 0.2F;
+        reflected.model.materials.front().properties.push_back(
+            {"fresnelC", 0.03F, {}, {}, {}});
+        reflected.model.materials.front().properties.push_back(
+            {"isAdditive", 2.0F, {}, {}, {}});
+        reflected.module_set.multimap_reflection = true;
+        auto request = request_for(reflected);
+        request.multimap_reflection = true;
+        const auto accepted = prepare_stock_material_execution(device, request);
+        require(accepted.ok() &&
+                    accepted.resources
+                            ->owned_multimap_reflection_constant_count() == 1U,
+                "all four bounded MultiMap families select and own portable reflection resources");
+    }
+
+    Fixture ordinary = fixture("ksPerPixel");
+    auto ordinary_request = request_for(ordinary);
+    ordinary_request.multimap_reflection = true;
+    const auto ordinary_result = prepare_stock_material_execution(
+        device, ordinary_request);
+    require(ordinary_result.ok() &&
+                ordinary_result.resources
+                        ->owned_multimap_reflection_constant_count() == 0U,
+            "global reflection opt-in does not extend non-MultiMap shader families");
+}
+
 void test_builtin_vulkan_source_selector() {
     Fixture source_fixture = fixture("ksPerPixel");
     source_fixture.model.materials[0].properties.push_back(
@@ -827,6 +874,7 @@ int main() {
         test_skinned_cross_backend_family_authority();
         test_preflight_failures();
         test_directional_shadow_receiver_module_opt_in();
+        test_multimap_reflection_module_opt_in();
         test_builtin_vulkan_source_selector();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

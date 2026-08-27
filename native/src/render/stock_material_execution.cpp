@@ -40,6 +40,14 @@ namespace {
            key == "ksperpixelmultimap_damage_dirt";
 }
 
+[[nodiscard]] bool multimap_reflection_family(std::string_view shader) {
+    const std::string key = canonical(shader);
+    return key == "ksperpixelmultimap" ||
+           key == "ksperpixelmultimap_at" ||
+           key == "ksperpixelmultimap_nmdetail" ||
+           key == "ksperpixelmultimap_at_nmdetail";
+}
+
 [[nodiscard]] bool finite_material(const KsPerPixelMaterialConstants& value) {
     for (const auto* values : {&value.lighting, &value.fresnel, &value.emissive,
                                &value.detail, &value.damage_zones})
@@ -89,7 +97,7 @@ namespace {
 [[nodiscard]] const StockMaterialShaderModules* find_modules(
     std::span<const StockMaterialShaderModules> sets, std::string_view material,
     std::string_view shader, StockMaterialShaderVariant variant,
-    bool directional_shadow_receiver) {
+    bool directional_shadow_receiver, bool multimap_reflection) {
     const std::string material_key = canonical(material);
     const std::string shader_key = canonical(shader);
     // A skinned packet has a distinct vertex ABI and 76-byte stride. Never
@@ -99,7 +107,8 @@ namespace {
     const StockMaterialShaderModules* family = nullptr;
     for (const StockMaterialShaderModules& set : sets) {
         if (set.variant != variant ||
-            set.directional_shadow_receiver != directional_shadow_receiver)
+            set.directional_shadow_receiver != directional_shadow_receiver ||
+            set.multimap_reflection != multimap_reflection)
             continue;
         if (!shader_family_only && canonical(set.key) == material_key &&
             set.key_kind == StockMaterialShaderKeyKind::material_name)
@@ -201,7 +210,8 @@ namespace {
 
 [[nodiscard]] std::vector<PipelineResourceBinding> resources_for(
     std::string_view shader, bool include_damage_dust = false,
-    bool directional_shadow_receiver = false) {
+    bool directional_shadow_receiver = false,
+    bool multimap_reflection = false) {
     const std::string key = canonical(shader);
     std::vector<PipelineResourceBinding> resources;
     const auto add = [&](PipelineResourceKind kind, std::uint32_t binding,
@@ -252,6 +262,12 @@ namespace {
         add(PipelineResourceKind::sampler, 19U, "shadowSampler");
         add(PipelineResourceKind::uniform_buffer, 20U, "shadowReceiver");
     }
+    if (multimap_reflection) {
+        add(PipelineResourceKind::sampled_texture, 21U, "txCube");
+        add(PipelineResourceKind::sampler, 22U, "txCubeSampler");
+        add(PipelineResourceKind::uniform_buffer, 23U,
+            "ksPerPixelMultiMapReflection");
+    }
     return resources;
 }
 
@@ -271,7 +287,7 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         diagnostic = diag("stock_material_shader_set_limit", "Shader module set count exceeds the configured limit");
         return false;
     }
-    std::set<std::tuple<int, std::string, int, bool>> keys;
+    std::set<std::tuple<int, std::string, int, bool, bool>> keys;
     for (const StockMaterialShaderModules& set : sets) {
         if (set.key.empty() || set.key.size() > limits.max_shader_key_bytes) {
             diagnostic = diag("stock_material_shader_key_invalid", "Shader module key is empty or exceeds the configured limit");
@@ -279,8 +295,17 @@ bool validate_module_sets(std::span<const StockMaterialShaderModules> sets,
         }
         if (!keys.insert({static_cast<int>(set.key_kind), canonical(set.key),
                           static_cast<int>(set.variant),
-                          set.directional_shadow_receiver}).second) {
+                          set.directional_shadow_receiver,
+                          set.multimap_reflection}).second) {
             diagnostic = diag("stock_material_shader_key_duplicate", "Shader module keys must be unique");
+            return false;
+        }
+        if (set.multimap_reflection &&
+            set.key_kind == StockMaterialShaderKeyKind::shader_family &&
+            !multimap_reflection_family(set.key)) {
+            diagnostic = diag(
+                "stock_material_multimap_reflection_family_invalid",
+                "Portable MultiMap reflection modules require one of the four bounded MultiMap shader-family keys");
             return false;
         }
         if (set.variant == StockMaterialShaderVariant::damage_dust &&
@@ -551,6 +576,9 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
         !charge_count(request.packets.size(), sizeof(PipelineProgram)) ||
         !charge_count(request.packets.size(), sizeof(MaterialRenderProfile)) ||
         !charge_count(request.model->materials.size(), sizeof(KsPerPixelMaterialConstants)) ||
+        (request.multimap_reflection &&
+         !charge_count(request.model->materials.size(),
+                       sizeof(KsPerPixelMultiMapReflectionConstants))) ||
         !charge_count(request.model->materials.size(),
                       sizeof(StockShadowCasterMaterialConstants)) ||
         !charge_count(request.model->materials.size(), sizeof(bool) + sizeof(std::size_t) +
@@ -583,10 +611,12 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
     const std::uint64_t resource_pipeline_count = std::max(
         static_cast<std::uint64_t>(request.model->materials.size()),
         peak_pipeline_copy_count);
-    // Reserve the base twelve declarations plus the five directional-shadow
-    // receiver declarations when the orthogonal extension is selected.
+    // Reserve the base twelve declarations plus each selected orthogonal
+    // extension: five directional-shadow declarations and three reflection
+    // declarations.
     const std::size_t max_resource_declarations =
-        request.directional_shadow_receiver ? 17U : 12U;
+        12U + (request.directional_shadow_receiver ? 5U : 0U) +
+        (request.multimap_reflection ? 3U : 0U);
     if (resource_pipeline_count >
             std::numeric_limits<std::size_t>::max() / max_resource_declarations ||
         !charge_count(static_cast<std::size_t>(resource_pipeline_count) *
@@ -694,6 +724,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         std::vector<std::uint32_t> d3d12_native_program_by_packet(
             packets.size(), invalid_static_scene_source_program_index);
         std::vector<KsPerPixelMaterialConstants> constants(request.model->materials.size());
+        std::vector<KsPerPixelMultiMapReflectionConstants>
+            multimap_reflection_constants(request.model->materials.size());
         std::vector<StockKsPerPixelMaterialConstants> native_constants(
             request.model->materials.size());
         std::vector<bool> native_constants_ready(
@@ -737,6 +769,9 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 source, node != nullptr && node->transparent, request.model->textures.size(),
                 overrides, request.limits.material);
             const std::string shader_key = canonical(binding.shader);
+            const bool reflection_enabled =
+                request.multimap_reflection &&
+                multimap_reflection_family(binding.shader);
             if (binding.status != MaterialBindingStatus::complete)
                 return fail(StaticSceneResourceStatus::invalid_request,
                             "stock_material_binding_incomplete", "The material binding is incomplete or unsupported");
@@ -752,7 +787,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     {false, shader_key == "ksperpixelat" ||
                                 shader_key == "ksperpixelmultimap_at" ||
                                 shader_key ==
-                                    "ksperpixelmultimap_at_nmdetail"});
+                                    "ksperpixelmultimap_at_nmdetail",
+                     reflection_enabled});
             if (!resolved.ok()) {
                 const StaticSceneResourceStatus status =
                     resolved.status == KsPerPixelMaterialResolveStatus::unsupported
@@ -770,6 +806,29 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             "stock_material_constants_invalid",
                             "The bounded material constant resolver produced non-finite values");
             constants[material_index] = resolved.constants;
+            if (reflection_enabled) {
+                const KsPerPixelMultiMapReflectionResolveResult
+                    reflection_resolved =
+                        resolve_ks_per_pixel_multimap_reflection_constants(
+                            binding);
+                if (!reflection_resolved.ok()) {
+                    const StaticSceneResourceStatus status =
+                        reflection_resolved.status ==
+                                KsPerPixelMultiMapReflectionResolveStatus::unsupported
+                            ? StaticSceneResourceStatus::unsupported
+                            : StaticSceneResourceStatus::invalid_request;
+                    return fail(
+                        status,
+                        reflection_resolved.diagnostic.code.empty()
+                            ? "stock_material_multimap_reflection_constants_invalid"
+                            : reflection_resolved.diagnostic.code,
+                        reflection_resolved.diagnostic.message.empty()
+                            ? "The bounded MultiMap reflection resolver rejected the material"
+                            : reflection_resolved.diagnostic.message);
+                }
+                multimap_reflection_constants[material_index] =
+                    reflection_resolved.constants;
+            }
             bool material_needs_alpha_shadow = false;
 
             if (source.serializedBlendMode > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
@@ -813,7 +872,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                         : StockMaterialShaderVariant::standard;
                 const StockMaterialShaderModules* modules = find_modules(
                     request.shader_modules, source.name, binding.shader, shader_variant,
-                    request.directional_shadow_receiver);
+                    request.directional_shadow_receiver,
+                    reflection_enabled);
                 const bool exact_source_family =
                     canonical(source.shader) == shader_key &&
                     (shader_key == "ksperpixel" ||
@@ -1025,7 +1085,8 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                     pipeline_request.resources = resources_for(
                         binding.shader,
                         damage_dirt_shader && packet_has_dust,
-                        request.directional_shadow_receiver);
+                        request.directional_shadow_receiver,
+                        reflection_enabled);
                 pipeline_request.wireframe = request.wireframe;
                 StockPipelineResult built =
                     build_stock_pipeline(pipeline_request, request.limits.scene.pipeline);
@@ -1166,6 +1227,9 @@ StockMaterialExecutionResult prepare_stock_material_execution(
         scene_request.packets = packets;
         scene_request.pipelines_by_packet = pipeline_ptrs;
         scene_request.material_constants_by_material = constants;
+        if (request.multimap_reflection)
+            scene_request.multimap_reflection_constants_by_material =
+                multimap_reflection_constants;
         if (!source_programs.empty()) {
             scene_request.stock_vulkan_source_programs = source_programs;
             scene_request.stock_vulkan_source_program_by_packet =

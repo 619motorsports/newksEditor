@@ -220,6 +220,10 @@ public:
         directional_shadow_samplers.clear();
         directional_shadow_buffers.clear();
         directional_shadow_ranges.clear();
+        multimap_reflection_textures.clear();
+        multimap_reflection_samplers.clear();
+        multimap_reflection_buffers.clear();
+        multimap_reflection_ranges.clear();
         stock_vulkan_source_programs.clear();
         stock_vulkan_source_diffuse_textures.clear();
         stock_vulkan_source_uniform_buffers.clear();
@@ -262,6 +266,14 @@ public:
                 draw.directional_shadow_binding.constants);
             directional_shadow_ranges.push_back(
                 draw.directional_shadow_binding.constants_range_bytes);
+            multimap_reflection_textures.push_back(
+                draw.multimap_reflection_binding.cube.texture);
+            multimap_reflection_samplers.push_back(
+                draw.multimap_reflection_binding.cube.sampler);
+            multimap_reflection_buffers.push_back(
+                draw.multimap_reflection_binding.constants.buffer);
+            multimap_reflection_ranges.push_back(
+                draw.multimap_reflection_binding.constants.range_bytes);
             if (draw.stock_ks_per_pixel_vulkan_source != nullptr) {
                 stock_vulkan_source_programs.push_back(
                     draw.stock_ks_per_pixel_vulkan_source->program);
@@ -393,6 +405,10 @@ public:
     std::vector<const Sampler*> directional_shadow_samplers;
     std::vector<const Buffer*> directional_shadow_buffers;
     std::vector<std::uint32_t> directional_shadow_ranges;
+    std::vector<const Texture*> multimap_reflection_textures;
+    std::vector<const Sampler*> multimap_reflection_samplers;
+    std::vector<const Buffer*> multimap_reflection_buffers;
+    std::vector<std::uint32_t> multimap_reflection_ranges;
     std::vector<const ValidatedStockKsPerPixelVulkanSourceProgram*>
         stock_vulkan_source_programs;
     std::vector<const Texture*> stock_vulkan_source_diffuse_textures;
@@ -1855,6 +1871,144 @@ void owns_and_reuses_material_constant_records() {
                 distinct_device.material_buffers[0] != distinct_device.material_buffers[1] &&
                 distinct_device.material_buffers[0] == distinct_device.material_buffers[2],
             "material IDs keep distinct records while duplicate packets reuse one record");
+}
+
+void owns_and_binds_multimap_reflection_outside_kn5_tables() {
+    Fixture value = fixture();
+    value.model.textures = {
+        {true, "body.dds", 0U, {}, {}},
+        {true, "body_nm.dds", 0U, {}, {}},
+        {true, "body_maps.dds", 0U, {}, {}},
+    };
+    value.first_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "txDiffuseSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 2U,
+         "ksPerPixelMaterial"},
+        {PipelineResourceKind::uniform_buffer, 0U, 3U, "ksPerPixelFrame"},
+        {PipelineResourceKind::sampled_texture, 0U, 4U, "txNormal"},
+        {PipelineResourceKind::sampler, 0U, 5U, "txNormalSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 6U, "txMaps"},
+        {PipelineResourceKind::sampler, 0U, 7U, "txMapsSampler"},
+        {PipelineResourceKind::sampled_texture, 0U, 21U, "txCube"},
+        {PipelineResourceKind::sampler, 0U, 22U, "txCubeSampler"},
+        {PipelineResourceKind::uniform_buffer, 0U, 23U,
+         "ksPerPixelMultiMapReflection"},
+    };
+    value.second_pipeline.resources = {
+        {PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+        {PipelineResourceKind::sampler, 0U, 1U, "txDiffuseSampler"},
+    };
+    for (DrawPacket& packet : value.packets) {
+        packet.resources = {{"txDiffuse", 0U, 0U, "body.dds"}};
+        if (packet.material == 0U) {
+            packet.resources.push_back(
+                {"txNormal", 1U, 1U, "body_nm.dds"});
+            packet.resources.push_back(
+                {"txMaps", 2U, 2U, "body_maps.dds"});
+        }
+    }
+
+    std::array<KsPerPixelMaterialConstants, 2U> material_constants{};
+    material_constants[0].fresnel[2U] = 0.25F;
+    std::array<KsPerPixelMultiMapReflectionConstants, 2U>
+        reflection_constants{};
+    reflection_constants[0].fresnel_and_additive =
+        {0.02F, 5.0F, 0.25F, 2.0F};
+    reflection_constants[1].fresnel_and_additive[0U] =
+        std::numeric_limits<float>::quiet_NaN();
+    auto request = request_for(value);
+    request.material_constants_by_material = material_constants;
+    request.multimap_reflection_constants_by_material =
+        reflection_constants;
+
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request);
+    require(prepared.ok() &&
+                prepared.resources
+                        ->owned_multimap_reflection_constant_count() == 1U,
+            "one used MultiMap material owns one reflection record and ignores unused table entries");
+
+    const TextureDescription sampled_description{
+        1U, 1U, 1U, 1U, TextureFormat::rgba8_unorm,
+        TextureUsage::sampled, TextureMemory::device_local,
+        TextureMutability::immutable};
+    const TextureDescription cube_description{
+        4U, 4U, 1U, 1U, TextureFormat::rgba8_unorm,
+        TextureUsage::sampled, TextureMemory::device_local,
+        TextureMutability::immutable, 1U, TextureShape::texture_cube};
+    FakeTexture diffuse(sampled_description);
+    FakeTexture normal(sampled_description);
+    FakeTexture maps(sampled_description);
+    FakeTexture cube(cube_description);
+    FakeSampler sampler;
+    const std::array<const Texture*, 3U> textures = {
+        &diffuse, &normal, &maps};
+    const std::array<const Sampler*, 3U> samplers = {
+        &sampler, &sampler, &sampler};
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.textures_by_global_index = textures;
+    frame.samplers_by_global_index = samplers;
+    frame.multimap_reflection_cube = {&cube, &sampler};
+    FakeTexture target;
+    const auto drawn = prepared.resources->draw_and_readback(
+        device, target, frame);
+    require(drawn.ok() &&
+                device.multimap_reflection_textures.size() == 3U &&
+                device.multimap_reflection_textures[0U] == &cube &&
+                device.multimap_reflection_textures[1U] == nullptr &&
+                device.multimap_reflection_textures[2U] == &cube &&
+                device.multimap_reflection_buffers[0U] != nullptr &&
+                device.multimap_reflection_buffers[0U] ==
+                    device.multimap_reflection_buffers[2U] &&
+                device.multimap_reflection_ranges ==
+                    std::vector<std::uint32_t>{
+                        portable_multimap_reflection_buffer_view_bytes, 0U,
+                        portable_multimap_reflection_buffer_view_bytes} &&
+                frame.textures_by_global_index.size() ==
+                    value.model.textures.size(),
+            "duplicate packets reuse the owned reflection record while the frame cube stays outside KN5 texture indices");
+
+    StaticSceneFrameDescription missing = frame;
+    missing.multimap_reflection_cube = {};
+    const auto missing_result = prepared.resources->draw_and_readback(
+        device, target, missing);
+    require(missing_result.diagnostic.code ==
+                "static_scene_multimap_reflection_cube_missing",
+            "reflection pipelines reject a missing frame-owned cube before submission");
+
+    StaticSceneFrameDescription incomplete = frame;
+    incomplete.multimap_reflection_cube.sampler = nullptr;
+    const auto incomplete_result = prepared.resources->draw_and_readback(
+        device, target, incomplete);
+    require(incomplete_result.diagnostic.code ==
+                "static_scene_multimap_reflection_cube_incomplete",
+            "reflection frames reject partial cube bindings before submission");
+
+    FakeTexture foreign_cube(cube_description, Backend::D3D12);
+    StaticSceneFrameDescription foreign = frame;
+    foreign.multimap_reflection_cube.texture = &foreign_cube;
+    const auto foreign_result = prepared.resources->draw_and_readback(
+        device, target, foreign);
+    require(foreign_result.diagnostic.code ==
+                "static_scene_multimap_reflection_cube_device_mismatch",
+            "reflection frames reject cube resources from another device boundary");
+
+    Fixture ordinary = fixture();
+    RecordingDevice ordinary_device;
+    auto ordinary_prepared = prepare_static_scene_resources(
+        ordinary_device, request_for(ordinary));
+    StaticSceneFrameDescription unexpected;
+    unexpected.camera.clip_space = CameraClipSpace::vulkan;
+    unexpected.multimap_reflection_cube = {&cube, &sampler};
+    const auto unexpected_result =
+        ordinary_prepared.resources->draw_and_readback(
+            ordinary_device, target, unexpected);
+    require(unexpected_result.diagnostic.code ==
+                "static_scene_multimap_reflection_cube_unexpected",
+            "ordinary scenes reject an unexpected frame-owned reflection cube");
 }
 
 void owns_and_updates_frame_constant_record_for_mixed_packets() {
@@ -4028,6 +4182,7 @@ int main() {
         rejects_malformed_diffuse_packets_before_allocation();
         bounds_host_preparation_metadata_before_allocation();
         owns_and_reuses_material_constant_records();
+        owns_and_binds_multimap_reflection_outside_kn5_tables();
         owns_and_updates_frame_constant_record_for_mixed_packets();
         resolves_bounded_normal_map_resources_and_rejects_malformed_packets();
         resolves_txmaps_resources_with_bounded_ownership_and_preflight();

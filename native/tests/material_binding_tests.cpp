@@ -632,6 +632,11 @@ void resolves_bounded_base_multimap_families() {
                 fresnel.diagnostic.code ==
                     "ks_per_pixel_nm_fresnel_unsupported",
             "base MultiMap keeps maps.b reflection outside the bounded path");
+    const auto reflection_enabled = resolve_ks_per_pixel_material_constants(
+        build_material_binding(material, 3U), {false, false, true});
+    require(reflection_enabled.ok() &&
+                reflection_enabled.constants.fresnel[2] == 0.05F,
+            "base MultiMap accepts Fresnel only with the explicit portable reflection contract");
 }
 
 void resolves_multimap_reflection_controls_separately() {
