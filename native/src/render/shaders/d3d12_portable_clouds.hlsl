@@ -39,7 +39,10 @@ VertexOutput vertex_main(CloudVertex input) {
 
     // The native billboard uses the local normal (0, -1, 0). The fallback
     // keeps the portable pass finite when a bounded layout reaches the axis.
-    float3 heading = normalize(offset);
+    float offset_length_squared = dot(offset, offset);
+    float3 heading = offset_length_squared < 1.0e-8F
+                         ? float3(0.0F, 0.0F, -1.0F)
+                         : offset * rsqrt(offset_length_squared);
     float3 right = cross(heading, float3(0.0F, -1.0F, 0.0F));
     if (dot(right, right) < 1.0e-8F)
         right = cross(heading, float3(0.0F, 0.0F, 1.0F));

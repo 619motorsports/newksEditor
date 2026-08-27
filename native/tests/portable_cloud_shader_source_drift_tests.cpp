@@ -31,14 +31,14 @@ struct SourceIdentity {
 };
 
 constexpr SourceIdentity vertex_source{
-    "src/render/shaders/portable_clouds.vert", 1678U,
-    "059efd3f4a803bf95d746bb95c3a9b8280ea25c89ac22099ab0dc3d9476519e8"};
+    "src/render/shaders/portable_clouds.vert", 1861U,
+    "5391d385bc244e63cecdc8b43eebfeb8c58ffe510f7e09780fddd5d02552ccd6"};
 constexpr SourceIdentity fragment_source{
     "src/render/shaders/portable_clouds.frag", 1452U,
     "b3f58cc181f3b7f4efcb0b1940bb69d6dfa92c74e291bcc57c5fec68661b0d01"};
 constexpr SourceIdentity d3d12_source{
-    "src/render/shaders/d3d12_portable_clouds.hlsl", 2872U,
-    "d9f67d1e443d71f8d160724cce3997d36c2a192c253c119ae29eb458bb678ec7"};
+    "src/render/shaders/d3d12_portable_clouds.hlsl", 3059U,
+    "75a4096499085038d145a610fba1fe42c7a012cafd18d3cd8062fea3e5fd361e"};
 
 void require(const bool condition, const std::string_view message) {
     if (!condition)
@@ -109,14 +109,14 @@ int main() {
         verify_source(vertex_source);
         verify_source(fragment_source);
         verify_source(d3d12_source);
-        verify_spirv(byte_span(portable_clouds_vertex_spirv), 2204U,
-                     "5ee1d31c39ef383dfe6642dacea6546df4fda1a65d3f0370474fc7ab0d68b27d");
+        verify_spirv(byte_span(portable_clouds_vertex_spirv), 2384U,
+                     "beeb54af6d407a0f8f3fadcd69ca6dd5f318aa8d68a579228b28268d55ab5ff1");
         verify_spirv(byte_span(portable_clouds_fragment_spirv), 1908U,
                      "695ae7c2f70749bd5ed6d23c383e6d69dbcbb4d04b544e83f2f5b8efb67ce55d");
-        verify_dxbc(byte_span(d3d12_portable_clouds_vertex_dxbc), 3356U,
-                    "c19f2d28a5b11a096eba25db1d7fce390dda93fe1ea1853d6b06f14aa1e64df0");
-        verify_dxbc(byte_span(d3d12_portable_clouds_pixel_dxbc), 2072U,
-                    "87619c39e41d431fdb18d818df72c75fa1c59690d6bb0a0e3301631406742e8e");
+        verify_dxbc(byte_span(d3d12_portable_clouds_vertex_dxbc), 2264U,
+                    "440cae04ab613bfaae60d847ecce784fdfe4d1c4c3af639145ac793fec2c14c7");
+        verify_dxbc(byte_span(d3d12_portable_clouds_pixel_dxbc), 1684U,
+                    "477324d3dc34cbe8d13039989efae226c84fd4abdcfe220f80970ad913b0fa32");
         std::cout << "portable cloud shader source drift tests passed\n";
         return 0;
     } catch (const std::exception& error) {

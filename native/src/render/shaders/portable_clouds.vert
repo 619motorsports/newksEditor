@@ -31,7 +31,10 @@ void main() {
 
     // The native billboard uses the local normal (0, -1, 0). The fallback
     // keeps the portable pass finite when a bounded layout reaches the axis.
-    vec3 heading = normalize(offset);
+    float offset_length_squared = dot(offset, offset);
+    vec3 heading = offset_length_squared < 1.0e-8
+                       ? vec3(0.0, 0.0, -1.0)
+                       : offset * inversesqrt(offset_length_squared);
     vec3 right = cross(heading, vec3(0.0, -1.0, 0.0));
     if (dot(right, right) < 1.0e-8)
         right = cross(heading, vec3(0.0, 0.0, 1.0));

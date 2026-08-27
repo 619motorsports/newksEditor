@@ -263,6 +263,41 @@ void executionConstantsAndBatchValidation() {
                 IndexedStaticMeshBatchStatus::ready,
             "cloud-only indexed batch is accepted");
 
+    auto target_alias_batch = batch;
+    target_alias_batch.clouds->textures[0U] = &target;
+    require(validate_indexed_static_mesh_batch_description(
+                target, target_alias_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "portable_cloud_texture_target_alias",
+            "cloud texture cannot alias the batch color target");
+
+    TextureDescription multisample_target_description = target_description;
+    multisample_target_description.samples = 4U;
+    TestTexture multisample_target(multisample_target_description);
+    TextureDescription resolve_description = target_description;
+    TestTexture resolve_target(resolve_description);
+    auto resolve_alias_clouds = clouds;
+    resolve_alias_clouds.textures[0U] = &resolve_target;
+    auto resolve_alias_batch = batch;
+    resolve_alias_batch.clouds = resolve_alias_clouds;
+    resolve_alias_batch.resolve_target = &resolve_target;
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_target, resolve_alias_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "portable_cloud_texture_resolve_alias",
+            "cloud texture cannot alias the batch resolve target");
+
+    TextureDescription invalid_format_description = texture_description;
+    invalid_format_description.format = TextureFormat::rgba16_sfloat;
+    TestTexture invalid_format_texture(invalid_format_description);
+    auto invalid_format_batch = batch;
+    invalid_format_batch.clouds->textures[0U] = &invalid_format_texture;
+    require(validate_indexed_static_mesh_batch_description(
+                target, invalid_format_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "portable_cloud_texture_format_unsupported",
+            "cloud texture rejects unsupported formats");
+
     auto malformed = clouds;
     malformed.elapsed_seconds = std::numeric_limits<float>::quiet_NaN();
     require(!build_portable_cloud_shader_constants(malformed, constants,
@@ -289,6 +324,44 @@ void executionConstantsAndBatchValidation() {
                                                    diagnostic) &&
                 diagnostic.code == "portable_cloud_run_invalid",
             "malformed cloud runs are rejected");
+
+    const std::array<PortableCloudTextureRun, 2U> valid_manual_runs = {{
+        {0U, 0U, 6U, 1U},
+        {1U, 6U, 6U, 1U},
+    }};
+    malformed = clouds;
+    malformed.texture_runs = valid_manual_runs;
+    require(build_portable_cloud_shader_constants(malformed, constants,
+                                                   diagnostic),
+            "cloud runs may skip a missing texture slot");
+    auto gap_runs = valid_manual_runs;
+    gap_runs[1U].first_vertex = 7U;
+    malformed.texture_runs = gap_runs;
+    require(!build_portable_cloud_shader_constants(malformed, constants,
+                                                   diagnostic) &&
+                diagnostic.code == "portable_cloud_run_invalid",
+            "cloud runs reject gaps");
+    auto overlap_runs = valid_manual_runs;
+    overlap_runs[1U].first_vertex = 5U;
+    malformed.texture_runs = overlap_runs;
+    require(!build_portable_cloud_shader_constants(malformed, constants,
+                                                   diagnostic) &&
+                diagnostic.code == "portable_cloud_run_invalid",
+            "cloud runs reject overlaps");
+    auto overflow_runs = valid_manual_runs;
+    overflow_runs[0U].first_vertex = portable_cloud_max_vertex_count;
+    malformed.texture_runs = overflow_runs;
+    require(!build_portable_cloud_shader_constants(malformed, constants,
+                                                   diagnostic) &&
+                diagnostic.code == "portable_cloud_run_invalid",
+            "cloud runs reject bounded vertex arithmetic overflow");
+    auto mismatched_count_runs = valid_manual_runs;
+    mismatched_count_runs[1U].cloud_count = 2U;
+    malformed.texture_runs = mismatched_count_runs;
+    require(!build_portable_cloud_shader_constants(malformed, constants,
+                                                   diagnostic) &&
+                diagnostic.code == "portable_cloud_run_invalid",
+            "cloud runs reject mismatched cloud counts");
     batch.clouds = clouds;
     batch.clouds->camera.clip_space = CameraClipSpace::d3d12;
     require(validate_indexed_static_mesh_batch_description(
@@ -402,6 +475,25 @@ bool executeBackend(const Backend backend) {
                   std::to_integer<std::uint8_t>(rendered.rgba8[offset]) > 128U;
     }
     require(changed, "portable cloud shader changes covered pixels");
+
+    auto zero_offset_vertices = vertices;
+    for (auto& vertex : zero_offset_vertices) {
+        vertex.center_x = 0.0F;
+        vertex.center_y = 0.0F;
+        vertex.center_z = 0.0F;
+    }
+    BufferResult zero_offset_buffer = device.create_buffer(
+        buffer_description,
+        std::as_bytes(std::span(zero_offset_vertices)));
+    require(zero_offset_buffer.ok(),
+            "backend creates zero-offset portable cloud vertices");
+    batch.clouds->vertex_buffer = zero_offset_buffer.buffer.get();
+    const IndexedStaticMeshBatchResult zero_offset_rendered =
+        device.draw_indexed_static_mesh_batch_and_readback(
+            *target.texture, batch);
+    require(zero_offset_rendered.ok() &&
+                zero_offset_rendered.rgba8.size() == 33U * 33U * 4U,
+            "portable cloud shader handles a zero billboard offset");
 
     IndexedStaticMeshBatchDescription empty_batch;
     empty_batch.clouds.emplace();

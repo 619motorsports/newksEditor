@@ -223,6 +223,13 @@ bool portable_sampled_color_format(TextureFormat format, bool allow_srgb) noexce
             format == TextureFormat::bc7_srgb);
 }
 
+bool portable_cloud_sampled_color_format(TextureFormat format) noexcept {
+    return format == TextureFormat::rgba8_unorm ||
+           format == TextureFormat::rgba8_srgb ||
+           format == TextureFormat::bgra8_unorm ||
+           format == TextureFormat::bgra8_srgb;
+}
+
 TextureStatus validate_texture_sample_contract(const TextureDescription& description,
                                                bool has_uploads,
                                                Diagnostic& diagnostic) {
@@ -1177,6 +1184,11 @@ bool build_portable_cloud_shader_constants(
                                        TextureUsage::sampled) == 0U) {
             diagnostic = {"portable_cloud_texture_invalid",
                           "Portable cloud textures must be single-sample sampled 2D textures"};
+            return false;
+        }
+        if (!portable_cloud_sampled_color_format(description.format)) {
+            diagnostic = {"portable_cloud_texture_format_unsupported",
+                          "Portable cloud textures require RGBA8 or BGRA8 UNORM or sRGB data"};
             return false;
         }
     }
@@ -4098,6 +4110,21 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             diagnostic = {"portable_cloud_clip_space_mismatch",
                           "The portable cloud camera clip space must match the color-target backend"};
             return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        for (const Texture* cloud_texture : description.clouds->textures) {
+            if (cloud_texture == nullptr)
+                continue;
+            if (cloud_texture == &texture) {
+                diagnostic = {"portable_cloud_texture_target_alias",
+                              "Portable cloud textures must not alias the batch color target"};
+                return IndexedStaticMeshBatchStatus::invalid_request;
+            }
+            if (description.resolve_target != nullptr &&
+                cloud_texture == description.resolve_target) {
+                diagnostic = {"portable_cloud_texture_resolve_alias",
+                              "Portable cloud textures must not alias the batch resolve target"};
+                return IndexedStaticMeshBatchStatus::invalid_request;
+            }
         }
         PortableCloudShaderConstants cloud_constants;
         if (!build_portable_cloud_shader_constants(
