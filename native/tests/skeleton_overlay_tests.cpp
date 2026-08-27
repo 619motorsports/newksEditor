@@ -210,8 +210,10 @@ void rejects_malformed_and_nonfinite_input_atomically() {
                 result.vertices.empty(),
             "non-finite translation is rejected without partial output");
 
+    Node declared_truncated_node = node({0.0F, 0.0F, 0.0F});
+    declared_truncated_node.declared_child_count = 2U;
     const std::array<Node, 1U> declared_truncated = {
-        {node({0.0F, 0.0F, 0.0F}).world_translation, {}, Kind::plain, 2U},
+        declared_truncated_node,
     };
     result = apex::render::build_skeleton_overlay(declared_truncated, 0U);
     require(!result.ok() && result.status == apex::render::SkeletonOverlayStatus::input_truncated &&

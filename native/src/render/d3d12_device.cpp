@@ -7831,7 +7831,7 @@ public:
     void mark_initialized() noexcept {
         initialized_ = true;
         std::fill(base_mip_initialized_.begin(), base_mip_initialized_.end(),
-                  1U);
+                  std::uint8_t{1});
     }
     void set_state(D3D12_RESOURCE_STATES state) noexcept { state_ = state; }
 
