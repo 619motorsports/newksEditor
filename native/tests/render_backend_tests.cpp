@@ -3407,7 +3407,7 @@ bool contract_backend(apex::render::Backend backend) {
                 "float contractUse = splitDistances.x * 0.0;"
                 "return float4(d0 + contractUse, d1, d2, 1.0); }";
             receiver_pipeline.shaders[1].bytes = executable_d3d_shader(
-                receiver_fragment_source, "ps_5_0");
+                receiver_fragment_source, "ps_5_1");
 #else
             require(false,
                     "D3D12 directional receiver test requires Windows D3DCompile");

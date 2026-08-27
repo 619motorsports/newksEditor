@@ -160,7 +160,8 @@ float sunShadow(float3 worldPosition) {
   return 1.0;
 }
 
-float4 main(float3 normal : NORMAL, float3 worldPosition : TEXCOORD1,
+float4 main(float4 position : SV_Position, float3 normal : NORMAL,
+            float3 worldPosition : TEXCOORD1,
             float2 texcoord : TEXCOORD0) : SV_Target {
   const float3 texel = diffuseTexture.Sample(diffuseSampler, texcoord).rgb;
   const float3 n = normalize(normal);
