@@ -146,6 +146,8 @@ struct StaticSceneFrameDescription {
     Texture* resolve_target = nullptr;
     // Disable the synchronous CPU copy when only the retained image is used.
     bool capture_rgba8 = true;
+    // Select one color-target subresource. Cube frames must name a face.
+    TextureTargetSubresource target_subresource{};
     // Optional current packet states for animated scenes. The span must have
     // exactly the prepared packet count when supplied. Node/material,
     // primitive, ranges, pipeline flags, and resources must remain stable;

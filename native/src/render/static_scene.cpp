@@ -3035,6 +3035,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     batch.depth_clear_value = frame.depth_clear_value;
     batch.resolve_target = frame.resolve_target;
     batch.capture_rgba8 = frame.capture_rgba8;
+    batch.target_subresource = frame.target_subresource;
     batch.overlay_draws =
         std::span<const OverlayLineDrawRequest>(overlay_draws)
             .first(overlay_draw_count);

@@ -190,6 +190,7 @@ public:
         captured_clear_color = batch.clear_color;
         captured_resolve_target = batch.resolve_target;
         captured_capture_rgba8 = batch.capture_rgba8;
+        captured_target_subresource = batch.target_subresource;
         nodes.clear();
         pipeline_names.clear();
         blend_states.clear();
@@ -366,6 +367,7 @@ public:
     std::array<float, 4> captured_clear_color{};
     Texture* captured_resolve_target = nullptr;
     bool captured_capture_rgba8 = true;
+    TextureTargetSubresource captured_target_subresource{};
     std::vector<std::vector<std::byte>> uploaded_bytes;
     std::vector<std::uint64_t> update_offsets;
     std::vector<std::vector<std::byte>> updated_bytes;
@@ -652,6 +654,35 @@ void make_second_mesh_skinned(Fixture& value) {
     bone.active = true;
     bone.visible = true;
     (void)value.scene.add_node(std::move(bone), 0U);
+}
+
+void forwards_cube_target_subresource() {
+    Fixture value = fixture();
+    RecordingDevice device;
+    auto prepared = prepare_static_scene_resources(device, request_for(value));
+    require(prepared.ok(), "cube target fixture prepares static-scene resources");
+
+    TextureDescription cube_description;
+    cube_description.width = 16U;
+    cube_description.height = 16U;
+    cube_description.format = TextureFormat::rgba8_unorm;
+    cube_description.usage =
+        TextureUsage::color_attachment | TextureUsage::transfer_source;
+    cube_description.mutability = TextureMutability::mutable_data;
+    cube_description.shape = TextureShape::texture_cube;
+    FakeTexture cube_target(cube_description);
+
+    StaticSceneFrameDescription frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.target_subresource.cube_face = CubeFace::negative_y;
+    const IndexedStaticMeshBatchResult drawn =
+        prepared.resources->draw_and_readback(device, cube_target, frame);
+    require(drawn.ok() &&
+                device.captured_target_subresource.mip_level == 0U &&
+                device.captured_target_subresource.array_layer == 0U &&
+                device.captured_target_subresource.cube_face ==
+                    CubeFace::negative_y,
+            "static scene forwards its explicit cube target face to the batch");
 }
 
 void prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight() {
@@ -4171,6 +4202,7 @@ int main() {
         prepares_deduplicated_resources_and_executes_one_ordered_batch();
         suppresses_shadow_only_packets_from_color_submission();
         schedules_selected_and_view_axis_at_transparent_boundary();
+        forwards_cube_target_subresource();
         prepares_mixed_static_and_skinned_scene_and_updates_only_after_preflight();
         prepares_source_evidenced_wireframe_batch_state();
         rejects_invalid_late_inputs_before_backend_allocation();
