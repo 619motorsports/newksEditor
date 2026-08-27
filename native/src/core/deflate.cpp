@@ -255,7 +255,7 @@ void dynamicTables(BitReader &reader, Huffman<288> &literals,
         throw deflateError(source, reader.bitPosition() / 8u, "HUFFMAN",
                            "DEFLATE zero repeat exceeds table");
       std::fill_n(lengths.begin() + static_cast<std::ptrdiff_t>(index), repeat,
-                  0u);
+                  std::uint8_t{0});
       index += repeat;
     } else {
       throw deflateError(source, reader.bitPosition() / 8u, "HUFFMAN",

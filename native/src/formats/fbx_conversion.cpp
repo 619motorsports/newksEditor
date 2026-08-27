@@ -2126,7 +2126,8 @@ void extractAnimations(const std::vector<ObjectRecord>& records,
                 const auto base = animationBase(*model, modelPath);
                 for (std::size_t frameIndex = 0; frameIndex < 100u; ++frameIndex) {
                     const auto time = static_cast<std::int64_t>(
-                        static_cast<long double>(start) + span * frameIndex / 100.0L);
+                        static_cast<long double>(start) +
+                        span * static_cast<long double>(frameIndex) / 100.0L);
                     std::array<float, 3> translation = base.translation, rotation = base.rotation, scale = base.scale;
                     for (const auto& [key, binding] : bindings) {
                         (void)key;
