@@ -6428,7 +6428,9 @@ Output main(Input input) {
     return output;
 })";
             constexpr std::string_view fragment_source = R"(
-float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
+float4 main(float4 position : SV_Position, float3 color : COLOR) : SV_Target {
+    return float4(color, 1.0);
+}
 )";
             pipeline.shaders = {
                 {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
