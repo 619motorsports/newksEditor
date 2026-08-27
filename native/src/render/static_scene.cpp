@@ -2969,7 +2969,11 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     std::size_t transparent_position = draws.size();
     bool transparent_seen = false;
     for (std::size_t index = 0U; index < draws.size(); ++index) {
-        const bool transparent = draws[index].packet->flags.transparent;
+        const bool transparent =
+            draws[index].packet->flags.transparent ||
+            draws[index].packet->flags.blend_enabled ||
+            (draws[index].pipeline != nullptr &&
+             draws[index].pipeline->blend.enabled);
         if (transparent && !transparent_seen) {
             transparent_position = index;
             transparent_seen = true;
@@ -3083,6 +3087,10 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     if (frame.clouds.has_value()) {
         batch.clouds = *frame.clouds;
         batch.clouds->camera = frame.camera;
+    }
+    if (frame.grass.has_value()) {
+        batch.grass = *frame.grass;
+        batch.grass->camera = frame.camera;
     }
     Diagnostic batch_diagnostic;
     const IndexedStaticMeshBatchStatus batch_validation =

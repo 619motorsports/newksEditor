@@ -149,6 +149,53 @@ buildStockNativeFrame(
     });
 }
 
+[[nodiscard]] bool validatePortableGrassFrameOptions(
+    const WorkspaceViewportPortableGrassFrameOptions& options,
+    render::Diagnostic& output_diagnostic) noexcept {
+    render::PortableGrassParameters parameters;
+    parameters.wetness = options.wetness;
+    parameters.wind_direction = options.wind_direction;
+    parameters.wind_strength = options.wind_strength;
+    parameters.elapsed_seconds = options.elapsed_seconds.value_or(0.0F);
+    render::PortableGrassShaderConstants constants;
+    return render::build_portable_grass_shader_constants(
+        parameters, constants, output_diagnostic);
+}
+
+[[nodiscard]] bool portableGrassAtlasFormat(
+    const render::TextureFormat format) noexcept {
+    return format == render::TextureFormat::rgba8_unorm ||
+           format == render::TextureFormat::rgba8_srgb ||
+           format == render::TextureFormat::bgra8_unorm ||
+           format == render::TextureFormat::bgra8_srgb;
+}
+
+[[nodiscard]] bool validatePortableGrassAtlasPlan(
+    const render::DecodedTexturePlan* plan,
+    render::Diagnostic& output_diagnostic) {
+    if (plan == nullptr || plan->levels.empty()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_atlas_missing",
+            "Portable grass preparation requires a decoded atlas with at least one mip level");
+        return false;
+    }
+    const render::TextureDescription& description = plan->description;
+    const auto sampled = static_cast<std::uint32_t>(
+        description.usage & render::TextureUsage::sampled);
+    if (description.shape != render::TextureShape::texture_2d ||
+        description.array_layers != 1U || description.samples != 1U ||
+        sampled == 0U || !portableGrassAtlasFormat(description.format)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_atlas_invalid",
+            "The portable grass atlas must be a single-sample sampled RGBA8 or BGRA8 2D texture");
+        return false;
+    }
+    const render::TextureUploadPlan uploads = plan->make_upload_plan();
+    return render::validate_texture_description(
+               description, uploads, output_diagnostic) ==
+           render::TextureStatus::ready;
+}
+
 [[nodiscard]] bool
 validateAiSplineGeometry(const WorkspaceAiSplineGeometry &geometry,
                          const WorkspaceAiSplinePassKind kind,
@@ -1114,6 +1161,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<WorkspaceViewportDirectionalShadowOptions>
         directional_shadows,
     std::optional<WorkspaceViewport::PortableCloudResources> portable_clouds,
+    std::optional<WorkspaceViewport::PortableGrassResources> portable_grass,
     std::optional<PortableReflectionCaptureResources> reflection_capture,
     std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
@@ -1139,6 +1187,7 @@ WorkspaceViewport::WorkspaceViewport(
       shadow_maps_(std::move(shadow_maps)),
       directional_shadows_(std::move(directional_shadows)),
       portable_clouds_(std::move(portable_clouds)),
+      portable_grass_(std::move(portable_grass)),
       reflection_capture_(std::move(reflection_capture)),
       frame_catalog_(std::move(frame_catalog)) {}
 
@@ -1475,6 +1524,32 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic = diagnostic(
             "workspace_viewport_portable_cloud_constants_missing",
             "An enabled portable cloud pass requires current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    std::optional<WorkspaceViewportPortableGrassFrameOptions>
+        effective_portable_grass_frame;
+    if (portable_grass_.has_value()) {
+        effective_portable_grass_frame =
+            request.portable_grass.value_or(portable_grass_->frame);
+        if (!validatePortableGrassFrameOptions(
+                *effective_portable_grass_frame, output_diagnostic)) {
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+    }
+    if (portable_grass_.has_value() &&
+        effective_portable_grass_frame.has_value() &&
+        effective_portable_grass_frame->visible &&
+        portable_grass_->vertex_count != 0U &&
+        !request.frame_constants.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_constants_missing",
+            "An enabled portable grass pass requires current frame lighting constants");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.portable_grass.has_value() && !portable_grass_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_portable_grass_unprepared",
+            "Portable grass frame values require prepared portable grass resources");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const render::HdrToneMapParameters* effective_hdr_tone_map =
@@ -1961,6 +2036,36 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             clouds.textures[index] = resources.textures[index].get();
         frame.clouds = std::move(clouds);
     }
+    if (portable_grass_.has_value() &&
+        effective_portable_grass_frame.has_value() &&
+        effective_portable_grass_frame->visible &&
+        portable_grass_->vertex_count != 0U) {
+        const auto& resources = *portable_grass_;
+        const auto& grass_frame = *effective_portable_grass_frame;
+        render::PortableGrassParameters grass;
+        grass.camera = request.camera;
+        const auto& lighting = *request.frame_constants;
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            grass.sun_direction[index] = lighting.sun_direction[index];
+            grass.sun_color[index] = lighting.sun_color[index];
+            grass.ambient_color[index] = lighting.ambient_color[index];
+            grass.fog_color[index] = lighting.fog_color[index];
+        }
+        grass.fog_distance = lighting.fog[0U];
+        grass.fog_blend = lighting.fog[1U];
+        grass.wetness = grass_frame.wetness;
+        grass.elapsed_seconds = grass_frame.elapsed_seconds.value_or(
+            std::max(0.0F, std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - resources.start_time)
+                                  .count()));
+        grass.wind_direction = grass_frame.wind_direction;
+        grass.wind_strength = grass_frame.wind_strength;
+        grass.vertex_buffer = resources.vertex_buffer.get();
+        grass.vertex_count = resources.vertex_count;
+        grass.atlas = resources.atlas.get();
+        grass.sampler = resources.sampler.get();
+        frame.grass = std::move(grass);
+    }
     if (!reflection_capture_.has_value())
         frame.multimap_reflection_cube = request.multimap_reflection_cube;
     if (request.selected_mesh_elapsed_ms.has_value() &&
@@ -2421,6 +2526,29 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 result.diagnostic = diagnostic(
                     "workspace_viewport_portable_cloud_lighting_invalid",
                     "Portable cloud cover, cutoff, and colour must be finite and bounded");
+                return result;
+            }
+        }
+        if (request.portable_grass.has_value()) {
+            const auto& options = *request.portable_grass;
+            const auto grass_validation = render::validatePortableGrassRequest(
+                options.triangles, options.settings, options.build);
+            if (!grass_validation.accepted()) {
+                result.status =
+                    grass_validation.status ==
+                            render::PortableGrassStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    grass_validation.code,
+                    "Portable grass preparation rejected the supplied source geometry"};
+                return result;
+            }
+            if (!validatePortableGrassFrameOptions(options.frame,
+                                                   result.diagnostic) ||
+                !validatePortableGrassAtlasPlan(options.atlas,
+                                                result.diagnostic)) {
+                result.status = WorkspaceViewportStatus::invalid;
                 return result;
             }
         }
@@ -3007,6 +3135,115 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             }
             resources.sampler = std::move(cloud_sampler.sampler);
             portable_clouds = std::move(resources);
+        }
+
+        std::optional<WorkspaceViewport::PortableGrassResources>
+            portable_grass;
+        if (request.portable_grass.has_value()) {
+            const auto& options = *request.portable_grass;
+            const auto layout = render::buildPortableGrassLayout(
+                options.triangles, options.settings, options.build);
+            if (layout.status != render::PortableGrassStatus::ready &&
+                layout.status != render::PortableGrassStatus::empty) {
+                result.status =
+                    layout.status == render::PortableGrassStatus::resource_limit
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    layout.code,
+                    "Portable grass preparation could not build the bounded layout"};
+                return result;
+            }
+
+            WorkspaceViewport::PortableGrassResources resources;
+            resources.frame = options.frame;
+            resources.start_time = std::chrono::steady_clock::now();
+            resources.vertex_count =
+                static_cast<std::uint32_t>(layout.vertices.size());
+            if (!layout.vertices.empty()) {
+                render::BufferDescription buffer_description;
+                buffer_description.size_bytes =
+                    layout.vertices.size() *
+                    render::portable_grass_vertex_stride_bytes;
+                buffer_description.usage = render::BufferUsage::vertex;
+                buffer_description.memory = render::BufferMemory::device_local;
+                buffer_description.mutability =
+                    render::BufferMutability::immutable;
+                auto buffer = device.create_buffer(
+                    buffer_description,
+                    std::as_bytes(
+                        std::span<const render::PortableGrassVertex>(
+                            layout.vertices)));
+                if (!buffer.ok()) {
+                    result.status =
+                        buffer.status == render::BufferStatus::allocation_failed
+                            ? WorkspaceViewportStatus::allocation_failed
+                            : buffer.status == render::BufferStatus::unsupported
+                                  ? WorkspaceViewportStatus::unsupported
+                                  : WorkspaceViewportStatus::invalid;
+                    result.diagnostic = std::move(buffer.diagnostic);
+                    return result;
+                }
+                if (buffer.buffer->backend() != device.info().backend) {
+                    result.status = WorkspaceViewportStatus::invalid;
+                    result.diagnostic = diagnostic(
+                        "workspace_viewport_portable_grass_buffer_backend_mismatch",
+                        "Portable grass vertex storage belongs to a different backend");
+                    return result;
+                }
+                resources.vertex_buffer = std::move(buffer.buffer);
+            }
+
+            const render::TextureUploadPlan atlas_uploads =
+                options.atlas->make_upload_plan();
+            auto atlas = device.create_texture(options.atlas->description,
+                                               atlas_uploads);
+            if (!atlas.ok()) {
+                result.status =
+                    atlas.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : atlas.status == render::TextureStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(atlas.diagnostic);
+                return result;
+            }
+            if (atlas.texture->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_grass_atlas_backend_mismatch",
+                    "The portable grass atlas belongs to a different backend");
+                return result;
+            }
+            resources.atlas = std::move(atlas.texture);
+
+            render::SamplerDescription sampler_description;
+            sampler_description.min_filter = render::SamplerFilter::linear;
+            sampler_description.mag_filter = render::SamplerFilter::linear;
+            sampler_description.mip_filter = render::SamplerFilter::linear;
+            sampler_description.address_u = render::SamplerAddressMode::repeat;
+            sampler_description.address_v = render::SamplerAddressMode::repeat;
+            sampler_description.address_w = render::SamplerAddressMode::repeat;
+            auto sampler = device.create_sampler(sampler_description);
+            if (!sampler.ok()) {
+                result.status =
+                    sampler.status == render::SamplerStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : sampler.status == render::SamplerStatus::unsupported
+                              ? WorkspaceViewportStatus::unsupported
+                              : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(sampler.diagnostic);
+                return result;
+            }
+            if (sampler.sampler->backend() != device.info().backend) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_portable_grass_sampler_backend_mismatch",
+                    "The portable grass sampler belongs to a different backend");
+                return result;
+            }
+            resources.sampler = std::move(sampler.sampler);
+            portable_grass = std::move(resources);
         }
 
         render::DepthAttachmentDescription depth_description;
@@ -3872,6 +4109,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(selected_mesh_color_buffer),
             std::move(shadow_maps), std::move(directional_shadows),
             std::move(portable_clouds),
+            std::move(portable_grass),
             std::move(reflection_capture),
             std::move(frame_catalog)));
         result.status = WorkspaceViewportStatus::ready;

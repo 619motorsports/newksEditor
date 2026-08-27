@@ -957,7 +957,7 @@ void suppresses_shadow_only_packets_from_color_submission() {
 void schedules_selected_and_view_axis_at_transparent_boundary() {
     Fixture value = fixture();
     value.packets[0].flags.selected = true;
-    value.packets[1].flags.transparent = true;
+    value.packets[1].flags.transparent = false;
     value.packets[1].flags.blend_enabled = true;
     value.second_pipeline.blend.enabled = true;
     value.second_pipeline.blend.source_color =
@@ -1012,7 +1012,7 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
         device, target, frame);
     require(drawn.ok() && device.nodes ==
                 std::vector<apex::scene::NodeId>({1U, 2U}),
-            "visible ordinary packets retain opaque then transparent order");
+            "visible ordinary packets retain opaque then blended order");
     require(device.selected_positions == std::vector<std::uint32_t>({1U}) &&
                 device.overlay_positions ==
                     std::vector<std::uint32_t>({
@@ -1022,7 +1022,7 @@ void schedules_selected_and_view_axis_at_transparent_boundary() {
                     std::vector<const Buffer*>({&scene_finished_buffer,
                                                 &overlay_buffer,
                                                 &late_overlay_buffer}),
-            "selected mesh, scene-finished lines, and view axis precede transparent geometry and late overlays");
+            "selected mesh, scene-finished lines, and view axis precede blended geometry and late overlays");
 
     const std::size_t batches_before_invalid = device.batch_calls;
     frame.packet_visibility = {};

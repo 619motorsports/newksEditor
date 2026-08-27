@@ -155,6 +155,27 @@ struct WorkspaceViewportPortableCloudOptions {
         textures{};
 };
 
+// The caller evaluates CSP mesh and material selection before preparation.
+// The viewport copies the generated expanded vertices and decoded atlas into
+// backend-owned resources. It does not retain the input spans or file paths.
+struct WorkspaceViewportPortableGrassFrameOptions {
+    bool visible = true;
+    float wetness = 0.0F;
+    std::array<float, 2U> wind_direction = {1.0F, 0.0F};
+    float wind_strength = 0.0F;
+    // Presence supplies deterministic playback time. Absence uses elapsed
+    // time since viewport preparation.
+    std::optional<float> elapsed_seconds;
+};
+
+struct WorkspaceViewportPortableGrassOptions {
+    std::span<const render::PortableGrassSourceTriangle> triangles{};
+    render::PortableGrassSettings settings{};
+    render::PortableGrassBuildOptions build{};
+    const render::DecodedTexturePlan* atlas = nullptr;
+    WorkspaceViewportPortableGrassFrameOptions frame{};
+};
+
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
     // Presence enables the portable HDR scene target and the source-evidenced
@@ -168,6 +189,7 @@ struct WorkspaceViewportPrepareRequest {
     // Draw the portable WebGL-aligned sky before retained scene geometry.
     bool sky_enabled = false;
     std::optional<WorkspaceViewportPortableCloudOptions> portable_clouds;
+    std::optional<WorkspaceViewportPortableGrassOptions> portable_grass;
     // Apply the recovered post-tone-map FXAA pass. This requires HDR tone
     // mapping and keeps the default LDR path unchanged.
     bool fxaa_enabled = false;
@@ -359,6 +381,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared selected-node world transform for an animated
     // frame. Supplying this without a prepared selection axis is invalid.
     std::optional<apex::scene::Matrix4> selection_axis_world;
+    // Override the prepared portable-grass weather and wind values. This is
+    // invalid when the viewport did not prepare portable grass.
+    std::optional<WorkspaceViewportPortableGrassFrameOptions> portable_grass;
     // Override the elapsed selection time for deterministic playback/tests.
     // When absent, the viewport uses time since its preparation completed.
     std::optional<std::uint32_t> selected_mesh_elapsed_ms;
@@ -548,6 +573,15 @@ private:
         std::chrono::steady_clock::time_point start_time{};
     };
 
+    struct PortableGrassResources {
+        WorkspaceViewportPortableGrassFrameOptions frame{};
+        std::unique_ptr<render::Buffer> vertex_buffer;
+        std::uint32_t vertex_count = 0U;
+        std::unique_ptr<render::Texture> atlas;
+        std::unique_ptr<render::Sampler> sampler;
+        std::chrono::steady_clock::time_point start_time{};
+    };
+
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
                                     const AiSplineUpdateRequest& request,
@@ -584,6 +618,7 @@ private:
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps,
         std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows,
         std::optional<PortableCloudResources> portable_clouds,
+        std::optional<PortableGrassResources> portable_grass,
         std::optional<PortableReflectionCaptureResources> reflection_capture,
         std::optional<FrameCatalog> frame_catalog);
 
@@ -617,6 +652,7 @@ private:
     std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps_;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows_;
     std::optional<PortableCloudResources> portable_clouds_;
+    std::optional<PortableGrassResources> portable_grass_;
     std::optional<PortableReflectionCaptureResources> reflection_capture_;
     std::optional<FrameCatalog> frame_catalog_;
 

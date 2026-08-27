@@ -144,6 +144,10 @@ struct StaticSceneFrameDescription {
     // replaces this record's camera with the current frame camera so the same
     // geometry participates in main and reflection-capture frames.
     std::optional<PortableCloudParameters> clouds;
+    // Optional retained expanded grass resources and frame values.
+    // draw_and_readback replaces this record's camera with the current frame
+    // camera, including each portable reflection-capture face.
+    std::optional<PortableGrassParameters> grass;
     DepthAttachment* depth_attachment = nullptr;
     bool load_color = false;
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};

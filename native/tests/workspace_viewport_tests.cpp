@@ -26,6 +26,8 @@ using namespace apex::render;
 using apex::app::WorkspaceViewportFrameRequest;
 using apex::app::WorkspaceViewportFrameStatus;
 using apex::app::WorkspaceViewportPortableCloudOptions;
+using apex::app::WorkspaceViewportPortableGrassFrameOptions;
+using apex::app::WorkspaceViewportPortableGrassOptions;
 using apex::app::WorkspaceViewportPrepareRequest;
 using apex::app::WorkspaceViewportStockVulkanSourceFrame;
 
@@ -258,6 +260,11 @@ public:
             cloud_parameters.push_back(*batch.clouds);
             cloud_target_subresources.push_back(batch.target_subresource);
         }
+        if (batch.grass.has_value()) {
+            events.push_back("grass");
+            grass_parameters.push_back(*batch.grass);
+            grass_target_subresources.push_back(batch.target_subresource);
+        }
         events.push_back("color");
         draw_targets.push_back(&texture);
         target_subresources.push_back(batch.target_subresource);
@@ -478,6 +485,8 @@ public:
     std::vector<TextureTargetSubresource> sky_target_subresources;
     std::vector<PortableCloudParameters> cloud_parameters;
     std::vector<TextureTargetSubresource> cloud_target_subresources;
+    std::vector<PortableGrassParameters> grass_parameters;
+    std::vector<TextureTargetSubresource> grass_target_subresources;
     std::shared_ptr<std::size_t> live_buffer_count =
         std::make_shared<std::size_t>(0U);
 
@@ -862,6 +871,35 @@ WorkspaceViewportPortableCloudOptions portable_cloud_options(
     options.cloud_cutoff = 0.7F;
     options.cloud_color = 1.0F;
     options.textures[0U] = &texture;
+    return options;
+}
+
+PortableGrassSourceTriangle portable_grass_triangle() {
+    PortableGrassSourceTriangle triangle;
+    triangle.vertices[0U].position = {0.0F, 0.0F, 0.0F};
+    triangle.vertices[1U].position = {0.0F, 0.0F, 2.0F};
+    triangle.vertices[2U].position = {2.0F, 0.0F, 0.0F};
+    triangle.source_id = 17U;
+    return triangle;
+}
+
+WorkspaceViewportPortableGrassOptions portable_grass_options(
+    const std::array<PortableGrassSourceTriangle, 1U>& triangles,
+    const DecodedTexturePlan& atlas) {
+    WorkspaceViewportPortableGrassOptions options;
+    options.triangles = triangles;
+    options.settings.density = 1.0F;
+    options.settings.atlas_columns = 1U;
+    options.settings.atlas_rows = 1U;
+    options.build.max_blades = 4U;
+    options.build.max_candidates = 4U;
+    options.build.declared_triangle_count = triangles.size();
+    options.build.seed = 29U;
+    options.atlas = &atlas;
+    options.frame.wetness = 0.25F;
+    options.frame.wind_direction = {1.0F, 0.0F};
+    options.frame.wind_strength = 0.5F;
+    options.frame.elapsed_seconds = 1.5F;
     return options;
 }
 
@@ -1730,6 +1768,269 @@ void rejects_malformed_portable_cloud_options_atomically() {
                 lighting_device.buffer_calls == 0U &&
                 lighting_device.texture_calls == 0U,
             "non-finite cloud lighting is rejected before GPU allocation");
+}
+
+void prepares_draws_and_toggles_portable_grass_with_retained_resources() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        const std::array triangles = {portable_grass_triangle()};
+        const auto atlas = portable_cloud_texture_plan();
+        auto request = request_for(value);
+        request.portable_grass = portable_grass_options(triangles, atlas);
+        const auto layout = buildPortableGrassLayout(
+            request.portable_grass->triangles,
+            request.portable_grass->settings,
+            request.portable_grass->build);
+        require(layout.ready(), "portable grass fixture builds drawable geometry");
+
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        if (!prepared.ok())
+            throw std::runtime_error("portable grass preparation failed: " +
+                                     prepared.diagnostic.code + ": " +
+                                     prepared.diagnostic.message);
+        const auto grass_buffer = std::find_if(
+            device.created_buffer_descriptions.begin(),
+            device.created_buffer_descriptions.end(), [&](const auto& description) {
+                return description.size_bytes ==
+                           layout.vertices.size() *
+                               portable_grass_vertex_stride_bytes &&
+                       description.usage == BufferUsage::vertex &&
+                       description.memory == BufferMemory::device_local &&
+                       description.mutability == BufferMutability::immutable;
+            });
+        require(grass_buffer != device.created_buffer_descriptions.end() &&
+                    !device.sampler_descriptions.empty() &&
+                    device.sampler_descriptions.back().min_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().mag_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().mip_filter ==
+                        SamplerFilter::linear &&
+                    device.sampler_descriptions.back().address_u ==
+                        SamplerAddressMode::repeat &&
+                    device.sampler_descriptions.back().address_v ==
+                        SamplerAddressMode::repeat,
+                "portable grass retains immutable geometry, decoded atlas, and linear repeat sampler");
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera = valid_shadow_camera(
+            0.5F, backend == Backend::Vulkan ? CameraClipSpace::vulkan
+                                              : CameraClipSpace::d3d12);
+        const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+        require(lighting.ok(), "portable grass lighting evaluates");
+        frame.frame_constants = lighting.frame_constants;
+        frame.portable_grass = WorkspaceViewportPortableGrassFrameOptions{
+            true, 0.75F, {0.0F, 1.0F}, 2.0F, 3.5F};
+        Diagnostic diagnostic;
+        require(prepared.viewport->drawAndPresent(device, target, frame,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.events == std::vector<std::string>(
+                        {"grass", "color", "present"}) &&
+                    device.grass_parameters.size() == 1U,
+                "portable grass reaches the batch before scene color and present");
+        const auto& grass = device.grass_parameters.front();
+        require(grass.vertex_buffer != nullptr && grass.atlas != nullptr &&
+                    grass.sampler != nullptr &&
+                    grass.vertex_count == layout.vertices.size() &&
+                    grass.camera.view_projection == frame.camera.view_projection &&
+                    grass.wetness == 0.75F &&
+                    grass.wind_direction == std::array<float, 2U>{0.0F, 1.0F} &&
+                    grass.wind_strength == 2.0F &&
+                    grass.elapsed_seconds == 3.5F &&
+                    grass.sun_color[0U] ==
+                        lighting.frame_constants.sun_color[0U] &&
+                    grass.fog_distance == lighting.frame_constants.fog[0U],
+                "portable grass forwards owned resources and current frame values");
+
+        const std::size_t draw_count = device.draw_calls;
+        const std::size_t event_count = device.events.size();
+        WorkspaceViewportFrameRequest hidden;
+        hidden.camera = frame.camera;
+        hidden.frame_constants = lighting.frame_constants;
+        hidden.portable_grass = WorkspaceViewportPortableGrassFrameOptions{};
+        hidden.portable_grass->visible = false;
+        require(prepared.viewport->drawAndPresent(device, target, hidden,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.draw_calls == draw_count + 1U &&
+                    device.grass_parameters.size() == 1U &&
+                    std::vector<std::string>(device.events.begin() +
+                                                 static_cast<std::ptrdiff_t>(event_count),
+                                             device.events.end()) ==
+                        std::vector<std::string>({"color", "present"}),
+                "a hidden portable grass frame is a resource-preserving no-op");
+
+        WorkspaceViewportFrameRequest missing_constants;
+        missing_constants.camera = frame.camera;
+        require(prepared.viewport->drawAndPresent(device, target,
+                                                  missing_constants,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code ==
+                        "workspace_viewport_portable_grass_constants_missing" &&
+                    device.draw_calls == draw_count + 1U,
+                "visible portable grass rejects missing frame constants before drawing");
+
+        WorkspaceViewportFrameRequest invalid_frame = frame;
+        invalid_frame.portable_grass->wind_strength =
+            std::numeric_limits<float>::infinity();
+        require(prepared.viewport->drawAndPresent(device, target, invalid_frame,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::invalid &&
+                    diagnostic.code == "portable_grass_lighting_invalid" &&
+                    device.draw_calls == draw_count + 1U,
+                "malformed portable grass frame overrides fail before drawing");
+    }
+}
+
+void captures_portable_grass_on_all_reflection_faces() {
+    auto value = fixture();
+    configure_multimap_reflection(value);
+    const std::array triangles = {portable_grass_triangle()};
+    const auto atlas = portable_cloud_texture_plan();
+    auto request = request_for(value);
+    request.multimap_reflection = true;
+    request.render.include_reflections = true;
+    request.render.explicit_reflection_root = 1U;
+    request.portable_reflection_capture =
+        apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
+    request.portable_grass = portable_grass_options(triangles, atlas);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "portable grass reflection preparation succeeds");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera(0.75F);
+    const auto lighting = apex::app::evaluateWorkspaceViewportLighting({});
+    require(lighting.ok(), "portable grass reflection lighting evaluates");
+    frame.frame_constants = lighting.frame_constants;
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.grass_parameters.size() == texture_cube_face_count + 1U,
+            "portable grass draws for each reflection face and the main view");
+    std::vector<std::string> expected_events;
+    for (std::size_t face = 0U; face < texture_cube_face_count; ++face)
+        expected_events.insert(expected_events.end(), {"grass", "color"});
+    expected_events.insert(expected_events.end(),
+                           {"mips", "grass", "color", "present"});
+    require(device.events == expected_events,
+            "portable grass reflection order remains grass then scene");
+    constexpr std::array faces = {
+        CubeFace::negative_x, CubeFace::positive_x, CubeFace::positive_y,
+        CubeFace::negative_y, CubeFace::positive_z, CubeFace::negative_z};
+    for (std::size_t face = 0U; face < device.grass_parameters.size(); ++face) {
+        require(device.grass_target_subresources[face].cube_face ==
+                    (face < texture_cube_face_count ? faces[face]
+                                                    : CubeFace::none),
+                "portable grass uses each reflection target face");
+        require(device.grass_parameters[face].elapsed_seconds == 1.5F,
+                "portable grass keeps one deterministic time across capture faces");
+    }
+    require(device.grass_parameters.front().camera.view_projection !=
+                frame.camera.view_projection &&
+                device.grass_parameters.back().camera.view_projection ==
+                    frame.camera.view_projection,
+            "static-scene execution replaces portable grass cameras for capture and main frames");
+}
+
+void rejects_malformed_portable_grass_options_atomically() {
+    auto value = fixture();
+    std::array triangles = {portable_grass_triangle()};
+    auto atlas = portable_cloud_texture_plan();
+    auto request = request_for(value);
+
+    auto options = portable_grass_options(triangles, atlas);
+    options.build.declared_triangle_count = 2U;
+    request.portable_grass = options;
+    FakeDevice truncated_device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        truncated_device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "grass_source_span_truncated" &&
+                truncated_device.buffer_calls == 0U &&
+                truncated_device.texture_calls == 0U &&
+                truncated_device.sampler_calls == 0U,
+            "truncated portable grass source is rejected before GPU allocation");
+
+    triangles[0U].vertices[1U].position[2U] =
+        std::numeric_limits<float>::quiet_NaN();
+    options = portable_grass_options(triangles, atlas);
+    request.portable_grass = options;
+    FakeDevice source_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        source_device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "grass_source_vertex_nonfinite" &&
+                source_device.buffer_calls == 0U &&
+                source_device.texture_calls == 0U,
+            "non-finite portable grass source is rejected before GPU allocation");
+
+    triangles = {portable_grass_triangle()};
+    options = portable_grass_options(triangles, atlas);
+    options.frame.wetness = std::numeric_limits<float>::infinity();
+    request.portable_grass = options;
+    FakeDevice frame_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        frame_device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "portable_grass_lighting_invalid" &&
+                frame_device.buffer_calls == 0U &&
+                frame_device.texture_calls == 0U,
+            "non-finite portable grass frame values are rejected before GPU allocation");
+
+    options = portable_grass_options(triangles, atlas);
+    options.atlas = nullptr;
+    request.portable_grass = options;
+    FakeDevice missing_atlas_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        missing_atlas_device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "workspace_viewport_portable_grass_atlas_missing" &&
+                missing_atlas_device.buffer_calls == 0U &&
+                missing_atlas_device.texture_calls == 0U,
+            "missing portable grass atlas is rejected before GPU allocation");
+
+    atlas.description.format = TextureFormat::r8_unorm;
+    atlas.levels[0U].pixels = {std::uint8_t{255U}};
+    options = portable_grass_options(triangles, atlas);
+    request.portable_grass = options;
+    FakeDevice format_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        format_device, value.document, request);
+    require(!prepared.ok() && prepared.diagnostic.code ==
+                "workspace_viewport_portable_grass_atlas_invalid" &&
+                format_device.buffer_calls == 0U &&
+                format_device.texture_calls == 0U,
+            "unsupported portable grass atlas format is rejected before GPU allocation");
+
+    auto unprepared_request = request_for(value);
+    FakeDevice unprepared_device;
+    prepared = apex::app::prepareWorkspaceViewport(
+        unprepared_device, value.document, unprepared_request);
+    require(prepared.ok(), "viewport without portable grass prepares");
+    FakeTarget target(unprepared_request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    frame.portable_grass = WorkspaceViewportPortableGrassFrameOptions{};
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(unprepared_device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_portable_grass_unprepared" &&
+                unprepared_device.draw_calls == 0U,
+            "portable grass frame overrides require retained prepared resources");
 }
 
 void draws_explicit_multimap_reflection_cube_outside_model_textures() {
@@ -7266,6 +7567,9 @@ int main() {
         prepares_and_draws_portable_clouds_with_retained_resources();
         captures_portable_clouds_on_all_reflection_faces();
         rejects_malformed_portable_cloud_options_atomically();
+        prepares_draws_and_toggles_portable_grass_with_retained_resources();
+        captures_portable_grass_on_all_reflection_faces();
+        rejects_malformed_portable_grass_options_atomically();
         draws_explicit_multimap_reflection_cube_outside_model_textures();
         captures_and_publishes_six_portable_reflection_faces_atomically();
         rejects_invalid_portable_reflection_capture_options_before_allocation();
