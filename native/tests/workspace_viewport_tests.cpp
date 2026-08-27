@@ -6589,7 +6589,7 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
 
     request.directional_shadows->builtin_source =
         BuiltinDirectionalShadowSourceSelector::
-            opaque_static_and_cpu_skinned;
+            all_supported;
     FakeDevice builtin_device;
     auto builtin = apex::app::prepareWorkspaceViewport(
         builtin_device, value.document, request);
@@ -7749,7 +7749,7 @@ void rejects_invalid_inputs() {
         apex::app::WorkspaceViewportDirectionalShadowOptions{};
     request.directional_shadows->builtin_source =
         BuiltinDirectionalShadowSourceSelector::
-            opaque_static_and_cpu_skinned;
+            all_supported;
     request.limits.material.scene.max_total_shader_bytes =
         material_shader_bytes;
     auto rejected_shadow_budget = apex::app::prepareWorkspaceViewport(

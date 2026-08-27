@@ -2615,7 +2615,7 @@ int run_window(int argc, char** argv) {
              has_d3d12_native_package(workspace_options))) {
             request.directional_shadows->builtin_source =
                 apex::render::BuiltinDirectionalShadowSourceSelector::
-                    opaque_static_and_cpu_skinned;
+                    all_supported;
         }
         if (request.directional_shadows.has_value()) {
             request.directional_shadows->maps.lighting.scene_radius = std::max(

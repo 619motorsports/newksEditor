@@ -1,6 +1,7 @@
 #include "apex/core/sha256.hpp"
 #include "apex/render/directional_shadow_source.hpp"
 
+#include "../src/render/generated/directional_shadow_alpha_source_artifacts.hpp"
 #include "../src/render/generated/directional_shadow_source_artifacts.hpp"
 
 #include <cstdint>
@@ -40,7 +41,9 @@ void verify_program_contract(Backend backend, DirectionalShadowSourceRole role) 
                 DirectionalShadowSourceStatus::ready,
             "built-in directional-shadow program passes strict validation");
     const bool skinned = role == DirectionalShadowSourceRole::cpu_skinned;
-    require(program.shaders.size() == 1U && program.resources.empty() &&
+    const bool alpha = role == DirectionalShadowSourceRole::alpha_tested_static;
+    require(program.shaders.size() == (alpha ? 2U : 1U) &&
+                program.resources.size() == (alpha ? 3U : 0U) &&
                 program.vertex_layout.stride == (skinned ? 76U : 44U) &&
                 program.targets.colors.empty() && program.targets.has_depth &&
                 program.targets.depth.format == PipelineRenderTargetFormat::depth32_float &&
@@ -68,6 +71,23 @@ void verify_program_contract(Backend backend, DirectionalShadowSourceRole role) 
     require(validate_directional_shadow_source_program(mutated, backend, role) ==
                 DirectionalShadowSourceStatus::vertex_layout_mismatch,
             "directional-shadow roles reject the other retained stream");
+    if (alpha) {
+        mutated = program;
+        mutated.shaders[1U].bytes.pop_back();
+        require(validate_directional_shadow_source_program(mutated, backend, role) ==
+                    DirectionalShadowSourceStatus::shader_identity_mismatch,
+                "truncated alpha fragment artifact fails closed");
+        mutated = program;
+        mutated.shaders[1U].provenance = PipelineShaderProvenance::installed_native;
+        require(validate_directional_shadow_source_program(mutated, backend, role) ==
+                    DirectionalShadowSourceStatus::shader_provenance_mismatch,
+                "translated alpha fragment cannot be relabeled installed native");
+        mutated = program;
+        mutated.resources[1U].binding = 1U;
+        require(validate_directional_shadow_source_program(mutated, backend, role) ==
+                    DirectionalShadowSourceStatus::resource_contract_mismatch,
+                "alpha directional-shadow bindings fail closed");
+    }
 }
 
 void verify_source_and_artifact_identity() {
@@ -100,6 +120,49 @@ void verify_source_and_artifact_identity() {
                                                        DirectionalShadowSourceRole::cpu_skinned) ==
                     directional_shadow_source_vertex_dxbc_size,
             "preflight accounting matches directional-shadow artifact sizes");
+
+    const auto alpha_vertex_source =
+        read_file(root + "/src/render/shaders/directional_shadow_alpha_source.vert");
+    const auto alpha_fragment_source =
+        read_file(root + "/src/render/shaders/directional_shadow_alpha_source.frag");
+    const auto alpha_d3d12_source =
+        read_file(root + "/src/render/shaders/d3d12_directional_shadow_alpha_source.hlsl");
+    const auto alpha_vulkan = create_builtin_directional_shadow_source_program(
+        Backend::Vulkan, DirectionalShadowSourceRole::alpha_tested_static);
+    const auto alpha_d3d12 = create_builtin_directional_shadow_source_program(
+        Backend::D3D12, DirectionalShadowSourceRole::alpha_tested_static);
+    require(alpha_vulkan.ok() && alpha_d3d12.ok() &&
+                apex::core::sha256Hex(alpha_vertex_source) ==
+                    alpha_vulkan.evidence.vertex_source_sha256 &&
+                apex::core::sha256Hex(alpha_fragment_source) ==
+                    alpha_vulkan.evidence.fragment_source_sha256 &&
+                apex::core::sha256Hex(alpha_d3d12_source) ==
+                    alpha_vulkan.evidence.d3d12_source_sha256 &&
+                apex::core::sha256Hex(alpha_vulkan.program->shaders[0U].bytes) ==
+                    alpha_vulkan.evidence.vertex_artifact_sha256 &&
+                apex::core::sha256Hex(alpha_vulkan.program->shaders[1U].bytes) ==
+                    alpha_vulkan.evidence.fragment_artifact_sha256 &&
+                apex::core::sha256Hex(alpha_d3d12.program->shaders[0U].bytes) ==
+                    alpha_d3d12.evidence.vertex_artifact_sha256 &&
+                apex::core::sha256Hex(alpha_d3d12.program->shaders[1U].bytes) ==
+                    alpha_d3d12.evidence.fragment_artifact_sha256 &&
+                detect_pipeline_shader_format(alpha_vulkan.program->shaders[0U].bytes) ==
+                    PipelineShaderFormat::spirv &&
+                detect_pipeline_shader_format(alpha_vulkan.program->shaders[1U].bytes) ==
+                    PipelineShaderFormat::spirv &&
+                detect_pipeline_shader_format(alpha_d3d12.program->shaders[0U].bytes) ==
+                    PipelineShaderFormat::dxbc &&
+                detect_pipeline_shader_format(alpha_d3d12.program->shaders[1U].bytes) ==
+                    PipelineShaderFormat::dxbc &&
+                directional_shadow_source_shader_bytes(
+                    Backend::Vulkan, DirectionalShadowSourceRole::alpha_tested_static) ==
+                    directional_shadow_alpha_source_vertex_spirv_size +
+                        directional_shadow_alpha_source_fragment_spirv_size &&
+                directional_shadow_source_shader_bytes(
+                    Backend::D3D12, DirectionalShadowSourceRole::alpha_tested_static) ==
+                    directional_shadow_alpha_source_vertex_dxbc_size +
+                        directional_shadow_alpha_source_pixel_dxbc_size,
+            "alpha directional-shadow source and artifacts have not drifted");
 }
 
 void rejects_invalid_enum_values() {
@@ -119,6 +182,7 @@ int main() {
     try {
         for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
             verify_program_contract(backend, DirectionalShadowSourceRole::opaque_static);
+            verify_program_contract(backend, DirectionalShadowSourceRole::alpha_tested_static);
             verify_program_contract(backend, DirectionalShadowSourceRole::cpu_skinned);
         }
         verify_source_and_artifact_identity();

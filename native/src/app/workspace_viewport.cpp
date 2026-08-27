@@ -836,7 +836,7 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     const auto selector = request.directional_shadows->builtin_source;
     if (selector != render::BuiltinDirectionalShadowSourceSelector::disabled &&
         selector != render::BuiltinDirectionalShadowSourceSelector::
-                        opaque_static_and_cpu_skinned) {
+                        all_supported) {
         output_diagnostic = diagnostic(
             "workspace_viewport_shadow_source_selector_invalid",
             "The built-in directional-shadow source selector is invalid");
@@ -941,13 +941,15 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
 
     const bool use_builtin_source =
         selector == render::BuiltinDirectionalShadowSourceSelector::
-                        opaque_static_and_cpu_skinned;
+                        all_supported;
     if (use_builtin_source) {
         const std::array<std::pair<bool, render::DirectionalShadowSourceRole>,
-                         2U>
+                         3U>
             missing_roles = {{
                 {!request.directional_shadows->opaque_pipeline.has_value(),
                  render::DirectionalShadowSourceRole::opaque_static},
+                {!request.directional_shadows->alpha_static_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::alpha_tested_static},
                 {!request.directional_shadows->skinned_pipeline.has_value(),
                  render::DirectionalShadowSourceRole::cpu_skinned},
             }};
@@ -986,6 +988,8 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
             };
         if (!resolve_role(resolved->opaque_pipeline,
                           render::DirectionalShadowSourceRole::opaque_static) ||
+            !resolve_role(resolved->alpha_static_pipeline,
+                          render::DirectionalShadowSourceRole::alpha_tested_static) ||
             !resolve_role(resolved->skinned_pipeline,
                           render::DirectionalShadowSourceRole::cpu_skinned))
             return false;

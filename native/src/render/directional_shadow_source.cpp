@@ -1,5 +1,6 @@
 #include "apex/render/directional_shadow_source.hpp"
 
+#include "generated/directional_shadow_alpha_source_artifacts.hpp"
 #include "generated/directional_shadow_source_artifacts.hpp"
 
 #include <span>
@@ -9,7 +10,6 @@
 
 namespace apex::render {
 namespace {
-
 using namespace generated;
 
 constexpr std::string_view vertex_source_sha256 =
@@ -20,32 +20,69 @@ constexpr std::string_view vertex_spirv_sha256 =
     "89175a3e81e7d1d90ceabd7276d7d6e1c9a8e5500371ed70351216c2a8a36848";
 constexpr std::string_view vertex_dxbc_sha256 =
     "230657fe40f61e24ed83a125c88942b92590a2e1799aff47830d00f0992d6ccf";
+constexpr std::string_view alpha_vertex_source_sha256 =
+    "f95028a212bead84c2337b7092ee13c456507c69ec24998a6a3bc38b91e6fc87";
+constexpr std::string_view alpha_fragment_source_sha256 =
+    "ccadbe5e6417379209a9ff33e4e7bfed2e229f4eb087bc18b69d9c39842d0f67";
+constexpr std::string_view alpha_d3d12_source_sha256 =
+    "ab020acba277fde726a3bacd99731a751788eb2d2409e6ba1b770624895a0842";
+constexpr std::string_view alpha_vertex_spirv_sha256 =
+    "cc091c2da560fb69329ac2d8ee52e7caf7101fa1f4697d948b6dcf5f1f7a9e34";
+constexpr std::string_view alpha_fragment_spirv_sha256 =
+    "f7bf802436687f734b2a61b2ebd0af65a229c94ccc5b38e4dcf8daa21efbf5c6";
+constexpr std::string_view alpha_vertex_dxbc_sha256 =
+    "8cbfd56edde0203e04da9b392edc5fe99739a97fc437ad7eb1f6683f04e4fc7a";
+constexpr std::string_view alpha_pixel_dxbc_sha256 =
+    "5d78aaed5427c7d5d8c8d3ace4411ae10c945504cd809cdb808f02fcee308bd8";
 constexpr std::string_view evidence_document = "docs/evidence/directional-shadow-source.md";
 
 bool valid_role(DirectionalShadowSourceRole role) noexcept {
     return role == DirectionalShadowSourceRole::opaque_static ||
+           role == DirectionalShadowSourceRole::alpha_tested_static ||
            role == DirectionalShadowSourceRole::cpu_skinned;
 }
-
 bool supported_backend(Backend backend) noexcept {
     return backend == Backend::Vulkan || backend == Backend::D3D12;
 }
-
 std::vector<std::uint8_t> bytes(std::span<const std::uint8_t> source) {
     return {source.begin(), source.end()};
 }
 
-PipelineShaderModule module(Backend backend) {
+std::vector<PipelineShaderModule> modules(Backend backend, DirectionalShadowSourceRole role) {
+    const bool alpha = role == DirectionalShadowSourceRole::alpha_tested_static;
     if (backend == Backend::Vulkan) {
-        return {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
-                bytes(directional_shadow_source_vertex_spirv),
-                PipelineShaderProvenance::translated};
+        if (alpha)
+            return {{PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                     bytes(directional_shadow_alpha_source_vertex_spirv),
+                     PipelineShaderProvenance::translated},
+                    {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                     bytes(directional_shadow_alpha_source_fragment_spirv),
+                     PipelineShaderProvenance::translated}};
+        return {{PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                 bytes(directional_shadow_source_vertex_spirv),
+                 PipelineShaderProvenance::translated}};
     }
     if (backend == Backend::D3D12) {
-        return {PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
-                bytes(directional_shadow_source_vertex_dxbc), PipelineShaderProvenance::translated};
+        if (alpha)
+            return {{PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+                     bytes(directional_shadow_alpha_source_vertex_dxbc),
+                     PipelineShaderProvenance::translated},
+                    {PipelineShaderStage::fragment, PipelineShaderFormat::dxbc,
+                     bytes(directional_shadow_alpha_source_pixel_dxbc),
+                     PipelineShaderProvenance::translated}};
+        return {{PipelineShaderStage::vertex, PipelineShaderFormat::dxbc,
+                 bytes(directional_shadow_source_vertex_dxbc),
+                 PipelineShaderProvenance::translated}};
     }
     return {};
+}
+
+std::vector<PipelineResourceBinding> resources(DirectionalShadowSourceRole role) {
+    if (role != DirectionalShadowSourceRole::alpha_tested_static)
+        return {};
+    return {{PipelineResourceKind::sampled_texture, 0U, 0U, "txDiffuse"},
+            {PipelineResourceKind::sampler, 0U, 3U, "samLinearShadow"},
+            {PipelineResourceKind::uniform_buffer, 0U, 4U, "cbMaterial"}};
 }
 
 PipelineVertexLayout vertex_layout(DirectionalShadowSourceRole role) {
@@ -56,8 +93,7 @@ PipelineVertexLayout vertex_layout(DirectionalShadowSourceRole role) {
         {PipelineVertexSemantic::position, PipelineVertexAttributeFormat::float32x3, 0U, 0U},
         {PipelineVertexSemantic::normal, PipelineVertexAttributeFormat::float32x3, 1U, 12U},
         {PipelineVertexSemantic::texcoord0, PipelineVertexAttributeFormat::float32x2, 2U, 24U},
-        {PipelineVertexSemantic::tangent, PipelineVertexAttributeFormat::float32x3, 3U, 32U},
-    };
+        {PipelineVertexSemantic::tangent, PipelineVertexAttributeFormat::float32x3, 3U, 32U}};
     if (skinned) {
         layout.attributes.push_back({PipelineVertexSemantic::bone_weights,
                                      PipelineVertexAttributeFormat::float32x4, 4U, 44U});
@@ -68,14 +104,27 @@ PipelineVertexLayout vertex_layout(DirectionalShadowSourceRole role) {
 }
 
 bool exact_vertex_layout(const PipelineVertexLayout& actual, DirectionalShadowSourceRole role) {
-    const PipelineVertexLayout expected = vertex_layout(role);
+    const auto expected = vertex_layout(role);
     if (actual.stride != expected.stride || actual.attributes.size() != expected.attributes.size())
         return false;
     for (std::size_t index = 0U; index < expected.attributes.size(); ++index) {
-        const PipelineVertexAttribute& left = actual.attributes[index];
-        const PipelineVertexAttribute& right = expected.attributes[index];
+        const auto& left = actual.attributes[index];
+        const auto& right = expected.attributes[index];
         if (left.semantic != right.semantic || left.format != right.format ||
             left.location != right.location || left.offset != right.offset)
+            return false;
+    }
+    return true;
+}
+bool exact_resources(const PipelineProgram& program, DirectionalShadowSourceRole role) {
+    const auto expected = resources(role);
+    if (program.resources.size() != expected.size())
+        return false;
+    for (std::size_t index = 0U; index < expected.size(); ++index) {
+        const auto& left = program.resources[index];
+        const auto& right = expected[index];
+        if (left.kind != right.kind || left.set != right.set || left.binding != right.binding ||
+            left.name != right.name)
             return false;
     }
     return true;
@@ -83,26 +132,35 @@ bool exact_vertex_layout(const PipelineVertexLayout& actual, DirectionalShadowSo
 
 DirectionalShadowSourceEvidence source_evidence(Backend backend,
                                                 DirectionalShadowSourceRole role) noexcept {
-    return {backend,
-            role,
-            vertex_source_sha256,
-            d3d12_source_sha256,
-            backend == Backend::Vulkan ? vertex_spirv_sha256 : vertex_dxbc_sha256,
-            evidence_document};
+    const bool alpha = role == DirectionalShadowSourceRole::alpha_tested_static;
+    return {
+        backend,
+        role,
+        alpha ? alpha_vertex_source_sha256 : vertex_source_sha256,
+        alpha ? alpha_fragment_source_sha256 : std::string_view{},
+        alpha ? alpha_d3d12_source_sha256 : d3d12_source_sha256,
+        backend == Backend::Vulkan ? (alpha ? alpha_vertex_spirv_sha256 : vertex_spirv_sha256)
+                                   : (alpha ? alpha_vertex_dxbc_sha256 : vertex_dxbc_sha256),
+        alpha ? (backend == Backend::Vulkan ? alpha_fragment_spirv_sha256 : alpha_pixel_dxbc_sha256)
+              : std::string_view{},
+        evidence_document};
 }
-
 DepthOnlyIndexedPipelineRole depth_role(DirectionalShadowSourceRole role) noexcept {
-    return role == DirectionalShadowSourceRole::cpu_skinned
-               ? DepthOnlyIndexedPipelineRole::skinned
-               : DepthOnlyIndexedPipelineRole::opaque_static;
+    if (role == DirectionalShadowSourceRole::cpu_skinned)
+        return DepthOnlyIndexedPipelineRole::skinned;
+    if (role == DirectionalShadowSourceRole::alpha_tested_static)
+        return DepthOnlyIndexedPipelineRole::stock_alpha_tested_static;
+    return DepthOnlyIndexedPipelineRole::opaque_static;
 }
-
 PipelineProgram built_in_pipeline(Backend backend, DirectionalShadowSourceRole role) {
     PipelineProgram program;
-    program.name = role == DirectionalShadowSourceRole::cpu_skinned
-                       ? "directional-shadow-cpu-skinned-translated"
-                       : "directional-shadow-opaque-translated";
-    program.shaders.push_back(module(backend));
+    if (role == DirectionalShadowSourceRole::cpu_skinned)
+        program.name = "directional-shadow-cpu-skinned-translated";
+    else if (role == DirectionalShadowSourceRole::alpha_tested_static)
+        program.name = "directional-shadow-alpha-tested-translated";
+    else
+        program.name = "directional-shadow-opaque-translated";
+    program.shaders = modules(backend, role);
     program.vertex_layout = vertex_layout(role);
     program.targets.has_depth = true;
     program.targets.depth = {PipelineRenderTargetFormat::depth32_float, 1U};
@@ -113,9 +171,9 @@ PipelineProgram built_in_pipeline(Backend backend, DirectionalShadowSourceRole r
     program.depth.write_enabled = true;
     program.depth.compare = PipelineCompareOperation::less;
     program.transform_contract = PipelineTransformContract::draw_matrices;
+    program.resources = resources(role);
     return program;
 }
-
 } // namespace
 
 const char* directional_shadow_source_status_name(DirectionalShadowSourceStatus status) noexcept {
@@ -160,10 +218,15 @@ std::size_t directional_shadow_source_shader_bytes(Backend backend,
                                                    DirectionalShadowSourceRole role) noexcept {
     if (!valid_role(role))
         return 0U;
+    const bool alpha = role == DirectionalShadowSourceRole::alpha_tested_static;
     if (backend == Backend::Vulkan)
-        return directional_shadow_source_vertex_spirv_size;
+        return alpha ? directional_shadow_alpha_source_vertex_spirv_size +
+                           directional_shadow_alpha_source_fragment_spirv_size
+                     : directional_shadow_source_vertex_spirv_size;
     if (backend == Backend::D3D12)
-        return directional_shadow_source_vertex_dxbc_size;
+        return alpha ? directional_shadow_alpha_source_vertex_dxbc_size +
+                           directional_shadow_alpha_source_pixel_dxbc_size
+                     : directional_shadow_source_vertex_dxbc_size;
     return 0U;
 }
 
@@ -174,22 +237,27 @@ validate_directional_shadow_source_program(const PipelineProgram& program, Backe
         return DirectionalShadowSourceStatus::invalid_backend;
     if (!valid_role(role))
         return DirectionalShadowSourceStatus::invalid_role;
-    if (program.shaders.size() != 1U)
+    const bool alpha = role == DirectionalShadowSourceRole::alpha_tested_static;
+    if (program.shaders.size() != (alpha ? 2U : 1U))
         return DirectionalShadowSourceStatus::shader_count_mismatch;
-    const PipelineShaderModule& shader = program.shaders.front();
-    if (shader.stage != PipelineShaderStage::vertex)
+    if (program.shaders.front().stage != PipelineShaderStage::vertex ||
+        (alpha && program.shaders[1U].stage != PipelineShaderStage::fragment))
         return DirectionalShadowSourceStatus::shader_stage_mismatch;
-    const PipelineShaderFormat expected_format =
+    const auto expected_format =
         backend == Backend::Vulkan ? PipelineShaderFormat::spirv : PipelineShaderFormat::dxbc;
-    if (shader.format != expected_format)
-        return DirectionalShadowSourceStatus::shader_format_mismatch;
-    if (shader.provenance != PipelineShaderProvenance::translated)
-        return DirectionalShadowSourceStatus::shader_provenance_mismatch;
-    if (shader.bytes != module(backend).bytes)
-        return DirectionalShadowSourceStatus::shader_identity_mismatch;
+    const auto expected_modules = modules(backend, role);
+    for (std::size_t index = 0U; index < program.shaders.size(); ++index) {
+        const auto& shader = program.shaders[index];
+        if (shader.format != expected_format)
+            return DirectionalShadowSourceStatus::shader_format_mismatch;
+        if (shader.provenance != PipelineShaderProvenance::translated)
+            return DirectionalShadowSourceStatus::shader_provenance_mismatch;
+        if (shader.bytes != expected_modules[index].bytes)
+            return DirectionalShadowSourceStatus::shader_identity_mismatch;
+    }
     if (program.transform_contract != PipelineTransformContract::draw_matrices)
         return DirectionalShadowSourceStatus::transform_contract_mismatch;
-    if (!program.resources.empty())
+    if (!exact_resources(program, role))
         return DirectionalShadowSourceStatus::resource_contract_mismatch;
     if (!exact_vertex_layout(program.vertex_layout, role))
         return DirectionalShadowSourceStatus::vertex_layout_mismatch;
@@ -217,17 +285,15 @@ validate_directional_shadow_source_program(const PipelineProgram& program, Backe
 DirectionalShadowSourceProgramResult
 create_builtin_directional_shadow_source_program(Backend backend,
                                                  DirectionalShadowSourceRole role) {
-    const DirectionalShadowSourceEvidence evidence = source_evidence(backend, role);
+    const auto evidence = source_evidence(backend, role);
     if (!supported_backend(backend))
         return {DirectionalShadowSourceStatus::invalid_backend, std::nullopt, evidence};
     if (!valid_role(role))
         return {DirectionalShadowSourceStatus::invalid_role, std::nullopt, evidence};
     PipelineProgram program = built_in_pipeline(backend, role);
-    const DirectionalShadowSourceStatus status =
-        validate_directional_shadow_source_program(program, backend, role);
+    const auto status = validate_directional_shadow_source_program(program, backend, role);
     if (status != DirectionalShadowSourceStatus::ready)
         return {status, std::nullopt, evidence};
     return {status, std::move(program), evidence};
 }
-
 } // namespace apex::render

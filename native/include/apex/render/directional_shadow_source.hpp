@@ -14,12 +14,13 @@ namespace apex::render {
 // it does not claim the recovered native ksShadowGenSKIN b13 bone-buffer ABI.
 enum class DirectionalShadowSourceRole : std::uint8_t {
     opaque_static,
+    alpha_tested_static,
     cpu_skinned,
 };
 
 enum class BuiltinDirectionalShadowSourceSelector : std::uint8_t {
     disabled,
-    opaque_static_and_cpu_skinned,
+    all_supported,
 };
 
 enum class DirectionalShadowSourceStatus : std::uint8_t {
@@ -48,8 +49,10 @@ struct DirectionalShadowSourceEvidence {
     Backend backend = Backend::Vulkan;
     DirectionalShadowSourceRole role = DirectionalShadowSourceRole::opaque_static;
     std::string_view vertex_source_sha256;
+    std::string_view fragment_source_sha256;
     std::string_view d3d12_source_sha256;
     std::string_view vertex_artifact_sha256;
+    std::string_view fragment_artifact_sha256;
     std::string_view evidence_document;
 };
 
@@ -63,8 +66,9 @@ struct DirectionalShadowSourceProgramResult {
     }
 };
 
-// Returns the copied shader size for one role. The two role programs retain
-// independent byte vectors, even though they share one source artifact.
+// Returns the total copied shader size for one role. The opaque and CPU-skinned
+// roles retain independent byte vectors, even though they share one artifact.
+// The alpha-tested role includes both its vertex and fragment artifacts.
 [[nodiscard]] std::size_t
 directional_shadow_source_shader_bytes(Backend backend, DirectionalShadowSourceRole role) noexcept;
 
