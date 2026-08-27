@@ -26,9 +26,9 @@ enum class PipelineShaderFormat : std::uint8_t {
 };
 
 // Format identifies the bytes. Provenance identifies what a caller is
-// allowed to claim about those bytes. Source-equivalent SPIR-V, DXBC, or DXIL
-// is not installed native bytecode. Portable SPIR-V is not a stock-material
-// implementation.
+// allowed to claim about those bytes. Source-equivalent or translated SPIR-V,
+// DXBC, or DXIL is not installed native bytecode. Portable SPIR-V is not a
+// stock-material implementation.
 enum class PipelineShaderProvenance : std::uint8_t {
     unspecified,
     portable,

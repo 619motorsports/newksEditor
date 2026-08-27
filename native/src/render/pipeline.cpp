@@ -88,8 +88,11 @@ struct DiagnosticSink {
         return true;
     case PipelineShaderProvenance::portable:
     case PipelineShaderProvenance::native_abi_probe:
-    case PipelineShaderProvenance::translated:
         return format == PipelineShaderFormat::spirv;
+    case PipelineShaderProvenance::translated:
+        return format == PipelineShaderFormat::spirv ||
+               format == PipelineShaderFormat::dxbc ||
+               format == PipelineShaderFormat::dxil;
     case PipelineShaderProvenance::source_equivalent:
         return format == PipelineShaderFormat::spirv ||
                format == PipelineShaderFormat::dxbc ||

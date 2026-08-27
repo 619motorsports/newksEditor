@@ -2610,6 +2610,13 @@ int run_window(int argc, char** argv) {
             request.directional_shadows =
                 apex::app::WorkspaceViewportDirectionalShadowOptions{};
         }
+        if (request.directional_shadows.has_value() &&
+            (workspace_options.builtinVulkanKsPerPixel ||
+             has_d3d12_native_package(workspace_options))) {
+            request.directional_shadows->builtin_source =
+                apex::render::BuiltinDirectionalShadowSourceSelector::
+                    opaque_static_and_cpu_skinned;
+        }
         if (request.directional_shadows.has_value()) {
             request.directional_shadows->maps.lighting.scene_radius = std::max(
                 1.0F, active_document->scene.snapshot.bounds_radius);

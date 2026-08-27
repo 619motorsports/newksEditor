@@ -6,6 +6,7 @@
 #include "apex/render/device.hpp"
 #include "apex/render/decoded_dds_texture.hpp"
 #include "apex/render/directional_shadow.hpp"
+#include "apex/render/directional_shadow_source.hpp"
 #include "apex/render/external_texture_authority.hpp"
 #include "apex/render/selection_axis.hpp"
 #include "apex/render/skeleton_overlay.hpp"
@@ -56,14 +57,17 @@ struct WorkspaceViewportWorkspaceOptions {
     std::span<const std::string> driver_hidden_names{};
 };
 
-// Presence of this record enables the application shadow schedule. Programs
-// remain explicit because the viewport cannot infer a depth ABI from material
-// shader bytecode. Missing optional programs keep those caster branches staged.
+// Presence of this record enables the application shadow schedule. Explicit
+// programs remain authoritative. The bounded selector can fill only the
+// opaque-static and already-CPU-skinned portable roles; missing roles stay
+// staged when the selector is disabled.
 struct WorkspaceViewportDirectionalShadowOptions {
     render::DirectionalShadowMapRequest maps{};
     std::optional<render::PipelineProgram> opaque_pipeline;
     std::optional<render::PipelineProgram> alpha_static_pipeline;
     std::optional<render::PipelineProgram> skinned_pipeline;
+    render::BuiltinDirectionalShadowSourceSelector builtin_source =
+        render::BuiltinDirectionalShadowSourceSelector::disabled;
     render::DirectionalShadowReceiverConstantsLayout constants_layout =
         render::DirectionalShadowReceiverConstantsLayout::portable;
 };

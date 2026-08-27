@@ -826,11 +826,22 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     return WorkspaceViewportFrameStatus::execution_failed;
 }
 
-[[nodiscard]] bool validateShadowPrograms(
+[[nodiscard]] bool resolveAndValidateShadowPrograms(
     const WorkspaceViewportPrepareRequest& request,
     render::Backend backend,
+    std::optional<WorkspaceViewportDirectionalShadowOptions>& resolved,
     render::Diagnostic& output_diagnostic) {
+    resolved.reset();
     if (!request.directional_shadows.has_value()) return true;
+    const auto selector = request.directional_shadows->builtin_source;
+    if (selector != render::BuiltinDirectionalShadowSourceSelector::disabled &&
+        selector != render::BuiltinDirectionalShadowSourceSelector::
+                        opaque_static_and_cpu_skinned) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_shadow_source_selector_invalid",
+            "The built-in directional-shadow source selector is invalid");
+        return false;
+    }
     const auto layout = request.directional_shadows->constants_layout;
     if (layout != render::DirectionalShadowReceiverConstantsLayout::portable &&
         layout != render::DirectionalShadowReceiverConstantsLayout::stock_ks_shadow_maps) {
@@ -841,14 +852,18 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     }
 
     std::uint64_t total_shader_bytes = 0U;
+    const auto add_bytes = [&](std::uint64_t size) {
+        if (size > request.limits.material.scene.max_total_shader_bytes ||
+            total_shader_bytes >
+                request.limits.material.scene.max_total_shader_bytes - size)
+            return false;
+        total_shader_bytes += size;
+        return true;
+    };
     const auto add_modules = [&](std::span<const render::PipelineShaderModule> modules) {
         for (const auto& module : modules) {
             const std::uint64_t size = module.bytes.size();
-            if (size > request.limits.material.scene.max_total_shader_bytes ||
-                total_shader_bytes >
-                    request.limits.material.scene.max_total_shader_bytes - size)
-                return false;
-            total_shader_bytes += size;
+            if (!add_bytes(size)) return false;
         }
         return true;
     };
@@ -922,6 +937,58 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
                 "Material and shadow programs exceed the shared shader byte budget");
             return false;
         }
+    }
+
+    const bool use_builtin_source =
+        selector == render::BuiltinDirectionalShadowSourceSelector::
+                        opaque_static_and_cpu_skinned;
+    if (use_builtin_source) {
+        const std::array<std::pair<bool, render::DirectionalShadowSourceRole>,
+                         2U>
+            missing_roles = {{
+                {!request.directional_shadows->opaque_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::opaque_static},
+                {!request.directional_shadows->skinned_pipeline.has_value(),
+                 render::DirectionalShadowSourceRole::cpu_skinned},
+            }};
+        for (const auto& [missing, role] : missing_roles) {
+            if (!missing) continue;
+            const std::size_t size =
+                render::directional_shadow_source_shader_bytes(backend, role);
+            if (size == 0U || !add_bytes(size)) {
+                output_diagnostic = diagnostic(
+                    "workspace_viewport_shadow_shader_budget",
+                    "Material and shadow programs exceed the shared shader byte budget");
+                return false;
+            }
+        }
+    }
+
+    resolved = *request.directional_shadows;
+    if (use_builtin_source) {
+        const auto resolve_role =
+            [&](std::optional<render::PipelineProgram>& destination,
+                render::DirectionalShadowSourceRole role) {
+                if (destination.has_value()) return true;
+                auto built =
+                    render::create_builtin_directional_shadow_source_program(
+                        backend, role);
+                if (!built.ok()) {
+                    output_diagnostic = {
+                        "workspace_viewport_shadow_source_" +
+                            std::string(render::directional_shadow_source_status_name(
+                                built.status)),
+                        "The built-in directional-shadow source program did not pass its immutable contract"};
+                    return false;
+                }
+                destination = std::move(*built.program);
+                return true;
+            };
+        if (!resolve_role(resolved->opaque_pipeline,
+                          render::DirectionalShadowSourceRole::opaque_static) ||
+            !resolve_role(resolved->skinned_pipeline,
+                          render::DirectionalShadowSourceRole::cpu_skinned))
+            return false;
     }
     return true;
 }
@@ -2899,9 +2966,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "require directional shadows");
             return result;
         }
+        std::optional<WorkspaceViewportDirectionalShadowOptions>
+            resolved_directional_shadows;
         render::Diagnostic shadow_program_diagnostic;
-        if (!validateShadowPrograms(
-                request, device.info().backend, shadow_program_diagnostic)) {
+        if (!resolveAndValidateShadowPrograms(
+                request, device.info().backend, resolved_directional_shadows,
+                shadow_program_diagnostic)) {
             result.status = WorkspaceViewportStatus::invalid;
             result.diagnostic = std::move(shadow_program_diagnostic);
             return result;
@@ -3473,7 +3543,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             return result;
         }
 
-        auto directional_shadows = request.directional_shadows;
+        auto directional_shadows = std::move(resolved_directional_shadows);
         std::unique_ptr<render::DirectionalShadowMapResources> shadow_maps;
         if (directional_shadows.has_value()) {
             auto prepared_maps = render::prepare_directional_shadow_maps(

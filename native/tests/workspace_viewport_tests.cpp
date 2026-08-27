@@ -6586,6 +6586,21 @@ void schedules_directional_shadows_before_color_and_reuses_maps() {
                 staged_device.draw_calls == 1U &&
                 staged_device.present_calls == 1U,
             "staged caster branches remain labeled on a presented clear-map frame");
+
+    request.directional_shadows->builtin_source =
+        BuiltinDirectionalShadowSourceSelector::
+            opaque_static_and_cpu_skinned;
+    FakeDevice builtin_device;
+    auto builtin = apex::app::prepareWorkspaceViewport(
+        builtin_device, value.document, request);
+    FakeTarget builtin_target(request.presentation);
+    require(builtin.ok() && builtin.viewport->drawAndPresent(
+                builtin_device, builtin_target, frame, diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                diagnostic.code.empty() &&
+                builtin_device.depth_draw_counts ==
+                    std::vector<std::size_t>({1U, 1U, 1U}),
+            "opt-in built-in source resolves the missing opaque caster before map allocation");
 }
 
 void prepares_and_draws_builtin_vulkan_source_viewport() {
@@ -7711,6 +7726,40 @@ void rejects_invalid_inputs() {
             "shadow schedule without receiver modules fails before allocation");
 
     value.module_set.directional_shadow_receiver = true;
+    request = request_for(value);
+    request.directional_shadow_receiver = true;
+    apex::app::WorkspaceViewportDirectionalShadowOptions invalid_selector;
+    invalid_selector.builtin_source =
+        static_cast<BuiltinDirectionalShadowSourceSelector>(255U);
+    request.directional_shadows = invalid_selector;
+    auto rejected_shadow_selector = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!rejected_shadow_selector.ok() &&
+                rejected_shadow_selector.diagnostic.code ==
+                    "workspace_viewport_shadow_source_selector_invalid" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "invalid built-in shadow selector fails before allocation");
+
+    std::uint64_t material_shader_bytes = 0U;
+    for (const auto& set : request.shader_modules) {
+        for (const auto& module : set.modules)
+            material_shader_bytes += module.bytes.size();
+    }
+    request.directional_shadows =
+        apex::app::WorkspaceViewportDirectionalShadowOptions{};
+    request.directional_shadows->builtin_source =
+        BuiltinDirectionalShadowSourceSelector::
+            opaque_static_and_cpu_skinned;
+    request.limits.material.scene.max_total_shader_bytes =
+        material_shader_bytes;
+    auto rejected_shadow_budget = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!rejected_shadow_budget.ok() &&
+                rejected_shadow_budget.diagnostic.code ==
+                    "workspace_viewport_shadow_shader_budget" &&
+                device.texture_calls == 0U && device.depth_calls == 0U,
+            "built-in shadow artifacts are preflighted in the shared budget");
+
     request = request_for(value);
     request.directional_shadow_receiver = true;
     apex::app::WorkspaceViewportDirectionalShadowOptions invalid_shadows;
