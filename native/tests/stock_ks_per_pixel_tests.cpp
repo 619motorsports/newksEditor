@@ -2589,6 +2589,36 @@ void validates_complete_native_draw_bindings_before_execution() {
                     ? "sparse native and portable batch preserves either draw ordering"
                     : diagnostic.code.c_str());
     }
+
+    FakeConstantBuffer overlay_vertices(
+        Backend::D3D12,
+        {2U * sizeof(OverlayLineVertex), BufferUsage::vertex,
+         BufferMemory::host_visible, BufferMutability::immutable});
+    PipelineProgram overlay_pipeline = portable_pipeline;
+    overlay_pipeline.name = "portable-overlay-native-batch-state";
+    overlay_pipeline.vertex_layout.stride = sizeof(OverlayLineVertex);
+    overlay_pipeline.vertex_layout.attributes = {
+        {PipelineVertexSemantic::position,
+         PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+        {PipelineVertexSemantic::color,
+         PipelineVertexAttributeFormat::float32x3, 1U, 12U},
+    };
+    overlay_pipeline.raster.fill = PipelineFillMode::wireframe;
+    OverlayLineDrawRequest overlay_request;
+    overlay_request.pipeline = &overlay_pipeline;
+    overlay_request.vertex_buffer = &overlay_vertices;
+    overlay_request.vertex_count = 2U;
+    const std::array overlay_requests = {overlay_request};
+    const std::array native_scene_request = {request};
+    native_batch.draws = native_scene_request;
+    native_batch.overlay_draws = overlay_requests;
+    require(validate_indexed_static_mesh_batch_description(
+                target, native_batch, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            diagnostic.code.empty()
+                ? "native scene and portable overlay pass common preflight"
+                : diagnostic.code.c_str());
+    native_batch.overlay_draws = {};
     native_batch.draws = native_requests;
     native_batch.capture_rgba8 = false;
     require(validate_indexed_static_mesh_batch_description(

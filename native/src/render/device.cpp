@@ -3603,14 +3603,6 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
             "The native ksPerPixel batch exceeds its D3D12 sampler-heap draw limit"};
         return IndexedStaticMeshBatchStatus::unsupported;
     }
-    if (native_draw_count != 0U &&
-        (!description.overlay_draws.empty() ||
-         !description.selected_mesh_draws.empty())) {
-        diagnostic = {
-            "indexed_stock_native_batch_feature_unsupported",
-            "The native ksPerPixel batch does not support overlay or selected draws"};
-        return IndexedStaticMeshBatchStatus::unsupported;
-    }
     bool native_has_alpha_to_coverage = false;
     std::uint32_t previous_selected_position = 0U;
     bool has_previous_selected_position = false;
