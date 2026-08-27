@@ -2,6 +2,7 @@
 
 #include "apex/render/camera.hpp"
 #include "apex/render/portable_clouds.hpp"
+#include "apex/render/portable_grass.hpp"
 #include "apex/platform/native_surface.hpp"
 #include "apex/render/pipeline.hpp"
 #include "apex/render/stock_ks_per_pixel.hpp"
@@ -1098,6 +1099,40 @@ struct PortableCloudShaderConstants {
 static_assert(sizeof(PortableCloudShaderConstants) == 144U);
 static_assert(std::is_trivially_copyable_v<PortableCloudShaderConstants>);
 
+// Bounded, expanded PortableGrass geometry. The generator and shaders are a
+// source-labeled preview translation; they do not claim CSP compute-density,
+// surface-ownership, deformation-map, or wind-field parity.
+struct PortableGrassParameters {
+    CameraFrame camera{};
+    std::array<float, 3U> sun_direction = {0.0F, 1.0F, 0.0F};
+    std::array<float, 3U> sun_color = {1.0F, 1.0F, 1.0F};
+    std::array<float, 3U> ambient_color = {0.2F, 0.2F, 0.2F};
+    std::array<float, 3U> fog_color{};
+    float fog_distance = 12000.0F;
+    float fog_blend = 0.8F;
+    float wetness = 0.0F;
+    float elapsed_seconds = 0.0F;
+    std::array<float, 2U> wind_direction = {1.0F, 0.0F};
+    float wind_strength = 0.0F;
+    const Buffer* vertex_buffer = nullptr;
+    std::uint32_t vertex_count = 0U;
+    const Texture* atlas = nullptr;
+    const Sampler* sampler = nullptr;
+};
+
+struct PortableGrassShaderConstants {
+    apex::scene::Matrix4 view_projection{};
+    std::array<float, 4U> camera_position_fog{};
+    std::array<float, 4U> sun_direction_fog_blend{};
+    std::array<float, 4U> sun_color{};
+    std::array<float, 4U> ambient_color_wetness{};
+    std::array<float, 4U> fog_color_time{};
+    std::array<float, 4U> wind_direction_strength{};
+};
+
+static_assert(sizeof(PortableGrassShaderConstants) == 160U);
+static_assert(std::is_trivially_copyable_v<PortableGrassShaderConstants>);
+
 struct IndexedStaticMeshBatchDescription {
     std::span<const IndexedStaticMeshDrawRequest> draws{};
     DepthAttachment* depth_attachment = nullptr;
@@ -1126,6 +1161,10 @@ struct IndexedStaticMeshBatchDescription {
     // before every retained scene draw. Missing texture slots skip only runs
     // that name those slots, matching the production browser preview.
     std::optional<PortableCloudParameters> clouds;
+    // Optional alpha-tested expanded grass. Backends insert this after the
+    // opaque scene prefix and before the first transparent scene draw. It is
+    // also used by cube-capture batches through the same description.
+    std::optional<PortableGrassParameters> grass;
     // All draws target this one subresource. The first cube-target slice is
     // single-sample, mip zero, clear-only, and has no resolve target.
     TextureTargetSubresource target_subresource{};
@@ -1739,6 +1778,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] bool build_portable_cloud_shader_constants(
     const PortableCloudParameters& parameters,
     PortableCloudShaderConstants& constants, Diagnostic& diagnostic) noexcept;
+
+[[nodiscard]] bool build_portable_grass_shader_constants(
+    const PortableGrassParameters& parameters,
+    PortableGrassShaderConstants& constants, Diagnostic& diagnostic) noexcept;
 
 // Checks the five-level, two-image-per-level RGBA16F bloom chain before a
 // backend allocates it. Backends include any additional transient images in

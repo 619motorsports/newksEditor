@@ -208,9 +208,11 @@ add_library(apex_render STATIC
   src/render/pipeline.cpp
   src/render/picking.cpp
   src/render/portable_clouds.cpp
+  src/render/portable_grass.cpp
   src/render/render_plan.cpp
   src/render/selection_axis.cpp
   src/render/selected_mesh.cpp
+  src/render/skeleton_overlay.cpp
   src/render/static_mesh_upload.cpp
   src/render/skinned_mesh_upload.cpp
   src/render/static_scene.cpp
@@ -431,7 +433,10 @@ apex_add_native_test(hdr_tone_map_tests.cpp hdr_tone_map_tests ApexEditor::Rende
 apex_add_native_test(hdr_luminance_tests.cpp hdr_luminance_tests ApexEditor::Render)
 apex_add_native_test(portable_sky_tests.cpp portable_sky_tests ApexEditor::Render)
 apex_add_native_test(portable_cloud_tests.cpp portable_cloud_tests ApexEditor::Render)
+apex_add_native_test(portable_grass_tests.cpp portable_grass_tests ApexEditor::Render)
+apex_add_native_test(portable_grass_shader_source_drift_tests.cpp portable_grass_shader_source_drift_tests ApexEditor::Render)
 apex_add_native_test(portable_cloud_shader_source_drift_tests.cpp portable_cloud_shader_source_drift_tests ApexEditor::Render)
+apex_add_native_test(skeleton_overlay_tests.cpp skeleton_overlay_tests ApexEditor::Render)
 apex_add_native_test(fxaa_tests.cpp fxaa_tests ApexEditor::Render)
 apex_add_native_test(fxaa_shader_source_drift_tests.cpp fxaa_shader_source_drift_tests ApexEditor::Render)
 if(TARGET portable_sky_tests)
@@ -440,6 +445,10 @@ if(TARGET portable_sky_tests)
 endif()
 if(TARGET portable_cloud_shader_source_drift_tests)
   target_compile_definitions(portable_cloud_shader_source_drift_tests PRIVATE
+    APEX_NATIVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+if(TARGET portable_grass_shader_source_drift_tests)
+  target_compile_definitions(portable_grass_shader_source_drift_tests PRIVATE
     APEX_NATIVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 if(TARGET fxaa_shader_source_drift_tests)
@@ -557,7 +566,7 @@ if(TEST render_backend_tests)
   endif()
 endif()
 foreach(render_test IN ITEMS authoring_grid_tests camera_tests bmp_texture_tests csp_node_state_tests damage_preview_tests external_texture_authority_tests fbx_render_adapter_tests draw_packet_tests frame_plan_tests indexed_draw_tests selection_axis_tests selected_mesh_tests view_axis_tests static_mesh_upload_tests skinned_mesh_upload_tests static_scene_tests stock_material_execution_tests stock_scene_execution_tests stock_scene_d3d12_directional_shadow_tests workspace_ai_spline_tests workspace_real_fixture_tests workspace_shadow_programs_tests workspace_track_camera_tests workspace_viewport_tests lighting_tests material_binding_tests
-                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_multimap_reflection_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests texture_cube_backend_tests indexed_multimap_reflection_source_drift_tests d3d12_texture_mip_shader_source_drift_tests hdr_tone_map_shader_source_drift_tests hdr_bloom_shader_source_drift_tests hdr_tone_map_tests hdr_luminance_tests portable_sky_tests portable_cloud_tests portable_cloud_shader_source_drift_tests fxaa_tests fxaa_shader_source_drift_tests)
+                             material_profile_tests pipeline_tests render_plan_tests stock_ks_per_pixel_tests stock_multimap_reflection_tests stock_ks_per_pixel_vulkan_source_tests stock_ks_per_pixel_vulkan_source_drift_tests stock_ks_per_pixel_vulkan_abi_tests stock_ks_per_pixel_vulkan_runtime_tests stock_ks_per_pixel_d3d12_tests texture_upload_tests texture_cube_backend_tests indexed_multimap_reflection_source_drift_tests d3d12_texture_mip_shader_source_drift_tests hdr_tone_map_shader_source_drift_tests hdr_bloom_shader_source_drift_tests hdr_tone_map_tests hdr_luminance_tests portable_sky_tests portable_cloud_tests portable_grass_tests portable_grass_shader_source_drift_tests portable_cloud_shader_source_drift_tests skeleton_overlay_tests fxaa_tests fxaa_shader_source_drift_tests)
   if(TEST ${render_test})
     set_tests_properties(${render_test} PROPERTIES LABELS "unit;render")
   endif()

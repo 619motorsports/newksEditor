@@ -1212,6 +1212,143 @@ bool build_portable_cloud_shader_constants(
     return true;
 }
 
+bool build_portable_grass_shader_constants(
+    const PortableGrassParameters& parameters,
+    PortableGrassShaderConstants& constants, Diagnostic& diagnostic) noexcept {
+    constexpr float maximum_color_component = 64000.0F;
+    const auto finite = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](const float value) {
+            return std::isfinite(value);
+        });
+    };
+    const auto bounded_color = [&](const std::array<float, 3U>& values) {
+        return finite(values) &&
+               std::all_of(values.begin(), values.end(), [&](const float value) {
+                   return value >= 0.0F && value <= maximum_color_component;
+               });
+    };
+    const auto normalize_direction = [](const std::array<float, 3U>& value,
+                                        std::array<float, 3U>& output) {
+        double length_squared = 0.0;
+        for (const float component : value)
+            length_squared += static_cast<double>(component) * component;
+        if (!(length_squared > 1.0e-16) || !std::isfinite(length_squared))
+            return false;
+        const double inverse_length = 1.0 / std::sqrt(length_squared);
+        for (std::size_t index = 0U; index < output.size(); ++index) {
+            const double normalized = value[index] * inverse_length;
+            if (!std::isfinite(normalized))
+                return false;
+            output[index] = static_cast<float>(normalized);
+        }
+        return true;
+    };
+    if (!finite(parameters.camera.view_projection) ||
+        !finite(parameters.camera.position)) {
+        diagnostic = {"portable_grass_camera_invalid",
+                      "Portable grass camera values must be finite"};
+        return false;
+    }
+    if (!finite(parameters.sun_direction) ||
+        !bounded_color(parameters.sun_color) ||
+        !bounded_color(parameters.ambient_color) ||
+        !bounded_color(parameters.fog_color) ||
+        !std::isfinite(parameters.fog_distance) ||
+        !std::isfinite(parameters.fog_blend) ||
+        !std::isfinite(parameters.wetness) ||
+        !std::isfinite(parameters.elapsed_seconds) ||
+        !finite(parameters.wind_direction) ||
+        !std::isfinite(parameters.wind_strength) ||
+        parameters.fog_distance < 0.0F || parameters.fog_distance > 1.0e9F ||
+        parameters.fog_blend < 0.0F || parameters.fog_blend > 1.0F ||
+        parameters.wetness < -1.0F || parameters.wetness > 1.0F ||
+        parameters.elapsed_seconds < 0.0F ||
+        parameters.elapsed_seconds > 1.0e9F ||
+        parameters.wind_strength < 0.0F || parameters.wind_strength > 1000.0F) {
+        diagnostic = {"portable_grass_lighting_invalid",
+                      "Portable grass lighting, fog, wetness, time, and wind values must be finite and bounded"};
+        return false;
+    }
+    std::array<float, 3U> sun_direction{};
+    if (!normalize_direction(parameters.sun_direction, sun_direction)) {
+        diagnostic = {"portable_grass_sun_direction_invalid",
+                      "Portable grass requires a finite nonzero sun direction"};
+        return false;
+    }
+    const float wind_length = std::hypot(parameters.wind_direction[0U],
+                                         parameters.wind_direction[1U]);
+    if (parameters.wind_strength > 0.0F &&
+        (!(wind_length > 1.0e-8F) || !std::isfinite(wind_length))) {
+        diagnostic = {"portable_grass_wind_direction_invalid",
+                      "Active portable grass wind requires a finite nonzero horizontal direction"};
+        return false;
+    }
+    if (parameters.vertex_count > portable_grass_max_vertex_count ||
+        parameters.vertex_count % portable_grass_vertices_per_blade != 0U) {
+        diagnostic = {"portable_grass_vertex_count_invalid",
+                      "Portable grass requires bounded six-vertex blades"};
+        return false;
+    }
+    if (parameters.vertex_count != 0U) {
+        if (parameters.vertex_buffer == nullptr || parameters.atlas == nullptr ||
+            parameters.sampler == nullptr) {
+            diagnostic = {"portable_grass_resource_missing",
+                          "Drawable portable grass requires a vertex buffer, atlas, and sampler"};
+            return false;
+        }
+        const BufferDescription& buffer =
+            parameters.vertex_buffer->info().description;
+        const std::uint64_t required_bytes =
+            static_cast<std::uint64_t>(parameters.vertex_count) *
+            portable_grass_vertex_stride_bytes;
+        if (!any(buffer.usage & BufferUsage::vertex) ||
+            required_bytes > buffer.size_bytes) {
+            diagnostic = {"portable_grass_vertex_buffer_invalid",
+                          "Portable grass requires a sufficiently large vertex buffer"};
+            return false;
+        }
+        const TextureDescription& atlas = parameters.atlas->info().description;
+        if (atlas.shape != TextureShape::texture_2d || atlas.array_layers != 1U ||
+            atlas.samples != 1U ||
+            static_cast<std::uint32_t>(atlas.usage & TextureUsage::sampled) == 0U) {
+            diagnostic = {"portable_grass_atlas_invalid",
+                          "Portable grass requires a single-sample sampled 2D atlas"};
+            return false;
+        }
+        if (!portable_cloud_sampled_color_format(atlas.format)) {
+            diagnostic = {"portable_grass_atlas_format_unsupported",
+                          "Portable grass requires an RGBA8 or BGRA8 UNORM or sRGB atlas"};
+            return false;
+        }
+    }
+
+    constants = {};
+    constants.view_projection = parameters.camera.view_projection;
+    std::copy(parameters.camera.position.begin(), parameters.camera.position.end(),
+              constants.camera_position_fog.begin());
+    constants.camera_position_fog[3U] = parameters.fog_distance;
+    std::copy(sun_direction.begin(), sun_direction.end(),
+              constants.sun_direction_fog_blend.begin());
+    constants.sun_direction_fog_blend[3U] = parameters.fog_blend;
+    std::copy(parameters.sun_color.begin(), parameters.sun_color.end(),
+              constants.sun_color.begin());
+    std::copy(parameters.ambient_color.begin(), parameters.ambient_color.end(),
+              constants.ambient_color_wetness.begin());
+    constants.ambient_color_wetness[3U] = parameters.wetness;
+    std::copy(parameters.fog_color.begin(), parameters.fog_color.end(),
+              constants.fog_color_time.begin());
+    constants.fog_color_time[3U] = parameters.elapsed_seconds;
+    if (wind_length > 1.0e-8F && std::isfinite(wind_length)) {
+        constants.wind_direction_strength[0U] =
+            parameters.wind_direction[0U] / wind_length;
+        constants.wind_direction_strength[1U] =
+            parameters.wind_direction[1U] / wind_length;
+    }
+    constants.wind_direction_strength[2U] = parameters.wind_strength;
+    diagnostic = {};
+    return true;
+}
+
 bool validate_hdr_bloom_resource_budget(
     std::uint32_t width, std::uint32_t height,
     std::uint64_t additional_bytes, Diagnostic& diagnostic) noexcept {
@@ -4129,6 +4266,37 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         PortableCloudShaderConstants cloud_constants;
         if (!build_portable_cloud_shader_constants(
                 *description.clouds, cloud_constants, diagnostic))
+            return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (description.grass.has_value()) {
+        const CameraClipSpace expected_clip_space =
+            texture.backend() == Backend::Vulkan ? CameraClipSpace::vulkan
+                                                  : CameraClipSpace::d3d12;
+        if (description.grass->camera.clip_space != expected_clip_space) {
+            diagnostic = {"portable_grass_clip_space_mismatch",
+                          "The portable grass camera clip space must match the color-target backend"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (description.grass->atlas == &texture) {
+            diagnostic = {"portable_grass_atlas_target_alias",
+                          "The portable grass atlas must not alias the batch color target"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (description.resolve_target != nullptr &&
+            description.grass->atlas == description.resolve_target) {
+            diagnostic = {"portable_grass_atlas_resolve_alias",
+                          "The portable grass atlas must not alias the batch resolve target"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (description.grass->vertex_count != 0U &&
+            description.depth_attachment == nullptr) {
+            diagnostic = {"portable_grass_depth_attachment_missing",
+                          "Drawable portable grass requires a persistent depth attachment"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        PortableGrassShaderConstants grass_constants;
+        if (!build_portable_grass_shader_constants(
+                *description.grass, grass_constants, diagnostic))
             return IndexedStaticMeshBatchStatus::invalid_request;
     }
     if (target.shape == TextureShape::texture_cube && description.load_color) {

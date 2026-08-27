@@ -28,6 +28,7 @@
 #    include "generated/d3d12_hdr_tone_map_dxbc.hpp"
 #    include "generated/d3d12_fxaa_dxbc.hpp"
 #    include "generated/d3d12_portable_clouds_dxbc.hpp"
+#    include "generated/d3d12_portable_grass_dxbc.hpp"
 #    include "generated/d3d12_portable_sky_dxbc.hpp"
 #    include "generated/d3d12_texture_mip_dxbc.hpp"
 #endif
@@ -82,6 +83,12 @@ struct D3D12PortableSkyPipeline {
 };
 
 struct D3D12PortableCloudPipeline {
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT samples = 1U;
+    ComPtr<ID3D12PipelineState> pipeline;
+};
+
+struct D3D12PortableGrassPipeline {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     UINT samples = 1U;
     ComPtr<ID3D12PipelineState> pipeline;
@@ -186,6 +193,8 @@ struct D3D12Context {
     std::vector<D3D12PortableSkyPipeline> portable_sky_pipelines;
     ComPtr<ID3D12RootSignature> portable_cloud_root_signature;
     std::vector<D3D12PortableCloudPipeline> portable_cloud_pipelines;
+    ComPtr<ID3D12RootSignature> portable_grass_root_signature;
+    std::vector<D3D12PortableGrassPipeline> portable_grass_pipelines;
     void* native_window = nullptr;
     bool presentation_target_active = false;
     DeviceInfo info;
@@ -224,11 +233,21 @@ struct D3D12PortableCloudTextureResource {
     bool initialized = false;
 };
 
+using D3D12PortableGrassTextureResource = D3D12PortableCloudTextureResource;
+
 [[nodiscard]] bool inspect_d3d12_portable_cloud_texture(
     const Texture* requested, const D3D12Context* context,
     D3D12PortableCloudTextureResource& output,
     Diagnostic& diagnostic);
 [[nodiscard]] bool inspect_d3d12_portable_cloud_sampler(
+    const Sampler* requested, const D3D12Context* context,
+    D3D12_GPU_DESCRIPTOR_HANDLE& output,
+    Diagnostic& diagnostic);
+[[nodiscard]] bool inspect_d3d12_portable_grass_texture(
+    const Texture* requested, const D3D12Context* context,
+    D3D12PortableGrassTextureResource& output,
+    Diagnostic& diagnostic);
+[[nodiscard]] bool inspect_d3d12_portable_grass_sampler(
     const Sampler* requested, const D3D12Context* context,
     D3D12_GPU_DESCRIPTOR_HANDLE& output,
     Diagnostic& diagnostic);
@@ -3969,6 +3988,7 @@ struct D3D12IndexedBatchDraw {
     UINT64 alpha_material_offset = 0U;
     D3D12_GPU_DESCRIPTOR_HANDLE alpha_srv_gpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE alpha_sampler_gpu{};
+    bool transparent = false;
 };
 
 bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
@@ -5179,6 +5199,134 @@ bool draw_graphics_and_readback(const std::shared_ptr<D3D12Context>& context,
     return true;
 }
 
+[[nodiscard]] bool prepare_d3d12_portable_grass_pipeline(
+    const std::shared_ptr<D3D12Context>& context, DXGI_FORMAT target_format,
+    UINT sample_count, UINT sample_quality,
+    ID3D12PipelineState*& pipeline, Diagnostic& diagnostic) {
+    pipeline = nullptr;
+    if (context == nullptr || context->device == nullptr ||
+        target_format == DXGI_FORMAT_UNKNOWN ||
+        (sample_count != 1U && sample_count != 4U)) {
+        diagnostic = {"d3d12_portable_grass_pipeline_failed",
+                      "D3D12 portable grass received an invalid device, format, or sample count"};
+        return false;
+    }
+    if (context->portable_grass_root_signature == nullptr) {
+        D3D12_ROOT_PARAMETER parameters[3U]{};
+        parameters[0U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        parameters[0U].Descriptor.ShaderRegister = 0U;
+        parameters[0U].Descriptor.RegisterSpace = 0U;
+        parameters[0U].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_DESCRIPTOR_RANGE srv_range{};
+        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srv_range.NumDescriptors = 1U;
+        srv_range.BaseShaderRegister = 0U;
+        srv_range.RegisterSpace = 0U;
+        srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        parameters[1U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[1U].DescriptorTable.NumDescriptorRanges = 1U;
+        parameters[1U].DescriptorTable.pDescriptorRanges = &srv_range;
+        parameters[1U].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_DESCRIPTOR_RANGE sampler_range{};
+        sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        sampler_range.NumDescriptors = 1U;
+        sampler_range.BaseShaderRegister = 0U;
+        sampler_range.RegisterSpace = 0U;
+        sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        parameters[2U].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[2U].DescriptorTable.NumDescriptorRanges = 1U;
+        parameters[2U].DescriptorTable.pDescriptorRanges = &sampler_range;
+        parameters[2U].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        root_description.NumParameters = 3U;
+        root_description.pParameters = parameters;
+        root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> root_blob;
+        ComPtr<ID3DBlob> root_errors;
+        HRESULT result = D3D12SerializeRootSignature(
+            &root_description, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
+            &root_errors);
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "D3D12SerializeRootSignature(portable grass)", result);
+            diagnostic.code = "d3d12_portable_grass_pipeline_failed";
+            return false;
+        }
+        result = context->device->CreateRootSignature(
+            0U, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+            IID_PPV_ARGS(&context->portable_grass_root_signature));
+        if (FAILED(result)) {
+            diagnostic = hresult_error(
+                "ID3D12Device::CreateRootSignature(portable grass)", result);
+            diagnostic.code = "d3d12_portable_grass_pipeline_failed";
+            return false;
+        }
+    }
+    for (const D3D12PortableGrassPipeline& cached :
+         context->portable_grass_pipelines) {
+        if (cached.format == target_format && cached.samples == sample_count) {
+            pipeline = cached.pipeline.Get();
+            return true;
+        }
+    }
+    const D3D12_INPUT_ELEMENT_DESC input[] = {
+        {"POSITION", 0U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 0U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"NORMAL", 0U, DXGI_FORMAT_R32G32B32_FLOAT, 0U, 12U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 0U, DXGI_FORMAT_R32G32_FLOAT, 0U, 24U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"COLOR", 0U, DXGI_FORMAT_R32G32B32A32_FLOAT, 0U, 32U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 1U, DXGI_FORMAT_R32_FLOAT, 0U, 48U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U},
+        {"TEXCOORD", 2U, DXGI_FORMAT_R32_FLOAT, 0U, 52U,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0U}};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = context->portable_grass_root_signature.Get();
+    description.VS = {generated::d3d12_portable_grass_vertex_dxbc,
+                      generated::d3d12_portable_grass_vertex_dxbc_size};
+    description.PS = {generated::d3d12_portable_grass_pixel_dxbc,
+                      generated::d3d12_portable_grass_pixel_dxbc_size};
+    description.InputLayout = {input, static_cast<UINT>(std::size(input))};
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.FrontCounterClockwise = FALSE;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.DepthStencilState.DepthEnable = TRUE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    description.DepthStencilState.StencilEnable = FALSE;
+    description.BlendState.RenderTarget[0U].BlendEnable = FALSE;
+    description.BlendState.RenderTarget[0U].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    description.SampleMask = std::numeric_limits<UINT>::max();
+    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    description.NumRenderTargets = 1U;
+    description.RTVFormats[0U] = target_format;
+    description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    description.SampleDesc.Count = sample_count;
+    description.SampleDesc.Quality = sample_quality;
+    description.RasterizerState.MultisampleEnable = sample_count > 1U ? TRUE : FALSE;
+    description.BlendState.AlphaToCoverageEnable = sample_count == 4U ? TRUE : FALSE;
+    ComPtr<ID3D12PipelineState> created;
+    const HRESULT result = context->device->CreateGraphicsPipelineState(
+        &description, IID_PPV_ARGS(&created));
+    if (FAILED(result)) {
+        diagnostic = hresult_error(
+            "ID3D12Device::CreateGraphicsPipelineState(portable grass)", result);
+        diagnostic.code = "d3d12_portable_grass_pipeline_failed";
+        return false;
+    }
+    D3D12PortableGrassPipeline cached;
+    cached.format = target_format;
+    cached.samples = sample_count;
+    cached.pipeline = std::move(created);
+    pipeline = cached.pipeline.Get();
+    context->portable_grass_pipelines.push_back(std::move(cached));
+    return true;
+}
+
 bool draw_indexed_static_mesh_batch_and_readback(
     const std::shared_ptr<D3D12Context>& context,
     ID3D12Resource* destination,
@@ -6324,6 +6472,134 @@ bool draw_indexed_static_mesh_batch_and_readback(
             }
         }
     }
+    PortableGrassShaderConstants grass_constants{};
+    ID3D12PipelineState* grass_pipeline = nullptr;
+    ComPtr<ID3D12DescriptorHeap> grass_srv_heap;
+    ComPtr<ID3D12Resource> grass_constant_buffer;
+    D3D12PortableGrassTextureResource grass_texture;
+    ID3D12Resource* grass_vertex_buffer = nullptr;
+    UINT grass_vertex_count = 0U;
+    D3D12_GPU_DESCRIPTOR_HANDLE grass_sampler{};
+    if (batch.grass.has_value()) {
+        const PortableGrassParameters& grass = *batch.grass;
+        if (!build_portable_grass_shader_constants(grass, grass_constants,
+                                                   diagnostic))
+            return false;
+        grass_vertex_count = grass.vertex_count;
+        if (grass_vertex_count != 0U) {
+            if (!use_depth) {
+                diagnostic = {"portable_grass_depth_attachment_missing",
+                              "D3D12 portable grass requires a depth attachment"};
+                return false;
+            }
+            const auto* vertex_buffer = dynamic_cast<const D3D12Buffer*>(
+                grass.vertex_buffer);
+            if (vertex_buffer == nullptr ||
+                vertex_buffer->context() != context.get() ||
+                vertex_buffer->resource() == nullptr ||
+                !inspect_d3d12_portable_grass_texture(
+                    grass.atlas, context.get(), grass_texture, diagnostic) ||
+                !inspect_d3d12_portable_grass_sampler(
+                    grass.sampler, context.get(), grass_sampler, diagnostic)) {
+                if (!diagnostic.code.empty()) return false;
+                diagnostic = {"portable_grass_context_mismatch",
+                              "Portable grass resources must belong to the D3D12 device"};
+                return false;
+            }
+            grass_vertex_buffer = vertex_buffer->resource();
+            if ((static_cast<UINT>(vertex_buffer->state()) &
+                 static_cast<UINT>(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER)) == 0U) {
+                diagnostic = {"portable_grass_vertex_state_invalid",
+                              "Portable grass vertices must be in D3D12 vertex-buffer state"};
+                return false;
+            }
+            const D3D12_RESOURCE_DESC vertex_description =
+                grass_vertex_buffer->GetDesc();
+            const UINT64 bytes = static_cast<UINT64>(grass_vertex_count) *
+                                 portable_grass_vertex_stride_bytes;
+            if (bytes == 0U || bytes > vertex_description.Width ||
+                bytes > std::numeric_limits<UINT>::max() ||
+                grass_vertex_buffer->GetGPUVirtualAddress() == 0U) {
+                diagnostic = {"portable_grass_vertex_range_invalid",
+                              "Portable grass vertices exceed the D3D12 vertex buffer"};
+                return false;
+            }
+            if (!grass_texture.initialized || grass_texture.resource == nullptr ||
+                grass_texture.format == DXGI_FORMAT_UNKNOWN ||
+                grass_texture.description.shape != TextureShape::texture_2d ||
+                grass_texture.description.samples != 1U ||
+                grass_texture.description.array_layers != 1U ||
+                grass_texture.description.width == 0U ||
+                grass_texture.description.height == 0U ||
+                grass_texture.description.mip_levels == 0U) {
+                diagnostic = {"portable_grass_texture_invalid",
+                              "Portable grass atlas must be an initialized single-sample 2D image"};
+                return false;
+            }
+            if (grass_texture.resource == destination ||
+                (use_depth && grass_texture.resource == depth_attachment->resource())) {
+                diagnostic = {"portable_grass_texture_alias_invalid",
+                              "Portable grass atlas cannot alias a batch attachment"};
+                return false;
+            }
+            if (!prepare_d3d12_portable_grass_pipeline(
+                    context, dxgi_texture_format(description.format),
+                    description.samples, target_sample_quality, grass_pipeline,
+                    diagnostic))
+                return false;
+
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC constant_description{};
+            constant_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            constant_description.Width = 256U;
+            constant_description.Height = 1U;
+            constant_description.DepthOrArraySize = 1U;
+            constant_description.MipLevels = 1U;
+            constant_description.SampleDesc.Count = 1U;
+            constant_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            result = context->device->CreateCommittedResource(
+                &upload_heap, D3D12_HEAP_FLAG_NONE, &constant_description,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&grass_constant_buffer));
+            if (FAILED(result)) {
+                diagnostic = hresult_error(
+                    "CreateCommittedResource(portable grass constants)", result);
+                diagnostic.code = "portable_grass_execution_failed";
+                return false;
+            }
+            void* mapped = nullptr;
+            result = grass_constant_buffer->Map(0U, nullptr, &mapped);
+            if (FAILED(result)) {
+                diagnostic = hresult_error("Map(portable grass constants)", result);
+                diagnostic.code = "portable_grass_execution_failed";
+                return false;
+            }
+            std::memcpy(mapped, &grass_constants, sizeof(grass_constants));
+            grass_constant_buffer->Unmap(0U, nullptr);
+
+            D3D12_DESCRIPTOR_HEAP_DESC srv_description{};
+            srv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            srv_description.NumDescriptors = 1U;
+            srv_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            result = context->device->CreateDescriptorHeap(
+                &srv_description, IID_PPV_ARGS(&grass_srv_heap));
+            if (FAILED(result)) {
+                diagnostic = hresult_error(
+                    "CreateDescriptorHeap(portable grass SRV)", result);
+                diagnostic.code = "portable_grass_execution_failed";
+                return false;
+            }
+            if (!create_d3d12_batch_srv(
+                    context->device.Get(), grass_texture.resource,
+                    grass_texture.format,
+                    grass_srv_heap->GetCPUDescriptorHandleForHeapStart())) {
+                diagnostic = {"portable_grass_texture_view_invalid",
+                              "Portable grass atlas SRV creation requires a 2D texture"};
+                return false;
+            }
+        }
+    }
     ComPtr<ID3D12CommandAllocator> allocator;
     result = context->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
     if (FAILED(result)) {
@@ -6392,6 +6668,38 @@ bool draw_indexed_static_mesh_batch_and_readback(
             }
         }
     }
+    bool grass_atlas_already_sampled = false;
+    if (grass_pipeline != nullptr) {
+        for (std::size_t shadow_index = 0U;
+             shadow_index < shadow_attachments.size(); ++shadow_index) {
+            if (shadow_attachments[shadow_index]->resource() != grass_texture.resource)
+                continue;
+            if (shadow_states[shadow_index] != grass_texture.original_state) {
+                diagnostic = {"portable_grass_texture_alias_invalid",
+                              "Portable grass atlas state tracking conflicts with a shadow attachment"};
+                return false;
+            }
+            grass_atlas_already_sampled = true;
+        }
+        for (const NativeSampledResource& sampled : native_sampled_resources) {
+            if (sampled.resource != grass_texture.resource) continue;
+            if (sampled.before != grass_texture.original_state) {
+                diagnostic = {"portable_grass_texture_alias_invalid",
+                              "Portable grass atlas state tracking conflicts with a native sampled resource"};
+                return false;
+            }
+            grass_atlas_already_sampled = true;
+        }
+        for (const auto* cloud_state : cloud_texture_states) {
+            if (cloud_state->resource != grass_texture.resource) continue;
+            if (cloud_state->original_state != grass_texture.original_state) {
+                diagnostic = {"portable_grass_texture_alias_invalid",
+                              "Portable grass atlas state tracking conflicts with a cloud texture"};
+                return false;
+            }
+            grass_atlas_already_sampled = true;
+        }
+    }
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
         if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
         D3D12_RESOURCE_BARRIER barrier{};
@@ -6426,6 +6734,16 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = cloud_state->resource;
         barrier.Transition.StateBefore = cloud_state->original_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    if (grass_pipeline != nullptr && !grass_atlas_already_sampled &&
+        grass_texture.original_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = grass_texture.resource;
+        barrier.Transition.StateBefore = grass_texture.original_state;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
@@ -6521,8 +6839,50 @@ bool draw_indexed_static_mesh_batch_and_readback(
             list->DrawInstanced(run->vertex_count, 1U, 0U, 0U);
         }
     }
+    bool grass_drawn = false;
+    const auto draw_grass = [&] {
+        if (grass_pipeline == nullptr || grass_drawn) return;
+        if (use_depth && depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = depth_attachment->resource();
+            barrier.Transition.StateBefore = depth_state;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            list->ResourceBarrier(1U, &barrier);
+            depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        }
+        ID3D12DescriptorHeap* descriptor_heaps[] = {
+            grass_srv_heap.Get(), context->sampler_heap.Get()};
+        list->SetDescriptorHeaps(2U, descriptor_heaps);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = depth_attachment->dsv(true);
+        list->OMSetRenderTargets(1U, &rtv, FALSE, &dsv);
+        list->SetGraphicsRootSignature(context->portable_grass_root_signature.Get());
+        list->SetGraphicsRootConstantBufferView(
+            0U, grass_constant_buffer->GetGPUVirtualAddress());
+        list->SetGraphicsRootDescriptorTable(
+            1U, grass_srv_heap->GetGPUDescriptorHandleForHeapStart());
+        list->SetGraphicsRootDescriptorTable(2U, grass_sampler);
+        list->SetPipelineState(grass_pipeline);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+        vertex_view.BufferLocation = grass_vertex_buffer->GetGPUVirtualAddress();
+        vertex_view.SizeInBytes = grass_vertex_count * portable_grass_vertex_stride_bytes;
+        vertex_view.StrideInBytes = portable_grass_vertex_stride_bytes;
+        list->IASetVertexBuffers(0U, 1U, &vertex_view);
+        D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(description.width),
+                                static_cast<float>(description.height), 0.0F, 1.0F};
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(description.width),
+                           static_cast<LONG>(description.height)};
+        list->RSSetViewports(1U, &viewport);
+        list->RSSetScissorRects(1U, &scissor);
+        list->DrawInstanced(grass_vertex_count, 1U, 0U, 0U);
+        grass_drawn = true;
+    };
     for (std::size_t index = 0; index < draws.size(); ++index) {
         const auto& draw = draws[index];
+        if (!grass_drawn && grass_pipeline != nullptr && draw.transparent)
+            draw_grass();
         const bool depth_write = use_depth && draw.pipeline->depth.write_enabled;
         const D3D12_RESOURCE_STATES desired_depth_state = depth_write ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                                                                        : D3D12_RESOURCE_STATE_DEPTH_READ;
@@ -6705,6 +7065,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         else
             list->DrawInstanced(draw.geometry.vertex_count, 1U, 0U, 0U);
     }
+    if (!grass_drawn && grass_pipeline != nullptr) draw_grass();
     for (std::size_t shadow_index = 0U; shadow_index < shadow_attachments.size(); ++shadow_index) {
         if (shadow_states[shadow_index] == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
         D3D12_RESOURCE_BARRIER barrier{};
@@ -6740,6 +7101,16 @@ bool draw_indexed_static_mesh_batch_and_readback(
         barrier.Transition.pResource = cloud_state->resource;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.StateAfter = cloud_state->original_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    if (grass_pipeline != nullptr && !grass_atlas_already_sampled &&
+        grass_texture.original_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = grass_texture.resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = grass_texture.original_state;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         list->ResourceBarrier(1U, &barrier);
     }
@@ -6866,6 +7237,11 @@ bool draw_indexed_static_mesh_batch_and_readback(
                 *cloud_state->tracked_state = drained
                                                   ? cloud_state->original_state
                                                   : D3D12_RESOURCE_STATE_COMMON;
+        if (grass_pipeline != nullptr && !grass_atlas_already_sampled &&
+            grass_texture.tracked_state != nullptr)
+            *grass_texture.tracked_state = drained
+                                               ? grass_texture.original_state
+                                               : D3D12_RESOURCE_STATE_COMMON;
         diagnostic = hresult_error("D3D12 indexed batch fence", result);
         diagnostic.code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET
                               ? "d3d12_device_removed" : "indexed_static_mesh_batch_execution_failed";
@@ -6887,6 +7263,9 @@ bool draw_indexed_static_mesh_batch_and_readback(
     for (const auto* cloud_state : cloud_texture_states)
         if (cloud_state->tracked_state != nullptr)
             *cloud_state->tracked_state = cloud_state->original_state;
+    if (grass_pipeline != nullptr && !grass_atlas_already_sampled &&
+        grass_texture.tracked_state != nullptr)
+        *grass_texture.tracked_state = grass_texture.original_state;
     if (!batch.capture_rgba8) {
         output.clear();
         diagnostic = {};
@@ -7973,6 +8352,53 @@ bool inspect_d3d12_portable_cloud_sampler(
     if (sampler->context() != context || sampler->gpu_descriptor().ptr == 0U) {
         diagnostic = {"portable_cloud_context_mismatch",
                       "Portable cloud samplers must belong to the D3D12 device"};
+        return false;
+    }
+    output = sampler->gpu_descriptor();
+    diagnostic = {};
+    return true;
+}
+
+bool inspect_d3d12_portable_grass_texture(
+    const Texture* requested, const D3D12Context* context,
+    D3D12PortableGrassTextureResource& output,
+    Diagnostic& diagnostic) {
+    output = {};
+    const auto* texture = dynamic_cast<const D3D12Texture*>(requested);
+    if (texture == nullptr) {
+        diagnostic = {"portable_grass_texture_type_unsupported",
+                      "Portable grass atlases must be D3D12 texture handles"};
+        return false;
+    }
+    if (texture->context() != context) {
+        diagnostic = {"portable_grass_context_mismatch",
+                      "Portable grass atlases must belong to the D3D12 device"};
+        return false;
+    }
+    output.resource = texture->resource();
+    output.format = dxgi_texture_format(texture->info().description.format);
+    output.tracked_state = const_cast<D3D12Texture*>(texture)->state_pointer();
+    output.original_state = texture->state();
+    output.description = texture->info().description;
+    output.initialized = texture->initialized();
+    diagnostic = {};
+    return true;
+}
+
+bool inspect_d3d12_portable_grass_sampler(
+    const Sampler* requested, const D3D12Context* context,
+    D3D12_GPU_DESCRIPTOR_HANDLE& output,
+    Diagnostic& diagnostic) {
+    output = {};
+    const auto* sampler = dynamic_cast<const D3D12Sampler*>(requested);
+    if (sampler == nullptr) {
+        diagnostic = {"portable_grass_sampler_type_unsupported",
+                      "Portable grass samplers must be D3D12 sampler handles"};
+        return false;
+    }
+    if (sampler->context() != context || sampler->gpu_descriptor().ptr == 0U) {
+        diagnostic = {"portable_grass_context_mismatch",
+                      "Portable grass samplers must belong to the D3D12 device"};
         return false;
     }
     output = sampler->gpu_descriptor();
@@ -10375,6 +10801,7 @@ public:
                                   batch.overlay_draws.empty() &&
                                   !batch.sky.has_value() &&
                                   !batch.clouds.has_value() &&
+                                  !batch.grass.has_value() &&
                                   !batch.draws.empty() && std::all_of(
             batch.draws.begin(), batch.draws.end(),
             [](const IndexedStaticMeshDrawRequest& request) {
@@ -10596,6 +11023,9 @@ public:
             D3D12IndexedBatchDraw draw;
             draw.pipeline = &pipeline;
             draw.scene_request = scene_request;
+            draw.transparent = packet.flags.transparent ||
+                               packet.flags.blend_enabled ||
+                               pipeline.blend.enabled;
             draw.matrices = matrices;
             draw.geometry.vertex_resource = vertex->resource();
             draw.geometry.vertex_offset = vertex_byte_offset;

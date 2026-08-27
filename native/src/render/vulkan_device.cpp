@@ -22,6 +22,7 @@
 #    include "generated/hdr_bloom_spirv.hpp"
 #    include "generated/portable_sky_spirv.hpp"
 #    include "generated/portable_clouds_spirv.hpp"
+#    include "generated/portable_grass_spirv.hpp"
 #endif
 
 namespace apex::render {
@@ -2221,6 +2222,10 @@ struct VulkanIndexedBatchDraw {
     std::uint32_t vertex_count = 0U;
     std::uint32_t index_count = 0U;
     bool indexed = true;
+    // Derived from the packet/pipeline blend classification. Grass is placed
+    // immediately before the first transparent scene draw, preserving the
+    // ordered scene contract while leaving selected/overlay insertion intact.
+    bool transparent = false;
     DrawMatrices matrices{};
     bool has_selected_color = false;
     VkBuffer selected_color_buffer = VK_NULL_HANDLE;
@@ -2579,6 +2584,47 @@ struct VulkanPortableCloudResources {
     std::vector<VulkanPortableCloudRun> runs;
 };
 
+// Grass is one contiguous expanded vertex stream and one sampled atlas. Keep
+// the tracked atlas layout alongside the raw handles so the synchronous batch
+// restores the caller's sampled-image state on both success and drain paths.
+struct VulkanPortableGrassResources {
+    VkBuffer vertex_buffer = VK_NULL_HANDLE;
+    std::uint32_t vertex_count = 0U;
+    VkImage atlas_image = VK_NULL_HANDLE;
+    VkImageView atlas_view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkImageLayout* tracked_layout = nullptr;
+    VkImageLayout original_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    std::uint32_t mip_levels = 1U;
+};
+
+struct VulkanTransientGrassDescriptors {
+    std::shared_ptr<VulkanContext> context;
+    RawVulkanBuffer constants;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+
+    VulkanTransientGrassDescriptors() = default;
+    VulkanTransientGrassDescriptors(const VulkanTransientGrassDescriptors&) = delete;
+    VulkanTransientGrassDescriptors& operator=(const VulkanTransientGrassDescriptors&) = delete;
+    ~VulkanTransientGrassDescriptors() { reset(); }
+
+    void reset() noexcept {
+        if (context && context->device != VK_NULL_HANDLE) {
+            if (pool != VK_NULL_HANDLE)
+                vkDestroyDescriptorPool(context->device, pool, nullptr);
+            if (layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(context->device, layout, nullptr);
+        }
+        pool = VK_NULL_HANDLE;
+        layout = VK_NULL_HANDLE;
+        set = VK_NULL_HANDLE;
+        constants.reset();
+        context.reset();
+    }
+};
+
 bool create_portable_cloud_descriptors(
     const std::shared_ptr<VulkanContext>& context,
     const PortableCloudShaderConstants& cloud_constants,
@@ -2689,6 +2735,121 @@ bool create_portable_cloud_descriptors(
                                static_cast<std::uint32_t>(writes.size()),
                                writes.data(), 0U, nullptr);
     }
+    return true;
+}
+
+bool create_portable_grass_descriptors(
+    const std::shared_ptr<VulkanContext>& context,
+    const PortableGrassShaderConstants& grass_constants,
+    const VulkanPortableGrassResources& resources,
+    VulkanTransientGrassDescriptors& descriptors,
+    Diagnostic& diagnostic) {
+    descriptors.reset();
+    descriptors.context = context;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(context->physical_device, &properties);
+    if (sizeof(PortableGrassShaderConstants) > properties.limits.maxUniformBufferRange) {
+        diagnostic = {"vulkan_portable_grass_uniform_limit",
+                      "Portable grass constants exceed the Vulkan uniform-buffer range"};
+        descriptors.reset();
+        return false;
+    }
+    BufferDescription buffer_description;
+    buffer_description.size_bytes = sizeof(PortableGrassShaderConstants);
+    buffer_description.usage = BufferUsage::uniform;
+    buffer_description.memory = BufferMemory::host_visible;
+    buffer_description.mutability = BufferMutability::mutable_data;
+    if (!create_raw_buffer(context, buffer_description,
+                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                           BufferMemory::host_visible, descriptors.constants,
+                           diagnostic) ||
+        !write_host_buffer(context, descriptors.constants, 0U,
+                           std::as_bytes(std::span(&grass_constants, 1U)),
+                           diagnostic)) {
+        diagnostic.code = diagnostic.code.empty()
+                              ? "vulkan_portable_grass_uniform_failed"
+                              : diagnostic.code;
+        descriptors.reset();
+        return false;
+    }
+    std::array<VkDescriptorSetLayoutBinding, 3U> bindings{};
+    bindings[0] = {0U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1U,
+                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                   nullptr};
+    bindings[1] = {1U, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1U,
+                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[2] = {2U, VK_DESCRIPTOR_TYPE_SAMPLER, 1U,
+                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layout_info.pBindings = bindings.data();
+    VkResult result = vkCreateDescriptorSetLayout(
+        context->device, &layout_info, nullptr, &descriptors.layout);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorSetLayout(portable grass)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_grass_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    std::array<VkDescriptorPoolSize, 3U> pool_sizes{};
+    pool_sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1U};
+    pool_sizes[1] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1U};
+    pool_sizes[2] = {VK_DESCRIPTOR_TYPE_SAMPLER, 1U};
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 1U;
+    pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
+    pool_info.pPoolSizes = pool_sizes.data();
+    result = vkCreateDescriptorPool(context->device, &pool_info, nullptr,
+                                    &descriptors.pool);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkCreateDescriptorPool(portable grass)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_grass_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorSetAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = descriptors.pool;
+    allocation.descriptorSetCount = 1U;
+    allocation.pSetLayouts = &descriptors.layout;
+    result = vkAllocateDescriptorSets(context->device, &allocation,
+                                      &descriptors.set);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkAllocateDescriptorSets(portable grass)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_portable_grass_descriptor_failed";
+        descriptors.reset();
+        return false;
+    }
+    VkDescriptorBufferInfo buffer_info{descriptors.constants.buffer, 0U,
+                                       sizeof(PortableGrassShaderConstants)};
+    VkDescriptorImageInfo image_info{VK_NULL_HANDLE, resources.atlas_view,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo sampler_info{resources.sampler, VK_NULL_HANDLE,
+                                       VK_IMAGE_LAYOUT_UNDEFINED};
+    std::array<VkWriteDescriptorSet, 3U> writes{};
+    writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                 descriptors.set, 0U, 0U, 1U,
+                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buffer_info,
+                 nullptr};
+    writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                 descriptors.set, 1U, 0U, 1U,
+                 VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image_info,
+                 nullptr, nullptr};
+    writes[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                 descriptors.set, 2U, 0U, 1U,
+                 VK_DESCRIPTOR_TYPE_SAMPLER, &sampler_info,
+                 nullptr, nullptr};
+    vkUpdateDescriptorSets(context->device,
+                           static_cast<std::uint32_t>(writes.size()),
+                           writes.data(), 0U, nullptr);
     return true;
 }
 
@@ -4465,6 +4626,8 @@ bool draw_indexed_batch_and_readback(
     const PortableSkyShaderConstants* sky_constants,
     const PortableCloudShaderConstants* cloud_constants,
     const VulkanPortableCloudResources* cloud_resources,
+    const PortableGrassShaderConstants* grass_constants,
+    const VulkanPortableGrassResources* grass_resources,
     VulkanDepthAttachment* depth_attachment,
     bool load_color,
     bool clear_depth,
@@ -4970,6 +5133,106 @@ bool draw_indexed_batch_and_readback(
         }
     }
 
+    VulkanTransientGrassDescriptors grass_descriptors;
+    VulkanBatchPipeline grass_pipeline;
+    const bool draw_grass = grass_constants != nullptr &&
+                            grass_resources != nullptr &&
+                            grass_resources->vertex_count != 0U;
+    const bool grass_atlas_shared_with_cloud =
+        draw_grass && std::any_of(
+            cloud_runs.begin(), cloud_runs.end(),
+            [&](const VulkanPortableCloudRun& run) {
+                return run.image == grass_resources->atlas_image &&
+                       run.tracked_layout == grass_resources->tracked_layout &&
+                       run.original_layout == grass_resources->original_layout;
+            });
+    if (grass_constants != nullptr || grass_resources != nullptr) {
+        if (grass_constants == nullptr || grass_resources == nullptr ||
+            grass_resources->vertex_count > portable_grass_max_vertex_count ||
+            grass_resources->vertex_count % portable_grass_vertices_per_blade != 0U ||
+            (draw_grass &&
+             (grass_resources->vertex_buffer == VK_NULL_HANDLE ||
+              grass_resources->atlas_image == VK_NULL_HANDLE ||
+              grass_resources->atlas_view == VK_NULL_HANDLE ||
+              grass_resources->sampler == VK_NULL_HANDLE ||
+              grass_resources->tracked_layout == nullptr ||
+              grass_resources->original_layout == VK_IMAGE_LAYOUT_UNDEFINED))) {
+            diagnostic = {"vulkan_portable_grass_request_invalid",
+                          "The Vulkan grass batch contains an incomplete or oversized request"};
+            cleanup_batch_setup();
+            return false;
+        }
+        if (draw_grass &&
+            !create_portable_grass_descriptors(
+                context, *grass_constants, *grass_resources,
+                grass_descriptors, diagnostic)) {
+            cleanup_batch_setup();
+            return false;
+        }
+        if (draw_grass) {
+            const auto shader_bytes = [](const unsigned char* bytes,
+                                         std::size_t byte_count) {
+                return std::vector<std::uint8_t>(bytes, bytes + byte_count);
+            };
+            PipelineProgram grass_program;
+            grass_program.name = "portable-grass-expanded-webgl-aligned";
+            grass_program.shaders = {
+                {PipelineShaderStage::vertex, PipelineShaderFormat::spirv,
+                 shader_bytes(generated::portable_grass_vertex_spirv,
+                              generated::portable_grass_vertex_spirv_size),
+                 PipelineShaderProvenance::portable},
+                {PipelineShaderStage::fragment, PipelineShaderFormat::spirv,
+                 shader_bytes(generated::portable_grass_fragment_spirv,
+                              generated::portable_grass_fragment_spirv_size),
+                 PipelineShaderProvenance::portable},
+            };
+            grass_program.vertex_layout.stride = static_cast<std::uint32_t>(
+                portable_grass_vertex_stride_bytes);
+            grass_program.vertex_layout.attributes = {
+                {PipelineVertexSemantic::position,
+                 PipelineVertexAttributeFormat::float32x3, 0U, 0U},
+                {PipelineVertexSemantic::normal,
+                 PipelineVertexAttributeFormat::float32x3, 1U,
+                 3U * sizeof(float)},
+                {PipelineVertexSemantic::texcoord0,
+                 PipelineVertexAttributeFormat::float32x2, 2U,
+                 6U * sizeof(float)},
+                {PipelineVertexSemantic::color,
+                 PipelineVertexAttributeFormat::float32x4, 3U,
+                 8U * sizeof(float)},
+                {PipelineVertexSemantic::texcoord1,
+                 PipelineVertexAttributeFormat::float32, 4U,
+                 12U * sizeof(float)},
+                {PipelineVertexSemantic::texcoord1,
+                 PipelineVertexAttributeFormat::float32, 5U,
+                 13U * sizeof(float)},
+            };
+            grass_program.raster.cull = PipelineCullMode::none;
+            grass_program.depth.test_enabled = true;
+            grass_program.depth.write_enabled = true;
+            grass_program.depth.compare = PipelineCompareOperation::less_or_equal;
+            grass_program.blend.alpha_to_coverage = description.samples == 4U;
+            grass_program.resources = {
+                {PipelineResourceKind::uniform_buffer, 0U, 0U,
+                 "portableGrassConstants"},
+                {PipelineResourceKind::sampled_texture, 0U, 1U,
+                 "portableGrassAtlas"},
+                {PipelineResourceKind::sampler, 0U, 2U,
+                 "portableGrassSampler"},
+            };
+            const std::array<VkDescriptorSetLayout, 1U> grass_layouts = {
+                grass_descriptors.layout};
+            if (!create_batch_pipeline(
+                    context, render_pass, description.width, description.height,
+                    description.samples, grass_program, true,
+                    depth_attachment != nullptr, grass_layouts, false,
+                    grass_pipeline, diagnostic)) {
+                cleanup_batch_setup();
+                return false;
+            }
+        }
+    }
+
     VkCommandBufferAllocateInfo allocation{};
     allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocation.commandPool = context->command_pool;
@@ -5131,6 +5394,25 @@ bool draw_indexed_batch_and_readback(
                     barriers.data());
             }
         }
+        if (draw_grass && !grass_atlas_shared_with_cloud &&
+            grass_resources->original_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = grass_resources->original_layout;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = grass_resources->atlas_image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = grass_resources->mip_levels;
+            barrier.subresourceRange.layerCount = 1U;
+            barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT |
+                                    VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0U,
+                                 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        }
         std::array<VkClearValue, 3> clear_values{};
         for (std::size_t index = 0; index < 4U; ++index) clear_values[0].color.float32[index] = clear_color[index];
         if (depth_attachment != nullptr) clear_values[1].depthStencil.depth = depth_clear_value;
@@ -5169,8 +5451,26 @@ bool draw_indexed_batch_and_readback(
                 vkCmdDraw(command, run.vertex_count, 1U, run.first_vertex, 0U);
             }
         }
+        const auto record_grass_draw = [&]() {
+            if (!draw_grass) return;
+            const VkDeviceSize grass_vertex_offset = 0U;
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              grass_pipeline.pipeline);
+            vkCmdBindDescriptorSets(
+                command, VK_PIPELINE_BIND_POINT_GRAPHICS, grass_pipeline.layout,
+                0U, 1U, &grass_descriptors.set, 0U, nullptr);
+            vkCmdBindVertexBuffers(command, 0U, 1U,
+                                   &grass_resources->vertex_buffer,
+                                   &grass_vertex_offset);
+            vkCmdDraw(command, grass_resources->vertex_count, 1U, 0U, 0U);
+        };
+        bool grass_recorded = false;
         for (std::size_t index = 0; index < draws.size(); ++index) {
             const VulkanIndexedBatchDraw& draw = draws[index];
+            if (!grass_recorded && draw.transparent) {
+                record_grass_draw();
+                grass_recorded = true;
+            }
             const VulkanBatchPipeline& pipeline = pipelines[index];
             const VkBuffer vertex_buffer = draw.vertices->raw().buffer;
             const VkDeviceSize vertex_offset = draw.vertex_offset;
@@ -5201,6 +5501,7 @@ bool draw_indexed_batch_and_readback(
                 vkCmdDraw(command, draw.vertex_count, 1U, 0U, 0U);
             }
         }
+        if (!grass_recorded) record_grass_draw();
         vkCmdEndRenderPass(command);
         if (!cloud_runs.empty()) {
             std::vector<VkImageMemoryBarrier> barriers;
@@ -5240,6 +5541,25 @@ bool draw_indexed_batch_and_readback(
                     nullptr, static_cast<std::uint32_t>(barriers.size()),
                     barriers.data());
             }
+        }
+        if (draw_grass && !grass_atlas_shared_with_cloud &&
+            grass_resources->original_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout = grass_resources->original_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = grass_resources->atlas_image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = grass_resources->mip_levels;
+            barrier.subresourceRange.layerCount = 1U;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT |
+                                    VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0U, 0U,
+                                 nullptr, 0U, nullptr, 1U, &barrier);
         }
         if (description.samples != 1U && retained_resolve_image != nullptr &&
             retained_resolve_mip_levels > 1U &&
@@ -5408,6 +5728,8 @@ bool draw_indexed_batch_and_readback(
             for (const VulkanPortableCloudRun& run : cloud_runs)
                 if (run.tracked_layout != nullptr)
                     *run.tracked_layout = run.original_layout;
+            if (draw_grass && grass_resources->tracked_layout != nullptr)
+                *grass_resources->tracked_layout = grass_resources->original_layout;
         } else {
             current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             if (retained_resolve_layout != nullptr)
@@ -5420,6 +5742,8 @@ bool draw_indexed_batch_and_readback(
             for (const VulkanPortableCloudRun& run : cloud_runs)
                 if (run.tracked_layout != nullptr)
                     *run.tracked_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (draw_grass && grass_resources->tracked_layout != nullptr)
+                *grass_resources->tracked_layout = VK_IMAGE_LAYOUT_UNDEFINED;
             result = drain;
         }
     } else if (completed) {
@@ -5437,6 +5761,8 @@ bool draw_indexed_batch_and_readback(
         for (const VulkanPortableCloudRun& run : cloud_runs)
             if (run.tracked_layout != nullptr)
                 *run.tracked_layout = run.original_layout;
+        if (draw_grass && grass_resources->tracked_layout != nullptr)
+            *grass_resources->tracked_layout = grass_resources->original_layout;
     }
     if (command != VK_NULL_HANDLE) vkFreeCommandBuffers(context->device, context->command_pool, 1U, &command);
     vkDestroyFramebuffer(context->device, framebuffer, nullptr);
@@ -5980,7 +6306,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
+                draws, nullptr, nullptr, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -6003,7 +6329,7 @@ public:
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
                 context_, raw_, info_.description, TextureTargetSubresource{},
-                draws, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
+                draws, nullptr, nullptr, nullptr, nullptr, nullptr, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
@@ -6076,6 +6402,9 @@ public:
             draw.vertex_offset = static_cast<VkDeviceSize>(vertex_offset);
             draw.index_offset = static_cast<VkDeviceSize>(index_offset);
             draw.index_count = packet.index_count;
+            draw.transparent = packet.flags.transparent ||
+                               packet.flags.blend_enabled ||
+                               request.pipeline->blend.enabled;
             if (stock_native_abi) {
                 if (!prepare_vulkan_stock_ks_per_pixel_native_abi_binding(
                         request, context_, draw, diagnostic)) {
@@ -6299,11 +6628,90 @@ public:
                 cloud_resources->sampler = raw_sampler;
             }
         }
+        std::optional<PortableGrassShaderConstants> grass_constants;
+        if (description.grass.has_value()) {
+            grass_constants.emplace();
+            if (!build_portable_grass_shader_constants(
+                    *description.grass, *grass_constants, diagnostic))
+                return false;
+        }
+        std::optional<VulkanPortableGrassResources> grass_resources;
+        if (description.grass.has_value()) {
+            const PortableGrassParameters& parameters = *description.grass;
+            grass_resources.emplace();
+            grass_resources->vertex_count = parameters.vertex_count;
+            if (parameters.vertex_count != 0U) {
+                const auto* vertices = dynamic_cast<const VulkanBuffer*>(
+                    parameters.vertex_buffer);
+                if (vertices == nullptr || vertices->context() != context_ ||
+                    vertices->raw().buffer == VK_NULL_HANDLE ||
+                    !any(vertices->info().description.usage & BufferUsage::vertex)) {
+                    diagnostic = {"vulkan_portable_grass_vertex_resource_invalid",
+                                  "Vulkan grass vertices must be an owned vertex resource"};
+                    return false;
+                }
+                const std::uint64_t required_bytes =
+                    static_cast<std::uint64_t>(parameters.vertex_count) *
+                    portable_grass_vertex_stride_bytes;
+                if (required_bytes > vertices->info().description.size_bytes) {
+                    diagnostic = {"vulkan_portable_grass_vertex_range_invalid",
+                                  "Vulkan grass vertices exceed their buffer range"};
+                    return false;
+                }
+                grass_resources->vertex_buffer = vertices->raw().buffer;
+
+                const auto* atlas = dynamic_cast<const VulkanTexture*>(
+                    parameters.atlas);
+                if (atlas == nullptr || atlas->context() != context_ ||
+                    !atlas->initialized() || atlas->image() == VK_NULL_HANDLE ||
+                    atlas->view() == VK_NULL_HANDLE ||
+                    atlas->layout() == VK_IMAGE_LAYOUT_UNDEFINED) {
+                    diagnostic = {"vulkan_portable_grass_atlas_invalid",
+                                  "Vulkan grass requires an initialized owned atlas"};
+                    return false;
+                }
+                const TextureDescription& atlas_description =
+                    atlas->info().description;
+                const bool sampled_color_format =
+                    atlas_description.format == TextureFormat::rgba8_unorm ||
+                    atlas_description.format == TextureFormat::rgba8_srgb ||
+                    atlas_description.format == TextureFormat::bgra8_unorm ||
+                    atlas_description.format == TextureFormat::bgra8_srgb;
+                if (atlas_description.shape != TextureShape::texture_2d ||
+                    atlas_description.array_layers != 1U ||
+                    atlas_description.samples != 1U ||
+                    atlas_description.mip_levels == 0U ||
+                    (static_cast<std::uint32_t>(atlas_description.usage) &
+                     static_cast<std::uint32_t>(TextureUsage::sampled)) == 0U ||
+                    !sampled_color_format) {
+                    diagnostic = {"vulkan_portable_grass_atlas_invalid",
+                                  "Vulkan grass atlas must be a single-layer sampled color image"};
+                    return false;
+                }
+                grass_resources->atlas_image = atlas->image();
+                grass_resources->atlas_view = atlas->view();
+                grass_resources->tracked_layout =
+                    const_cast<VulkanTexture*>(atlas)->mutable_layout_ptr();
+                grass_resources->original_layout = atlas->layout();
+                grass_resources->mip_levels = atlas_description.mip_levels;
+                VkSampler raw_sampler = VK_NULL_HANDLE;
+                if (!extract_vulkan_sampler(parameters.sampler, context_,
+                                            raw_sampler, diagnostic) ||
+                    raw_sampler == VK_NULL_HANDLE) {
+                    diagnostic = {"vulkan_portable_grass_sampler_invalid",
+                                  "Drawable Vulkan grass requires an owned sampler"};
+                    return false;
+                }
+                grass_resources->sampler = raw_sampler;
+            }
+        }
         const bool drawn = draw_indexed_batch_and_readback(
             context_, raw_, info_.description, description.target_subresource,
             draws, sky_constants.has_value() ? &*sky_constants : nullptr,
             cloud_constants.has_value() ? &*cloud_constants : nullptr,
             cloud_resources.has_value() ? &*cloud_resources : nullptr,
+            grass_constants.has_value() ? &*grass_constants : nullptr,
+            grass_resources.has_value() ? &*grass_resources : nullptr,
             depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,
             layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
