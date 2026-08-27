@@ -143,7 +143,7 @@ void meshAndGeometryEditsAreAtomicAndUndoable() {
     session.commit({"mesh and geometry", {
         SetMeshEdit{"BODY", mesh}, SetGeometryEdit{"0", geometry}}});
     require(session.state().meshes.at("BODY").transparent == false &&
-                session.state().meshes.at("BODY").layer == 3 &&
+                session.state().meshes.at("BODY").layer == 3U &&
                 session.state().geometry.at("0").reverse_winding &&
                 session.state().geometry.at("0").transform->at(12) == 2.0F,
             "mesh and geometry transaction");

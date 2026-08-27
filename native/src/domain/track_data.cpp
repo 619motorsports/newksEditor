@@ -4,8 +4,10 @@
 #include "apex/core/parse_error.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -173,6 +175,70 @@ bool boolean_field(const apex::formats::IniSection& section, std::string_view ke
     return std::string(text);
 }
 
+struct SixDecimalHalfway {
+    bool exact = false;
+    bool lower_is_odd = false;
+};
+
+[[nodiscard]] SixDecimalHalfway six_decimal_halfway(double value) noexcept {
+    constexpr std::uint64_t fraction_mask = (std::uint64_t{1} << 52U) - 1U;
+    constexpr std::uint64_t implicit_bit = std::uint64_t{1} << 52U;
+    constexpr std::uint64_t decimal_scale_without_power_of_two = 15'625U;
+
+    const auto bits = std::bit_cast<std::uint64_t>(value) &
+                      ~(std::uint64_t{1} << 63U);
+    const auto exponent_bits = static_cast<unsigned>((bits >> 52U) & 0x7ffU);
+    if (exponent_bits == 0U || exponent_bits == 0x7ffU) return {};
+
+    const auto significand = implicit_bit | (bits & fraction_mask);
+    const int exponent = static_cast<int>(exponent_bits) - 1023;
+    // value * 10^6 = significand * 15625 / 2^(46 - exponent).
+    const int shift = 46 - exponent;
+    if (shift <= 0 || shift > 68) return {};
+
+    const std::uint64_t low_part =
+        (significand & 0xffffffffU) * decimal_scale_without_power_of_two;
+    const std::uint64_t upper_part =
+        (significand >> 32U) * decimal_scale_without_power_of_two;
+    const std::uint64_t shifted_upper = upper_part << 32U;
+    const std::uint64_t product_low = low_part + shifted_upper;
+    const std::uint64_t product_high =
+        (upper_part >> 32U) + (product_low < low_part ? 1U : 0U);
+
+    bool exact = false;
+    if (shift <= 64) {
+        const auto mask = shift == 64
+                              ? std::numeric_limits<std::uint64_t>::max()
+                              : (std::uint64_t{1} << shift) - 1U;
+        exact = (product_low & mask) ==
+                (std::uint64_t{1} << (shift - 1));
+    } else {
+        const auto high_bits = static_cast<unsigned>(shift - 64);
+        const auto mask = (std::uint64_t{1} << high_bits) - 1U;
+        exact = product_low == 0U &&
+                (product_high & mask) ==
+                    (std::uint64_t{1} << (high_bits - 1U));
+    }
+    if (!exact) return {};
+
+    const bool lower_is_odd =
+        shift < 64 ? ((product_low >> shift) & 1U) != 0U
+                   : ((product_high >> (shift - 64)) & 1U) != 0U;
+    return {true, lower_is_odd};
+}
+
+void increment_fixed_magnitude(std::string& value) {
+    for (auto iterator = value.rbegin(); iterator != value.rend(); ++iterator) {
+        if (*iterator == '.' || *iterator == '-') continue;
+        if (*iterator != '9') {
+            ++*iterator;
+            return;
+        }
+        *iterator = '0';
+    }
+    value.insert(value.front() == '-' ? 1U : 0U, 1U, '1');
+}
+
 [[nodiscard]] std::string surface_number(double value, std::string_view label,
                                           std::string_view source, std::size_t line) {
     if (!std::isfinite(value))
@@ -191,20 +257,24 @@ bool boolean_field(const apex::formats::IniSection& section, std::string_view ke
         return std::string(buffer.data(), converted.ptr);
     }
 
-    // Keep the original binary64 value exact through the decimal scaling.
-    // Using double multiplication would turn 0.0000005 into an exact 0.5 and
-    // incorrectly round it up, while JavaScript's toFixed sees it below 0.5.
-    const long double rounded_units =
-        std::round(static_cast<long double>(value) * 1.0e6L);
-    if (rounded_units == 0.0L) return "0";
-    const double rounded = static_cast<double>(rounded_units / 1.0e6L);
     std::array<char, 128> buffer{};
     const auto converted = std::to_chars(
-        buffer.data(), buffer.data() + buffer.size(), rounded,
+        buffer.data(), buffer.data() + buffer.size(), value,
         std::chars_format::fixed, 6);
     if (converted.ec != std::errc{})
         fail(source, line, "NUMBER_FORMAT", std::string(label) + " cannot be formatted");
     std::string output(buffer.data(), converted.ptr);
+    // to_chars rounds the original binary64 value directly. For an exact
+    // decimal halfway, JavaScript's toFixed chooses the larger magnitude,
+    // while C++ libraries can choose the even neighbor. Detect the halfway
+    // from the binary representation and advance only when the formatted
+    // result is the lower neighbor.
+    const auto halfway = six_decimal_halfway(value);
+    if (halfway.exact) {
+        const bool formatted_is_odd = ((output.back() - '0') & 1) != 0;
+        if (formatted_is_odd == halfway.lower_is_odd)
+            increment_fixed_magnitude(output);
+    }
     while (!output.empty() && output.back() == '0') output.pop_back();
     if (!output.empty() && output.back() == '.') output.pop_back();
     return output.empty() || output == "-0" ? "0" : output;

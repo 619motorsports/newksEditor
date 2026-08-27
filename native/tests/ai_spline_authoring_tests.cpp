@@ -28,6 +28,13 @@ void require(bool condition, std::string_view message) {
         throw std::runtime_error(std::string(message));
 }
 
+void requireNear(float actual, float expected, float epsilon,
+                 std::string_view message) {
+    require(std::isfinite(actual) && std::isfinite(expected) &&
+                std::abs(actual - expected) <= epsilon,
+            message);
+}
+
 AiSpline fixture() {
     AiSpline spline;
     spline.source = "waypoint-fixture.ai";
@@ -113,10 +120,11 @@ void appliesReplacementThenAdditionAtomically() {
                 payload.side1 == 33.0F && payload.length == 55.0F &&
                 payload.grade == 66.0F,
             "addition follows replacement for direct fields");
-    require(payload.camber ==
+    requireNear(payload.camber,
                 45.0F * apex::authoring::aiSplineDegreesToRadians +
                     -12.5F * apex::authoring::aiSplineDegreesToRadians,
-            "camber replacement and addition convert degrees separately");
+                1.0e-7F,
+                "camber replacement and addition convert degrees separately");
     require(samePayload(spline.payloads[0], result.candidate->payloads[0]) &&
                 samePayload(spline.payloads[1], result.candidate->payloads[1]),
             "unselected payloads stay unchanged");

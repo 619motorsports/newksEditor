@@ -84,6 +84,22 @@ void serializes_surfaces_with_canonical_fields() {
                 "IS_PITLANE=0\nSIN_HEIGHT=-1.25\nSIN_LENGTH=0\nVIBRATION_GAIN=0.6\n"
                 "VIBRATION_LENGTH=1.5\nWAV=kerb.wav\nWAV_PITCH=1.3\nFF_EFFECT=road\n",
             "surface serializer follows canonical JavaScript field order and numbers");
+
+    config.surfaces[0].damping = -0.0078125;
+    config.surfaces[0].friction = 0.0234375;
+    config.surfaces[0].black_flag_time = -0.0234375;
+    config.surfaces[0].sin_length = 0.0078125;
+    const auto exact_halfway =
+        apex::domain::serialize_track_surfaces_ini(config);
+    require(exact_halfway.find("FRICTION=0.023438\n") !=
+                    std::string::npos &&
+                exact_halfway.find("DAMPING=-0.007813\n") !=
+                    std::string::npos &&
+                exact_halfway.find("BLACK_FLAG_TIME=-0.023438\n") !=
+                    std::string::npos &&
+                exact_halfway.find("SIN_LENGTH=0.007813\n") !=
+                    std::string::npos,
+            "surface serializer follows JavaScript exact-halfway rounding");
     const auto reparsed = apex::domain::parse_track_surfaces(output, config.source);
     require(reparsed.surfaces.size() == 1U && reparsed.surfaces[0].index == 4U &&
                 reparsed.surfaces[0].key == "ROAD" && reparsed.surfaces[0].is_valid_track &&

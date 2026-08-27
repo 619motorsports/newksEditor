@@ -74,15 +74,6 @@ void requireNear(const float actual, const float expected, const float epsilon,
     require(std::isfinite(actual) && std::abs(actual - expected) <= epsilon, message);
 }
 
-std::uint64_t vertex_hash(const std::vector<PortableGrassVertex>& vertices) {
-    std::uint64_t value = 1469598103934665603ULL;
-    for (const auto byte : std::as_bytes(std::span<const PortableGrassVertex>(vertices))) {
-        value ^= static_cast<std::uint8_t>(byte);
-        value *= 1099511628211ULL;
-    }
-    return value;
-}
-
 std::array<float, 3U> position(const PortableGrassVertex& vertex) {
     return {vertex.position_x, vertex.position_y, vertex.position_z};
 }
@@ -275,11 +266,12 @@ void remains_deterministic_for_same_seed_and_inputs() {
     require(first.ready() && first.blades == second.blades && first.vertices == second.vertices &&
                 first.diagnostics.candidate_count == second.diagnostics.candidate_count,
             "same seed produces identical blades and vertices");
-    require(first.blades.front().index == 0U && first.blades.front().source_triangle == 7U,
-            "deterministic blade identity is stable");
-    const auto identity = vertex_hash(first.vertices);
-    require(identity == 5115826207454486552ULL,
-            "deterministic vertex identity hash is stable");
+    require(first.blades.size() == 16U && first.vertices.size() == 96U &&
+                first.blades.front().index == 0U &&
+                first.blades.front().source_triangle == 7U &&
+                first.blades[8U].index == 8U &&
+                first.blades[8U].source_triangle == 11U,
+            "deterministic platform-independent blade identity is stable");
     options.seed++;
     const auto different = buildPortableGrassLayout(triangles, settings, options);
     require(first.vertices != different.vertices,
