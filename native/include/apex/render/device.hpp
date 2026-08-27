@@ -1596,6 +1596,9 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
     const Texture& source, const Texture& destination,
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
 
+[[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_parameters(
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
+
 [[nodiscard]] DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description,
     Diagnostic& diagnostic);

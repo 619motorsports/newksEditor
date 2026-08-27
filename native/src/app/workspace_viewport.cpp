@@ -534,6 +534,21 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     return WorkspaceViewportFrameStatus::execution_failed;
 }
 
+[[nodiscard]] WorkspaceViewportFrameStatus toneMapStatus(
+    render::HdrToneMapStatus status) noexcept {
+    switch (status) {
+    case render::HdrToneMapStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::HdrToneMapStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::HdrToneMapStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::HdrToneMapStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
 [[nodiscard]] WorkspaceViewportFrameStatus textureUpdateStatus(
     render::TextureStatus status) noexcept {
     switch (status) {
@@ -1026,6 +1041,8 @@ WorkspaceViewport::WorkspaceViewport(
     render::PresentationTargetDescription presentation,
     std::unique_ptr<render::Texture> color,
     std::unique_ptr<render::Texture> resolved_color,
+    std::unique_ptr<render::Texture> tone_mapped_color,
+    std::optional<render::HdrToneMapParameters> hdr_tone_map,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -1045,6 +1062,8 @@ WorkspaceViewport::WorkspaceViewport(
     std::optional<FrameCatalog> frame_catalog)
     : device_(device), backend_(backend), presentation_(presentation),
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
+      tone_mapped_color_(std::move(tone_mapped_color)),
+      hdr_tone_map_(std::move(hdr_tone_map)),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
@@ -1363,6 +1382,31 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
             diagnostic("workspace_viewport_camera_clip_space",
                        "camera clip space does not match the prepared backend");
         return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (request.hdr_tone_map.has_value() && !hdr_tone_map_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_tone_map_unprepared",
+            "An LDR viewport cannot use frame HDR tone-map parameters");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const render::HdrToneMapParameters* effective_hdr_tone_map =
+        request.hdr_tone_map.has_value()
+            ? &*request.hdr_tone_map
+            : hdr_tone_map_.has_value() ? &*hdr_tone_map_ : nullptr;
+    if (effective_hdr_tone_map != nullptr) {
+        if (tone_mapped_color_ == nullptr) {
+            output_diagnostic = diagnostic(
+                "workspace_viewport_hdr_target_missing",
+                "The prepared HDR viewport has no tone-map destination");
+            return WorkspaceViewportFrameStatus::invalid;
+        }
+        render::Texture& source =
+            resolved_color_ != nullptr ? *resolved_color_ : *color_;
+        const auto validation = render::validate_hdr_tone_map_request(
+            source, *tone_mapped_color_, *effective_hdr_tone_map,
+            output_diagnostic);
+        if (validation != render::HdrToneMapStatus::ready)
+            return toneMapStatus(validation);
     }
     if (reflection_capture_.has_value() &&
         (request.multimap_reflection_cube.texture != nullptr ||
@@ -2143,9 +2187,18 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic = drawn.diagnostic;
         return drawStatus(drawn.status);
     }
-    render::Texture &presentation_color =
-        resolved_color_ != nullptr ? *resolved_color_ : *color_;
-    const auto presented = device.present_texture(target, presentation_color);
+    render::Texture* presentation_color =
+        resolved_color_ != nullptr ? resolved_color_.get() : color_.get();
+    if (effective_hdr_tone_map != nullptr) {
+        const auto tone_mapped = device.tone_map_hdr_texture(
+            *presentation_color, *tone_mapped_color_, *effective_hdr_tone_map);
+        if (!tone_mapped.ok()) {
+            output_diagnostic = tone_mapped.diagnostic;
+            return toneMapStatus(tone_mapped.status);
+        }
+        presentation_color = tone_mapped_color_.get();
+    }
+    const auto presented = device.present_texture(target, *presentation_color);
     if (presented.ok() && pending_reflection_capture.has_value()) {
         auto& capture = *reflection_capture_;
         capture.published_cube = *pending_reflection_capture;
@@ -2212,6 +2265,31 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 "Vulkan source and installed D3D12 selectors are mutually "
                 "exclusive");
             return result;
+        }
+        if (request.hdr_tone_map.has_value() && request.color_samples != 1U) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_multisample_unsupported",
+                "The portable HDR viewport currently requires a one-sample scene target");
+            return result;
+        }
+        if (request.hdr_tone_map.has_value() &&
+            (builtin_vulkan_source || builtin_d3d12_native)) {
+            result.status = WorkspaceViewportStatus::unsupported;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_stock_program_unsupported",
+                "The portable HDR viewport does not support retained stock shader packages");
+            return result;
+        }
+        if (request.hdr_tone_map.has_value()) {
+            render::Diagnostic parameter_diagnostic;
+            if (render::validate_hdr_tone_map_parameters(
+                    *request.hdr_tone_map, parameter_diagnostic) !=
+                render::HdrToneMapStatus::ready) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(parameter_diagnostic);
+                return result;
+            }
         }
         if (request.portable_reflection_capture.has_value()) {
             const std::uint32_t size =
@@ -2338,7 +2416,12 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = std::move(target_diagnostic);
             return result;
         }
-        const auto color_format = pipelineColorFormat(request.presentation.format);
+        const auto color_format = request.hdr_tone_map.has_value()
+                                      ? std::optional(
+                                            render::PipelineRenderTargetFormat::
+                                                rgba16_float)
+                                      : pipelineColorFormat(
+                                            request.presentation.format);
         if (!color_format.has_value()) {
             result.status = WorkspaceViewportStatus::unsupported;
             result.diagnostic = diagnostic(
@@ -2488,9 +2571,17 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         render::TextureDescription color_description;
         color_description.width = request.presentation.width;
         color_description.height = request.presentation.height;
-        color_description.format = request.presentation.format;
+        color_description.format = request.hdr_tone_map.has_value()
+                                       ? render::TextureFormat::rgba16_sfloat
+                                       : request.presentation.format;
         color_description.usage = render::TextureUsage::color_attachment |
                                    render::TextureUsage::transfer_source;
+        if (request.hdr_tone_map.has_value()) {
+            color_description.usage = color_description.usage |
+                                      render::TextureUsage::sampled;
+            color_description.access_policy =
+                render::TextureAccessPolicy::render_then_sample;
+        }
         color_description.mutability = render::TextureMutability::mutable_data;
         color_description.samples = request.color_samples;
         auto color = device.create_texture(color_description);
@@ -2515,6 +2606,42 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
                 return result;
             }
             resolved_color = std::move(resolved.texture);
+        }
+
+        std::unique_ptr<render::Texture> tone_mapped_color;
+        if (request.hdr_tone_map.has_value()) {
+            render::TextureDescription tone_mapped_description;
+            tone_mapped_description.width = request.presentation.width;
+            tone_mapped_description.height = request.presentation.height;
+            tone_mapped_description.format = request.presentation.format;
+            tone_mapped_description.usage =
+                render::TextureUsage::color_attachment |
+                render::TextureUsage::transfer_source;
+            tone_mapped_description.mutability =
+                render::TextureMutability::mutable_data;
+            auto tone_mapped = device.create_texture(tone_mapped_description);
+            if (!tone_mapped.ok()) {
+                result.status =
+                    tone_mapped.status == render::TextureStatus::allocation_failed
+                        ? WorkspaceViewportStatus::allocation_failed
+                        : WorkspaceViewportStatus::unsupported;
+                result.diagnostic = std::move(tone_mapped.diagnostic);
+                return result;
+            }
+            render::Diagnostic tone_map_diagnostic;
+            const auto tone_map_validation =
+                render::validate_hdr_tone_map_request(
+                    *color.texture, *tone_mapped.texture,
+                    *request.hdr_tone_map, tone_map_diagnostic);
+            if (tone_map_validation != render::HdrToneMapStatus::ready) {
+                result.status =
+                    tone_map_validation == render::HdrToneMapStatus::unsupported
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = std::move(tone_map_diagnostic);
+                return result;
+            }
+            tone_mapped_color = std::move(tone_mapped.texture);
         }
 
         render::DepthAttachmentDescription depth_description;
@@ -3364,7 +3491,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         result.viewport = std::unique_ptr<WorkspaceViewport>(new WorkspaceViewport(
             &device, device.info().backend, request.presentation,
             std::move(color.texture),
-            std::move(resolved_color), std::move(depth.attachment),
+            std::move(resolved_color), std::move(tone_mapped_color),
+            request.hdr_tone_map, std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),
             std::move(ai_spline_passes),

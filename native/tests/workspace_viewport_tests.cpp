@@ -324,6 +324,25 @@ public:
         return {ShaderModuleStatus::unsupported, {"unused", "unused"}, nullptr};
     }
 
+    HdrToneMapResult tone_map_hdr_texture(
+        Texture &source, Texture &destination,
+        const HdrToneMapParameters &parameters = {}) override {
+        ++tone_map_calls;
+        events.push_back("tone_map");
+        tone_map_sources.push_back(&source);
+        tone_map_destinations.push_back(&destination);
+        tone_map_parameters.push_back(parameters);
+        Diagnostic diagnostic;
+        const auto validation = validate_hdr_tone_map_request(
+            source, destination, parameters, diagnostic);
+        if (validation != HdrToneMapStatus::ready)
+            return {validation, std::move(diagnostic)};
+        if (tone_map_status != HdrToneMapStatus::ready)
+            return {tone_map_status,
+                    {"fake_tone_map_failed", "injected tone-map failure"}};
+        return {HdrToneMapStatus::ready, {}};
+    }
+
     PresentationFrameResult present_texture(PresentationTarget &,
                                             Texture &texture) override {
         ++present_calls;
@@ -354,6 +373,8 @@ public:
     std::size_t mip_calls = 0U;
     std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
+    std::size_t tone_map_calls = 0U;
+    HdrToneMapStatus tone_map_status = HdrToneMapStatus::ready;
     std::vector<std::size_t> draw_counts;
     std::vector<std::size_t> overlay_counts;
     std::vector<std::size_t> selected_mesh_counts;
@@ -388,6 +409,9 @@ public:
     std::vector<Texture *> resolve_targets;
     std::vector<bool> capture_requests;
     std::vector<Texture *> presented_textures;
+    std::vector<Texture *> tone_map_sources;
+    std::vector<Texture *> tone_map_destinations;
+    std::vector<HdrToneMapParameters> tone_map_parameters;
     std::vector<Texture *> draw_targets;
     std::vector<Texture *> mip_targets;
     std::vector<TextureTargetSubresource> target_subresources;
@@ -1700,6 +1724,177 @@ void draws_four_sample_viewport_through_retained_resolve() {
                 device.events == std::vector<std::string>(
                     {"color", "present", "color", "present"}),
             "four-sample frames reuse one resolve image and present only its single-sample output");
+}
+
+void draws_opt_in_hdr_viewport_before_presentation() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        auto request = request_for(value);
+        request.hdr_tone_map = HdrToneMapParameters{};
+        request.hdr_tone_map->exposure = 0.75F;
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        if (!prepared.ok())
+            throw std::runtime_error("HDR viewport preparation: " +
+                                     prepared.diagnostic.code);
+
+        Texture* hdr_source = nullptr;
+        Texture* display_target = nullptr;
+        for (std::size_t index = 0U;
+             index < device.created_texture_descriptions.size(); ++index) {
+            const auto& description =
+                device.created_texture_descriptions[index];
+            if (description.format == TextureFormat::rgba16_sfloat &&
+                description.samples == 1U) {
+                hdr_source = device.created_textures[index];
+                require(description.mutability ==
+                            TextureMutability::mutable_data &&
+                            description.access_policy ==
+                                TextureAccessPolicy::render_then_sample &&
+                            static_cast<std::uint32_t>(
+                                description.usage & TextureUsage::sampled) !=
+                                0U,
+                        "HDR scene target uses the sampled render contract");
+            }
+            if (description.format == request.presentation.format &&
+                description.samples == 1U &&
+                description.mutability == TextureMutability::mutable_data &&
+                static_cast<std::uint32_t>(
+                    description.usage & TextureUsage::color_attachment) != 0U &&
+                static_cast<std::uint32_t>(
+                    description.usage & TextureUsage::transfer_source) != 0U) {
+                display_target = device.created_textures[index];
+            }
+        }
+        require(hdr_source != nullptr && display_target != nullptr &&
+                    hdr_source != display_target,
+                "HDR preparation owns separate scene and display targets");
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera.clip_space = backend == Backend::Vulkan
+                                      ? CameraClipSpace::vulkan
+                                      : CameraClipSpace::d3d12;
+        frame.frame_constants = KsPerPixelFrameConstants{};
+        Diagnostic diagnostic;
+        auto status = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(status == WorkspaceViewportFrameStatus::ready &&
+                    device.events == std::vector<std::string>(
+                                         {"color", "tone_map", "present"}) &&
+                    device.draw_targets == std::vector<Texture*>({hdr_source}) &&
+                    device.tone_map_sources ==
+                        std::vector<Texture*>({hdr_source}) &&
+                    device.tone_map_destinations ==
+                        std::vector<Texture*>({display_target}) &&
+                    device.presented_textures ==
+                        std::vector<Texture*>({display_target}) &&
+                    device.tone_map_parameters.front().exposure == 0.75F,
+                "HDR frame draws, tone maps, and presents in order");
+
+        frame.hdr_tone_map = *request.hdr_tone_map;
+        frame.hdr_tone_map->exposure = 1.5F;
+        status = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(status == WorkspaceViewportFrameStatus::ready &&
+                    device.tone_map_parameters.back().exposure == 1.5F &&
+                    device.present_calls == 2U,
+                "HDR frame parameters override the prepared defaults");
+
+        device.tone_map_status = HdrToneMapStatus::execution_failed;
+        status = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(status == WorkspaceViewportFrameStatus::execution_failed &&
+                    diagnostic.code == "fake_tone_map_failed" &&
+                    device.tone_map_calls == 3U &&
+                    device.present_calls == 2U,
+                "tone-map failure prevents presentation");
+    }
+}
+
+void rejects_invalid_or_unsupported_viewport_hdr_requests() {
+    auto value = fixture();
+    auto request = request_for(value);
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(), "LDR viewport preparation succeeds");
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.hdr_tone_map = HdrToneMapParameters{};
+    Diagnostic diagnostic;
+    auto status = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_hdr_tone_map_unprepared" &&
+                device.draw_calls == 0U && device.tone_map_calls == 0U &&
+                device.present_calls == 0U,
+            "LDR viewport rejects a frame HDR override before drawing");
+
+    request = request_for(value);
+    request.hdr_tone_map = HdrToneMapParameters{};
+    request.hdr_tone_map->gamma =
+        std::numeric_limits<float>::quiet_NaN();
+    FakeDevice invalid_device;
+    auto invalid = apex::app::prepareWorkspaceViewport(
+        invalid_device, value.document, request);
+    require(!invalid.ok() &&
+                invalid.diagnostic.code == "hdr_tone_map_parameters_invalid" &&
+                invalid_device.texture_calls == 0U,
+            "invalid HDR parameters fail before texture allocation");
+
+    request = request_for(value);
+    request.hdr_tone_map = HdrToneMapParameters{};
+    request.color_samples = 4U;
+    FakeDevice multisample_device;
+    auto multisample = apex::app::prepareWorkspaceViewport(
+        multisample_device, value.document, request);
+    require(!multisample.ok() &&
+                multisample.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                multisample.diagnostic.code ==
+                    "workspace_viewport_hdr_multisample_unsupported" &&
+                multisample_device.texture_calls == 0U,
+            "HDR viewport rejects unresolved multisample state before allocation");
+
+    request = request_for(value);
+    request.hdr_tone_map = HdrToneMapParameters{};
+    request.builtin_vulkan_source =
+        BuiltinVulkanStockSourceSelector::ks_per_pixel;
+    FakeDevice stock_device;
+    auto stock = apex::app::prepareWorkspaceViewport(
+        stock_device, value.document, request);
+    require(!stock.ok() &&
+                stock.status == apex::app::WorkspaceViewportStatus::unsupported &&
+                stock.diagnostic.code ==
+                    "workspace_viewport_hdr_stock_program_unsupported" &&
+                stock_device.texture_calls == 0U,
+            "HDR viewport rejects the retained stock shader contract");
+
+    request = request_for(value);
+    request.hdr_tone_map = HdrToneMapParameters{};
+    request.builtin_d3d12_native =
+        BuiltinD3D12StockNativeSelector::ks_per_pixel_base;
+    FakeDevice d3d_stock_device(Backend::D3D12);
+    auto d3d_stock = apex::app::prepareWorkspaceViewport(
+        d3d_stock_device, value.document, request);
+    require(!d3d_stock.ok() &&
+                d3d_stock.status ==
+                    apex::app::WorkspaceViewportStatus::unsupported &&
+                d3d_stock.diagnostic.code ==
+                    "workspace_viewport_hdr_stock_program_unsupported" &&
+                d3d_stock_device.texture_calls == 0U,
+            "HDR viewport rejects the installed D3D12 shader contract");
 }
 
 void draws_selected_axis_inside_the_scene_batch() {
@@ -6291,6 +6486,8 @@ int main() {
         captures_and_publishes_six_portable_reflection_faces_atomically();
         rejects_invalid_portable_reflection_capture_options_before_allocation();
         draws_four_sample_viewport_through_retained_resolve();
+        draws_opt_in_hdr_viewport_before_presentation();
+        rejects_invalid_or_unsupported_viewport_hdr_requests();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();
         draws_raw_ai_spline_in_recovered_scene_phase();

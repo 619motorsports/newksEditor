@@ -122,6 +122,64 @@ These reflected fields are active:
 negative half-scale beside gamma. `SetTonemapEffectParameters` writes the
 mapping vector.
 
+## Recovered default shader math
+
+The pixel shader samples the auxiliary texture twice through two color-grade
+records. It combines the second result with glare before tone mapping.
+
+```text
+A = grade(sample(t2, v3), cb186, cb187)
+B = grade(sample(t2, v3), cb188, cb189)
+G = sample(t1, v1).rgb
+glareComposite = saturate((A + G * B) * cb154.y)
+
+S = sample(t0, v0)
+alpha = saturate(dot(S.rgba, cb155))
+x = max(B * S.rgb * cb154.x, 2^-14)
+
+e = exp2(-x * cb208.x)
+u = saturate((1 - e) * (1 - e * cb208.y)^2)
+x = u + (1 - u) * glareComposite
+x = min(x + 2^-22, 1)
+x = exp2(log(x) * cb202.x)
+x += sample(t3, v4).r * cb202.y
+output.rgb = x + cb202.z
+```
+
+The reflected default for `cb202.x` is `0.454545468`. The reflected default
+for `cb208` is `{1, 1, 1.015625, 1}`.
+
+The shader applies dither after its gamma operation. It has no final saturate
+instruction after dither. The render-target conversion can clamp the result.
+
+The exact color grades remain unknown. Runtime values for `cb154`, `cb155`,
+and `cb186..189` are necessary for an exact implementation.
+
+## Recovered dither texture
+
+`CTextureUtil::InitializeDevice` at `0x100afae0` creates the 4×4 RGBA8 dither
+texture. The code uses this Bayer order:
+
+```text
+0,  8,  2, 10
+12, 4, 14,  6
+3, 11,  1,  9
+15, 7, 13, 5
+```
+
+The initialization transforms each value with `(value * 0.0625) + 0.03125`.
+It multiplies the result by `255.999893` and truncates it to one byte.
+
+```text
+7, 135, 39, 167
+199, 71, 231, 103
+55, 183, 23, 151
+247, 119, 215, 87
+```
+
+Each texel repeats its value in all four channels. This byte table comes from
+decompiled arithmetic. A runtime upload capture can show the driver interpretation.
+
 The scene and temporary tone-map targets use RGBA16F by default. The schedule
 is scene render, MSAA resolve, Yebis effects, temporary tone-map, then optional
 FXAA. This path does not prove the final screen format.
@@ -139,6 +197,12 @@ reported WebGL error zero. The browser smoke report contained no exceptions.
 
 This check proves the production WebGL path remains operational. It does not
 prove pixel equality between WebGL, the new native pass, and Yebis.
+
+The viewport integration run repeated this scene through Electron and
+software WebGL. The initial frame hash was `405c7cc1dc38cc9d`.
+
+The comparison frame hash was `81830fb2a5c97af9`. Both captures reported
+WebGL error zero, and the browser report contained no exceptions.
 
 ## Evidence boundary
 

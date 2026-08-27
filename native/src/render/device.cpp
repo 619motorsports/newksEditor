@@ -641,6 +641,21 @@ TextureStatus validate_texture_mip_generation_description(
     return TextureStatus::ready;
 }
 
+HdrToneMapStatus validate_hdr_tone_map_parameters(
+    const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
+    if (!std::isfinite(parameters.exposure) || parameters.exposure < 0.0F ||
+        !std::isfinite(parameters.gamma) || parameters.gamma <= 0.0F ||
+        !std::isfinite(parameters.saturation) || parameters.saturation < 0.0F ||
+        !std::isfinite(parameters.curve_scale) || parameters.curve_scale < 0.0F ||
+        !std::isfinite(parameters.curve_shoulder)) {
+        diagnostic = {"hdr_tone_map_parameters_invalid",
+                      "HDR tone-map parameters must be finite with nonnegative gain values and positive gamma"};
+        return HdrToneMapStatus::invalid_request;
+    }
+    diagnostic = {};
+    return HdrToneMapStatus::ready;
+}
+
 HdrToneMapStatus validate_hdr_tone_map_request(
     const Texture& source, const Texture& destination,
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
@@ -716,17 +731,7 @@ HdrToneMapStatus validate_hdr_tone_map_request(
                       "HDR tone mapping requires a mutable destination texture"};
         return HdrToneMapStatus::invalid_request;
     }
-    if (!std::isfinite(parameters.exposure) || parameters.exposure < 0.0F ||
-        !std::isfinite(parameters.gamma) || parameters.gamma <= 0.0F ||
-        !std::isfinite(parameters.saturation) || parameters.saturation < 0.0F ||
-        !std::isfinite(parameters.curve_scale) || parameters.curve_scale < 0.0F ||
-        !std::isfinite(parameters.curve_shoulder)) {
-        diagnostic = {"hdr_tone_map_parameters_invalid",
-                      "HDR tone-map parameters must be finite with nonnegative gain values and positive gamma"};
-        return HdrToneMapStatus::invalid_request;
-    }
-    diagnostic = {};
-    return HdrToneMapStatus::ready;
+    return validate_hdr_tone_map_parameters(parameters, diagnostic);
 }
 
 DepthAttachmentStatus validate_depth_attachment_description(

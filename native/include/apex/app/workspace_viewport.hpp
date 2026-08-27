@@ -140,6 +140,9 @@ struct WorkspaceViewportPortableReflectionCaptureOptions {
 
 struct WorkspaceViewportPrepareRequest {
     render::PresentationTargetDescription presentation{};
+    // Presence enables the portable HDR scene target and the source-evidenced
+    // tone-map approximation. The default LDR path remains unchanged.
+    std::optional<render::HdrToneMapParameters> hdr_tone_map;
     // A presentation target is single-sample. Four-sample scenes resolve to
     // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
@@ -281,6 +284,9 @@ buildWorkspaceViewportStockD3D12NativeFrame(
 
 struct WorkspaceViewportFrameRequest {
     render::CameraFrame camera{};
+    // Override the prepared tone-map values for this frame. An LDR viewport
+    // rejects this value because it has no HDR scene target.
+    std::optional<render::HdrToneMapParameters> hdr_tone_map;
     bool load_color = false;
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = true;
@@ -509,6 +515,8 @@ private:
         render::PresentationTargetDescription presentation,
         std::unique_ptr<render::Texture> color,
         std::unique_ptr<render::Texture> resolved_color,
+        std::unique_ptr<render::Texture> tone_mapped_color,
+        std::optional<render::HdrToneMapParameters> hdr_tone_map,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -534,6 +542,8 @@ private:
     render::PresentationTargetDescription presentation_{};
     std::unique_ptr<render::Texture> color_;
     std::unique_ptr<render::Texture> resolved_color_;
+    std::unique_ptr<render::Texture> tone_mapped_color_;
+    std::optional<render::HdrToneMapParameters> hdr_tone_map_;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;
