@@ -166,26 +166,29 @@ void applies_recovered_selected_connector_color() {
 }
 
 void preserves_child_order_and_filters_mesh_connectors() {
-    const std::array<std::uint32_t, 3U> root_children = {1U, 2U, 3U};
+    const std::array<std::uint32_t, 4U> root_children = {1U, 2U, 3U, 5U};
     const std::array<std::uint32_t, 1U> plain_children = {4U};
-    const std::array<Node, 5U> nodes = {
+    const std::array<Node, 6U> nodes = {
         node({0.0F, 0.0F, 0.0F}, root_children),
         node({1.0F, 0.0F, 0.0F}, plain_children),
         node({2.0F, 0.0F, 0.0F}, {}, Kind::mesh),
         node({3.0F, 0.0F, 0.0F}, {}, Kind::skinned_mesh),
         node({4.0F, 0.0F, 0.0F}),
+        node({5.0F, 0.0F, 0.0F}),
     };
     const auto result = apex::render::build_skeleton_overlay(nodes, 0U);
-    require(result.ok() && result.vertices.size() == 16U,
-            "mesh connector is filtered while plain source order remains");
-    // Root marker, root->plain, root->mesh omitted, then plain marker,
-    // plain->leaf. The mesh child still recurses, as native intRender does.
+    require(result.ok() && result.vertices.size() == 18U,
+            "mesh connectors are filtered while plain source order remains");
+    // Root marker, both eligible root connectors, then the first child marker
+    // and connector. Mesh children still recurse, as native intRender does.
     require(result.vertices[6].position == std::array<float, 3U>{0.0F, 0.0F, 0.0F} &&
                 result.vertices[7].position == std::array<float, 3U>{1.0F, 0.0F, 0.0F} &&
-                result.vertices[8].position == std::array<float, 3U>{1.03F, 0.0F, 0.0F} &&
-                result.vertices[14].position == std::array<float, 3U>{1.0F, 0.0F, 0.0F} &&
-                result.vertices[15].position == std::array<float, 3U>{4.0F, 0.0F, 0.0F},
-            "source-order markers and connectors are preserved");
+                result.vertices[8].position == std::array<float, 3U>{0.0F, 0.0F, 0.0F} &&
+                result.vertices[9].position == std::array<float, 3U>{5.0F, 0.0F, 0.0F} &&
+                result.vertices[10].position == std::array<float, 3U>{1.03F, 0.0F, 0.0F} &&
+                result.vertices[16].position == std::array<float, 3U>{1.0F, 0.0F, 0.0F} &&
+                result.vertices[17].position == std::array<float, 3U>{4.0F, 0.0F, 0.0F},
+            "all parent connectors precede recursive child geometry");
 }
 
 void rejects_malformed_and_nonfinite_input_atomically() {

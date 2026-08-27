@@ -54,6 +54,10 @@ Each marker line has a half-extent of `0.03`:
 
 The renderer emits a marker only for a node that has children.
 It also emits parent-to-child connector lines in source order.
+It emits all connectors for the current node before it enters the first child.
+
+`SkeletonRenderer::intRender` emits the marker near `0x1005f170`.
+It calls the connector helper at `0x1005f103` before the recursive helper at `0x1005f001`.
 
 The current node controls the color of its connectors.
 Connectors from the selected current node are yellow `(1, 1, 0)`.

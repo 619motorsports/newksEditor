@@ -240,6 +240,18 @@ SkeletonOverlayResult build_skeleton_overlay_impl(
         if (frame.next_child == 0U && !node.children.empty()) {
             emit_marker(result, static_cast<std::uint32_t>(frame.node),
                         node.world_translation);
+            for (const std::uint32_t child_id : node.children) {
+                const SkeletonOverlayNode& child = nodes[child_id];
+                if (!connector_allowed(child.kind)) continue;
+                const auto& connector_color =
+                    frame.node == selected_node
+                        ? skeleton_overlay_selected_connector_color
+                        : skeleton_overlay_connector_color;
+                emit_vertex(result, node.world_translation, connector_color,
+                            static_cast<std::uint32_t>(frame.node), {});
+                emit_vertex(result, child.world_translation, connector_color,
+                            child_id, {});
+            }
         }
         if (frame.next_child == node.children.size()) {
             stack.pop_back();
@@ -247,19 +259,8 @@ SkeletonOverlayResult build_skeleton_overlay_impl(
         }
 
         const std::uint32_t child_id = node.children[frame.next_child++];
-        const SkeletonOverlayNode& child = nodes[child_id];
-        if (connector_allowed(child.kind)) {
-            const auto& connector_color =
-                frame.node == selected_node
-                    ? skeleton_overlay_selected_connector_color
-                    : skeleton_overlay_connector_color;
-            emit_vertex(result, node.world_translation, connector_color,
-                        static_cast<std::uint32_t>(frame.node), {});
-            emit_vertex(result, child.world_translation, connector_color,
-                        child_id, {});
-        }
         // All children recurse, including mesh and skinned-mesh nodes. Only
-        // their connector was filtered above, matching the native walk.
+        // their connectors were filtered above, matching the native walk.
         stack.push_back({static_cast<std::size_t>(child_id), frame.depth + 1U,
                          0U});
     }
