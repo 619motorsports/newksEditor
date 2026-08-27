@@ -2428,6 +2428,130 @@ void validates_ordered_indexed_batch_contract() {
             "over-limit indexed batch rejected");
 }
 
+void validates_cube_target_subresource_contract() {
+    FakeTexture target(Backend::Vulkan, target_description());
+    IndexedStaticMeshBatchDescription description;
+    Diagnostic diagnostic;
+    require(validate_indexed_static_mesh_batch_description(
+                target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "default 2D target subresource remains valid");
+
+    TextureTargetSubresource unexpected_face;
+    unexpected_face.cube_face = CubeFace::positive_x;
+    description.target_subresource = unexpected_face;
+    require(validate_indexed_static_mesh_batch_description(
+                target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_cube_face_unexpected",
+            "2D target rejects a cube face");
+
+    description.target_subresource = {};
+    description.target_subresource.array_layer = 1U;
+    require(validate_indexed_static_mesh_batch_description(
+                target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_target_subresource_layer_out_of_range",
+            "2D target rejects an out-of-range layer");
+
+    description.target_subresource = {};
+    description.target_subresource.mip_level = 1U;
+    require(validate_indexed_static_mesh_batch_description(
+                target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code ==
+                    "indexed_static_mesh_target_subresource_mip_out_of_range",
+            "2D target rejects an out-of-range mip");
+
+    TextureDescription cube_description = target_description();
+    cube_description.array_layers = 2U;
+    cube_description.shape = TextureShape::texture_cube;
+    FakeTexture cube_target(Backend::Vulkan, cube_description);
+    description.target_subresource = {0U, 1U, CubeFace::negative_z};
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::ready,
+            "cube target accepts an explicit face and logical cube layer");
+    require(texture_target_physical_array_layer(
+                cube_description, description.target_subresource) == 11U,
+            "cube target maps logical layer and face to its physical layer");
+
+    description.target_subresource = {};
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_cube_face_missing",
+            "cube target rejects a missing face");
+
+    description.target_subresource = {0U, 0U, static_cast<CubeFace>(6U)};
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_cube_face_invalid",
+            "cube target rejects an invalid face");
+
+    description.target_subresource = {0U, 2U, CubeFace::positive_x};
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_cube_layer_out_of_range",
+            "cube target rejects an out-of-range logical cube layer");
+
+    description.target_subresource = {1U, 0U, CubeFace::positive_x};
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::invalid_request &&
+                diagnostic.code == "indexed_static_mesh_target_cube_mip_out_of_range",
+            "cube target rejects an out-of-range mip");
+
+    TextureDescription mipped_cube_description = cube_description;
+    mipped_cube_description.mip_levels = 2U;
+    FakeTexture mipped_cube_target(Backend::Vulkan, mipped_cube_description);
+    require(validate_indexed_static_mesh_batch_description(
+                mipped_cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_target_cube_mip_unsupported",
+            "cube target rejects a nonzero mip in the first slice");
+
+    TextureDescription multisample_cube_description = cube_description;
+    multisample_cube_description.samples = 4U;
+    FakeTexture multisample_cube_target(Backend::Vulkan,
+                                        multisample_cube_description);
+    description.target_subresource = {0U, 0U, CubeFace::positive_x};
+    require(validate_indexed_static_mesh_batch_description(
+                multisample_cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_static_mesh_target_cube_samples_unsupported",
+            "cube target requires one sample");
+
+    description.load_color = true;
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code == "indexed_static_mesh_batch_cube_load_unsupported",
+            "cube target rejects loading a prior color slice");
+
+    description.load_color = false;
+    FakeTexture resolve_target(Backend::Vulkan, target_description());
+    description.resolve_target = &resolve_target;
+    require(validate_indexed_static_mesh_batch_description(
+                cube_target, description, diagnostic) ==
+                IndexedStaticMeshBatchStatus::unsupported &&
+                diagnostic.code ==
+                    "indexed_static_mesh_batch_cube_resolve_unsupported",
+            "cube target rejects a resolve target");
+
+    TextureTargetSubresource ordinary_array_subresource;
+    ordinary_array_subresource.array_layer = 5U;
+    TextureDescription ordinary_array = target_description();
+    ordinary_array.array_layers = texture_cube_face_count;
+    require(texture_target_physical_array_layer(
+                ordinary_array, ordinary_array_subresource) == 5U,
+            "2D arrays retain direct physical layer mapping");
+}
+
 void validates_overlay_line_batch_contract() {
     PipelineProgram pipeline = overlay_pipeline_fixture();
     FakeTexture target(Backend::Vulkan, target_description());
@@ -3211,6 +3335,7 @@ int main() {
         validates_alpha_tested_depth_only_contract();
         rejects_invalid_depth_contract();
         validates_ordered_indexed_batch_contract();
+        validates_cube_target_subresource_contract();
         validates_overlay_line_batch_contract();
         rejects_static_indexed_limits_and_ownership();
         rejects_staged_draw_packet();

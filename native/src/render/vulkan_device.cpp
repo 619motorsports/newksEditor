@@ -929,6 +929,19 @@ struct RawVulkanImage {
     }
 };
 
+struct ScopedVulkanImageView {
+    VkDevice device = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+
+    ScopedVulkanImageView() = default;
+    ScopedVulkanImageView(const ScopedVulkanImageView&) = delete;
+    ScopedVulkanImageView& operator=(const ScopedVulkanImageView&) = delete;
+    ~ScopedVulkanImageView() {
+        if (device != VK_NULL_HANDLE && view != VK_NULL_HANDLE)
+            vkDestroyImageView(device, view, nullptr);
+    }
+};
+
 // Depth attachments are persistent frame resources rather than color
 // textures. Keep their layout and clear history with the image so a later
 // indexed draw can safely choose LOAD instead of reading an undefined image.
@@ -1624,7 +1637,8 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
             barrier.image = image.image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount = description.mip_levels;
-            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.subresourceRange.layerCount = static_cast<std::uint32_t>(
+                texture_physical_array_layers(description));
             barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
                                         ? 0U
                                         : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -3535,7 +3549,8 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
                 barrier.image = image.image;
                 barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 barrier.subresourceRange.levelCount = description.mip_levels;
-                barrier.subresourceRange.layerCount = description.array_layers;
+                barrier.subresourceRange.layerCount = static_cast<std::uint32_t>(
+                    texture_physical_array_layers(description));
                 barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
                                             ? 0U
                                             : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -3620,7 +3635,10 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
             barrier.image = description.samples == 1U ? image.image : resolve_image.image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
-            barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
+            barrier.subresourceRange.layerCount = description.samples == 1U
+                                                      ? static_cast<std::uint32_t>(
+                                                            texture_physical_array_layers(description))
+                                                      : 1U;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -3749,6 +3767,7 @@ bool draw_indexed_batch_and_readback(
     const std::shared_ptr<VulkanContext>& context,
     RawVulkanImage& image,
     const TextureDescription& description,
+    const TextureTargetSubresource& target_subresource,
     std::span<const VulkanIndexedBatchDraw> draws,
     VulkanDepthAttachment* depth_attachment,
     bool load_color,
@@ -3768,6 +3787,33 @@ bool draw_indexed_batch_and_readback(
         diagnostic = {"vulkan_draw_samples_unsupported",
                       "Vulkan draws support only one or four samples in the bounded contract"};
         return false;
+    }
+    const std::uint32_t target_physical_layer = static_cast<std::uint32_t>(
+        texture_target_physical_array_layer(description, target_subresource));
+    VkImageView target_view = image.view;
+    ScopedVulkanImageView target_face_view;
+    if (description.shape == TextureShape::texture_cube) {
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = image.image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = vk_texture_format(description.format);
+        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view_info.subresourceRange.baseMipLevel = target_subresource.mip_level;
+        view_info.subresourceRange.levelCount = 1U;
+        view_info.subresourceRange.baseArrayLayer = target_physical_layer;
+        view_info.subresourceRange.layerCount = 1U;
+        const VkResult view_result = vkCreateImageView(
+            context->device, &view_info, nullptr, &target_face_view.view);
+        if (view_result != VK_SUCCESS) {
+            diagnostic = vk_error("vkCreateImageView(indexed cube face)", view_result);
+            diagnostic.code = view_result == VK_ERROR_DEVICE_LOST
+                                  ? "vulkan_device_lost"
+                                  : "vulkan_draw_execution_failed";
+            return false;
+        }
+        target_face_view.device = context->device;
+        target_view = target_face_view.view;
     }
     if (depth_attachment != nullptr) {
         if (depth_attachment->context().get() != context.get()) {
@@ -3970,7 +4016,7 @@ bool draw_indexed_batch_and_readback(
         return false;
     }
     std::array<VkImageView, 3> framebuffer_attachments{};
-    framebuffer_attachments[0] = image.view;
+    framebuffer_attachments[0] = target_view;
     if (depth_attachment != nullptr) framebuffer_attachments[1] = depth_attachment->view();
     if (description.samples != 1U)
         framebuffer_attachments[resolve_attachment_index] = resolved_image->view;
@@ -4073,7 +4119,8 @@ bool draw_indexed_batch_and_readback(
             barrier.image = image.image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount = description.mip_levels;
-            barrier.subresourceRange.layerCount = description.array_layers;
+            barrier.subresourceRange.layerCount = static_cast<std::uint32_t>(
+                texture_physical_array_layers(description));
             barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
                                         ? 0U : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -4241,13 +4288,18 @@ bool draw_indexed_batch_and_readback(
             barrier.image = description.samples == 1U ? image.image : resolved_image->image;
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.levelCount = description.samples == 1U ? description.mip_levels : 1U;
-            barrier.subresourceRange.layerCount = description.samples == 1U ? description.array_layers : 1U;
+            barrier.subresourceRange.layerCount = description.samples == 1U
+                                                      ? static_cast<std::uint32_t>(
+                                                            texture_physical_array_layers(description))
+                                                      : 1U;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
             VkBufferImageCopy copy{};
             copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.mipLevel = target_subresource.mip_level;
+            copy.imageSubresource.baseArrayLayer = target_physical_layer;
             copy.imageSubresource.layerCount = 1U;
             copy.imageExtent = {description.width, description.height, 1U};
             vkCmdCopyImageToBuffer(command,
@@ -4831,7 +4883,8 @@ public:
             }
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
-                context_, raw_, info_.description, draws, depth_attachment, request.load_color,
+                context_, raw_, info_.description, TextureTargetSubresource{},
+                draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr, true, output, diagnostic);
             initialized_ = initialized_ || drawn;
@@ -4849,7 +4902,8 @@ public:
             if (!prepare_vulkan_sampled_binding(request, context_, draw, diagnostic)) return false;
             const std::array<VulkanIndexedBatchDraw, 1> draws = {draw};
             const bool drawn = draw_indexed_batch_and_readback(
-                context_, raw_, info_.description, draws, depth_attachment, request.load_color,
+                context_, raw_, info_.description, TextureTargetSubresource{},
+                draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr, true, output, diagnostic);
             initialized_ = initialized_ || drawn;
@@ -5031,7 +5085,8 @@ public:
                 append_overlay_draw))
             return false;
         const bool drawn = draw_indexed_batch_and_readback(
-            context_, raw_, info_.description, draws, depth_attachment, description.load_color,
+            context_, raw_, info_.description, description.target_subresource,
+            draws, depth_attachment, description.load_color,
             description.clear_depth, description.depth_clear_value, description.clear_color,
             layout_, resolve_target != nullptr ? &resolve_target->raw_ : nullptr,
             resolve_target != nullptr ? &resolve_target->layout_ : nullptr,

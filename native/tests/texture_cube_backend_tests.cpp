@@ -411,6 +411,61 @@ void exercise_reflection_draw(Device &device, const Backend backend,
               "reflection draw matches recovered branch arithmetic");
     }
   }
+
+  TextureDescription capture_description = target_description;
+  capture_description.shape = TextureShape::texture_cube;
+  TextureResult capture_target = device.create_texture(capture_description);
+  require(capture_target.ok(), "reflection draw creates a cube capture target");
+
+  const std::array<IndexedStaticMeshDrawRequest, 1U> capture_draws = {request};
+  IndexedStaticMeshBatchDescription capture_batch;
+  capture_batch.draws = capture_draws;
+  capture_batch.target_subresource.cube_face = CubeFace::negative_z;
+
+  const std::array<float, 4U> capture_values = {0.1F, 5.0F, 0.5F, 1.0F};
+  std::fill(reflection.begin(), reflection.end(), std::byte{});
+  std::memcpy(reflection.data(), capture_values.data(), sizeof(capture_values));
+  require(device.update_buffer(*reflection_buffer.buffer, 0U, reflection).ok(),
+          "cube-face draw updates its semantic controls");
+
+  const IndexedStaticMeshBatchResult captured =
+      device.draw_indexed_static_mesh_batch_and_readback(
+          *capture_target.texture, capture_batch);
+  if (!captured.ok())
+    throw std::runtime_error(
+        "Cube-face reflection draw failed: " + captured.diagnostic.code + ": " +
+        captured.diagnostic.message);
+
+  StockMultiMapReflectionInput capture_expected_input;
+  capture_expected_input.controls.fresnel_and_additive = capture_values;
+  capture_expected_input.surface_normal = {-1.0F, 0.0F, 0.0F};
+  capture_expected_input.camera_to_surface = {1.0F, 0.0F, 0.0F};
+  capture_expected_input.maps_specular_exponent = 0.5F;
+  capture_expected_input.ks_specular_exponent = 255.0F;
+  capture_expected_input.maps_reflection = 0.8F;
+  capture_expected_input.lit_rgb = {0.2F, 0.2F, 0.2F};
+  for (std::size_t channel = 0U; channel < 3U; ++channel)
+    capture_expected_input.cube_rgb[channel] =
+        static_cast<float>(std::to_integer<std::uint8_t>(pixel[channel])) /
+        255.0F;
+  const StockMultiMapReflectionResult capture_expected =
+      evaluate_stock_multimap_reflection(capture_expected_input);
+  require(capture_expected.ready,
+          "cube-face draw resolves its recovered expected value");
+
+  const std::array<float, 4U> expected_capture_rgba = {
+      capture_expected.rgb[0U], capture_expected.rgb[1U],
+      capture_expected.rgb[2U], capture_expected.alpha};
+  const std::size_t capture_center = (4U * 8U + 4U) * 4U;
+  for (std::size_t channel = 0U; channel < expected_capture_rgba.size();
+       ++channel) {
+    const long rounded = std::lround(
+        std::clamp(expected_capture_rgba[channel], 0.0F, 1.0F) * 255.0F);
+    const int actual =
+        std::to_integer<std::uint8_t>(captured.rgba8[capture_center + channel]);
+    require(std::abs(actual - static_cast<int>(rounded)) <= 1,
+            "cube-face batch targets and reads the selected face");
+  }
 }
 
 bool exercise_backend(const Backend backend, const DeviceOptions &options) {

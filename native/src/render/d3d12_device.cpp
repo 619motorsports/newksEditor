@@ -2598,6 +2598,12 @@ bool draw_indexed_static_mesh_batch_and_readback(
                       "D3D12 indexed static-mesh batch has no color target"};
         return false;
     }
+    const UINT target_physical_layer = static_cast<UINT>(
+        texture_target_physical_array_layer(description,
+                                            batch.target_subresource));
+    const UINT target_subresource =
+        target_physical_layer * description.mip_levels +
+        batch.target_subresource.mip_level;
     if (batch.load_color && !color_initialized) {
         diagnostic = {"indexed_color_load_before_clear",
                       "A color load was requested before the D3D12 color attachment was cleared"};
@@ -3453,9 +3459,16 @@ bool draw_indexed_static_mesh_batch_and_readback(
     }
     D3D12_RENDER_TARGET_VIEW_DESC rtv_description{};
     rtv_description.Format = dxgi_texture_format(description.format);
-    rtv_description.ViewDimension = description.samples > 1U ? D3D12_RTV_DIMENSION_TEXTURE2DMS
-                                                               : D3D12_RTV_DIMENSION_TEXTURE2D;
-    rtv_description.Texture2D.MipSlice = 0U;
+    if (description.shape == TextureShape::texture_cube) {
+        rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtv_description.Texture2DArray.MipSlice = batch.target_subresource.mip_level;
+        rtv_description.Texture2DArray.FirstArraySlice = target_physical_layer;
+        rtv_description.Texture2DArray.ArraySize = 1U;
+    } else {
+        rtv_description.ViewDimension = description.samples > 1U ? D3D12_RTV_DIMENSION_TEXTURE2DMS
+                                                                   : D3D12_RTV_DIMENSION_TEXTURE2D;
+        rtv_description.Texture2D.MipSlice = batch.target_subresource.mip_level;
+    }
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     context->device->CreateRenderTargetView(destination, &rtv_description, rtv);
 
@@ -3491,7 +3504,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
     UINT64 row_size = 0U;
     UINT64 readback_size = 0U;
     if (batch.capture_rgba8)
-        context->device->GetCopyableFootprints(&resource_description, 0U, 1U, 0U,
+        context->device->GetCopyableFootprints(&resource_description, target_subresource, 1U, 0U,
                                                &footprint, &row_count, &row_size,
                                                &readback_size);
     constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
@@ -3904,7 +3917,7 @@ bool draw_indexed_static_mesh_batch_and_readback(
         D3D12_TEXTURE_COPY_LOCATION source{};
         source.pResource = readback_source;
         source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        source.SubresourceIndex = 0U;
+        source.SubresourceIndex = target_subresource;
         D3D12_TEXTURE_COPY_LOCATION target{};
         target.pResource = readback.Get();
         target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;

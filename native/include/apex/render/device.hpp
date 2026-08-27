@@ -311,6 +311,14 @@ struct TextureUpload {
     CubeFace cube_face = CubeFace::none;
 };
 
+struct TextureTargetSubresource {
+    std::uint32_t mip_level = 0;
+    // A logical array layer, or the logical cube index for texture_cube.
+    std::uint32_t array_layer = 0;
+    // Required for texture_cube and forbidden for texture_2d.
+    CubeFace cube_face = CubeFace::none;
+};
+
 [[nodiscard]] constexpr bool is_cube_face(const CubeFace face) noexcept {
     return static_cast<std::uint8_t>(face) < texture_cube_face_count;
 }
@@ -338,6 +346,15 @@ texture_upload_physical_array_layer(const TextureDescription& description,
                ? static_cast<std::uint64_t>(upload.array_layer) * texture_cube_face_count +
                      static_cast<std::uint8_t>(upload.cube_face)
                : upload.array_layer;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+texture_target_physical_array_layer(const TextureDescription& description,
+                                    const TextureTargetSubresource& target) noexcept {
+    return description.shape == TextureShape::texture_cube
+               ? static_cast<std::uint64_t>(target.array_layer) * texture_cube_face_count +
+                     static_cast<std::uint8_t>(target.cube_face)
+               : target.array_layer;
 }
 
 struct TextureUploadPlan {
@@ -945,6 +962,9 @@ struct IndexedStaticMeshBatchDescription {
     // Selected draws merge into the indexed scene sequence by scene_position.
     // A selected draw executes before line draws at the same position.
     std::span<const SelectedMeshDrawRequest> selected_mesh_draws{};
+    // All draws target this one subresource. The first cube-target slice is
+    // single-sample, mip zero, clear-only, and has no resolve target.
+    TextureTargetSubresource target_subresource{};
 };
 
 enum class IndexedStaticMeshBatchStatus {

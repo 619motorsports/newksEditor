@@ -1099,7 +1099,8 @@ IndexedPortableResourceLayout classify_indexed_portable_resource_layout(
 namespace {
 
 IndexedStaticMeshDrawStatus validate_indexed_color_target(
-    const TextureDescription& target, Diagnostic& diagnostic) {
+    const TextureDescription& target, Diagnostic& diagnostic,
+    const bool allow_cube_target = false) {
     if (!valid_render_sample_count(target.samples)) {
         diagnostic = {"indexed_static_mesh_target_samples_unsupported",
                       "Indexed static-mesh color targets require exactly 1 or 4 samples"};
@@ -1114,12 +1115,20 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
                       "Indexed static-mesh drawing requires color-attachment and transfer-source usage"};
         return IndexedStaticMeshDrawStatus::invalid_request;
     }
-    if (target.width == 0U || target.height == 0U ||
-        target.mip_levels != 1U || target.array_layers != 1U ||
-        target.shape != TextureShape::texture_2d) {
+    const bool valid_shape = target.shape == TextureShape::texture_2d ||
+                             (allow_cube_target && target.shape == TextureShape::texture_cube);
+    const bool valid_subresource_count = target.shape == TextureShape::texture_cube
+                                             ? target.mip_levels != 0U && target.array_layers != 0U
+                                             : target.mip_levels == 1U && target.array_layers == 1U;
+    if (target.width == 0U || target.height == 0U || !valid_subresource_count || !valid_shape) {
         diagnostic = {"indexed_static_mesh_target_invalid",
                       "Indexed static-mesh target dimensions or subresource count are invalid"};
         return IndexedStaticMeshDrawStatus::invalid_request;
+    }
+    if (target.shape == TextureShape::texture_cube && target.samples != 1U) {
+        diagnostic = {"indexed_static_mesh_target_cube_samples_unsupported",
+                      "Cube indexed static-mesh targets require exactly one sample"};
+        return IndexedStaticMeshDrawStatus::unsupported;
     }
     const std::uint64_t row_bytes =
         static_cast<std::uint64_t>(target.width) * 4U;
@@ -1601,10 +1610,62 @@ IndexedStaticMeshDrawStatus validate_stock_ks_per_pixel_vulkan_source_binding(
     return status;
 }
 
+IndexedStaticMeshBatchStatus validate_indexed_target_subresource(
+    const TextureDescription& target, const TextureTargetSubresource& subresource,
+    Diagnostic& diagnostic) {
+    if (target.shape == TextureShape::texture_cube) {
+        if (subresource.cube_face == CubeFace::none) {
+            diagnostic = {"indexed_static_mesh_target_cube_face_missing",
+                          "Cube indexed static-mesh targets require an explicit face"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (!is_cube_face(subresource.cube_face)) {
+            diagnostic = {"indexed_static_mesh_target_cube_face_invalid",
+                          "Cube indexed static-mesh target face is invalid"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (subresource.array_layer >= target.array_layers) {
+            diagnostic = {"indexed_static_mesh_target_cube_layer_out_of_range",
+                          "Cube indexed static-mesh target layer is out of range"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (subresource.mip_level >= target.mip_levels) {
+            diagnostic = {"indexed_static_mesh_target_cube_mip_out_of_range",
+                          "Cube indexed static-mesh target mip is out of range"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        if (subresource.mip_level != 0U) {
+            diagnostic = {"indexed_static_mesh_target_cube_mip_unsupported",
+                          "Cube indexed static-mesh targets support only mip zero"};
+            return IndexedStaticMeshBatchStatus::unsupported;
+        }
+        diagnostic = {};
+        return IndexedStaticMeshBatchStatus::ready;
+    }
+    if (subresource.cube_face != CubeFace::none) {
+        diagnostic = {"indexed_static_mesh_target_cube_face_unexpected",
+                      "2D indexed static-mesh targets cannot specify a cube face"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (subresource.mip_level != 0U) {
+        diagnostic = {"indexed_static_mesh_target_subresource_mip_out_of_range",
+                      "2D indexed static-mesh target mip is out of range"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (subresource.array_layer != 0U) {
+        diagnostic = {"indexed_static_mesh_target_subresource_layer_out_of_range",
+                      "2D indexed static-mesh target layer is out of range"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    diagnostic = {};
+    return IndexedStaticMeshBatchStatus::ready;
+}
+
 } // namespace
 
-IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
-    const Texture& texture, const IndexedStaticMeshDrawRequest& request, Diagnostic& diagnostic) {
+static IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request_internal(
+    const Texture& texture, const IndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic, const bool allow_cube_target) {
     if (request.packet == nullptr || request.pipeline == nullptr || request.vertex_buffer == nullptr ||
         request.index_buffer == nullptr) {
         diagnostic = {"indexed_static_mesh_handle_missing",
@@ -1631,7 +1692,7 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     }
     const TextureDescription& target = texture.info().description;
     const IndexedStaticMeshDrawStatus target_status =
-        validate_indexed_color_target(target, diagnostic);
+        validate_indexed_color_target(target, diagnostic, allow_cube_target);
     if (target_status != IndexedStaticMeshDrawStatus::ready)
         return target_status;
     if (request.depth_attachment != nullptr) {
@@ -2916,6 +2977,13 @@ IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
     return IndexedStaticMeshDrawStatus::ready;
 }
 
+IndexedStaticMeshDrawStatus validate_indexed_static_mesh_draw_request(
+    const Texture& texture, const IndexedStaticMeshDrawRequest& request,
+    Diagnostic& diagnostic) {
+    return validate_indexed_static_mesh_draw_request_internal(
+        texture, request, diagnostic, false);
+}
+
 IndexedStaticMeshBatchStatus validate_overlay_line_draw_request(
     const Texture& texture, const OverlayLineDrawRequest& request,
     Diagnostic& diagnostic) {
@@ -3288,11 +3356,26 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
     const IndexedStaticMeshDrawStatus target_status =
-        validate_indexed_color_target(texture.info().description, diagnostic);
+        validate_indexed_color_target(texture.info().description, diagnostic, true);
     if (target_status != IndexedStaticMeshDrawStatus::ready)
         return target_status == IndexedStaticMeshDrawStatus::unsupported
                    ? IndexedStaticMeshBatchStatus::unsupported
                    : IndexedStaticMeshBatchStatus::invalid_request;
+    const TextureDescription& target = texture.info().description;
+    const IndexedStaticMeshBatchStatus target_subresource_status =
+        validate_indexed_target_subresource(target, description.target_subresource, diagnostic);
+    if (target_subresource_status != IndexedStaticMeshBatchStatus::ready)
+        return target_subresource_status;
+    if (target.shape == TextureShape::texture_cube && description.load_color) {
+        diagnostic = {"indexed_static_mesh_batch_cube_load_unsupported",
+                      "Cube indexed static-mesh targets cannot load a prior color slice"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    if (target.shape == TextureShape::texture_cube && description.resolve_target != nullptr) {
+        diagnostic = {"indexed_static_mesh_batch_cube_resolve_unsupported",
+                      "Cube indexed static-mesh targets cannot use a resolve target"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
     const bool has_vulkan_abi_probe = std::any_of(
         description.draws.begin(), description.draws.end(),
         [](const IndexedStaticMeshDrawRequest& request) {
@@ -3435,7 +3518,6 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                       "A batch depth clear requires a persistent depth attachment"};
         return IndexedStaticMeshBatchStatus::invalid_request;
     }
-    const TextureDescription& target = texture.info().description;
     if (description.resolve_target != nullptr) {
         if (description.resolve_target == &texture) {
             diagnostic = {"indexed_static_mesh_batch_resolve_alias",
@@ -3566,7 +3648,8 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         effective.depth_clear_value = description.depth_clear_value;
         Diagnostic draw_diagnostic;
         const IndexedStaticMeshDrawStatus draw_status =
-            validate_indexed_static_mesh_draw_request(texture, effective, draw_diagnostic);
+            validate_indexed_static_mesh_draw_request_internal(
+                texture, effective, draw_diagnostic, true);
         if (draw_status != IndexedStaticMeshDrawStatus::ready) {
             diagnostic = std::move(draw_diagnostic);
             return draw_status == IndexedStaticMeshDrawStatus::unsupported
