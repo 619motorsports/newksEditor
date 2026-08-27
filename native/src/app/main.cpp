@@ -76,6 +76,7 @@ void usage(std::ostream& output) {
               "                       [--node-search <query>] [--selected-node <id> [--isolate-selected]]\n"
               "                       [--show-hidden] [--wireframe] [--grid] [--view-axis]\n"
               "                       [--weather <stock-id>] [--sun-heading <degrees>] [--sun-height <degrees>]\n"
+              "                       [--hdr [--exposure <value>]]\n"
               "                       [--builtin-vulkan-ks-per-pixel]\n"
               "                       [--d3d12-ks-per-pixel-package <file>]\n"
               "                       [--d3d12-ks-per-pixel-at-package <file>]\n"
@@ -538,6 +539,8 @@ struct WindowWorkspaceOptions {
     bool sunHeadingSpecified = false;
     double sunHeight = apex::app::workspace_viewport_default_sun_height_degrees;
     bool sunHeightSpecified = false;
+    bool hdr = false;
+    std::optional<float> exposure;
     bool builtinVulkanKsPerPixel = false;
     std::optional<std::filesystem::path> d3d12KsPerPixelPackage;
     std::optional<std::filesystem::path> d3d12KsPerPixelAtPackage;
@@ -1301,6 +1304,19 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
             result.sunHeight = parse_finite_number(
                 require_value("--sun-height"), "sun height");
             result.sunHeightSpecified = true;
+        } else if (option == "--hdr") {
+            if (result.hdr)
+                throw std::runtime_error("duplicate --hdr option");
+            result.hdr = true;
+        } else if (option == "--exposure") {
+            if (result.exposure.has_value())
+                throw std::runtime_error("duplicate --exposure option");
+            const float exposure = parse_finite_float(
+                require_value("--exposure"), "exposure");
+            if (exposure < 0.0F)
+                throw std::runtime_error(
+                    "exposure must be finite and nonnegative");
+            result.exposure = exposure;
         } else if (option == "--builtin-vulkan-ks-per-pixel") {
             if (result.builtinVulkanKsPerPixel)
                 throw std::runtime_error(
@@ -1557,6 +1573,11 @@ WindowWorkspaceOptions parse_window_workspace_options(int argc, char** argv,
                                   result.sunHeightSpecified;
     if (lighting_options && !has_model_source)
         throw std::runtime_error("lighting options require a workspace model");
+    if (result.exposure.has_value() && !result.hdr)
+        throw std::runtime_error("--exposure requires --hdr");
+    if (result.hdr && !has_model_source)
+        throw std::runtime_error(
+            "post-processing options require a workspace model");
     return result;
 }
 
@@ -2300,6 +2321,15 @@ int run_window(int argc, char** argv) {
         apex::app::WorkspaceViewportPrepareRequest request;
         request.presentation = target_result.target->info().description;
         request.sky_enabled = true;
+        if (workspace_options.hdr) {
+            apex::render::HdrToneMapParameters tone_map;
+            tone_map.exposure = workspace_options.exposure.value_or(0.28F);
+            tone_map.bloom.enabled = true;
+            request.hdr_tone_map = tone_map;
+            request.hdr_exposure_mode = workspace_options.exposure.has_value()
+                ? apex::render::HdrExposureMode::manual
+                : apex::render::HdrExposureMode::automatic;
+        }
         request.shader_modules = loaded_workspace.descriptors;
         if (workspace_options.builtinVulkanKsPerPixel) {
             request.builtin_vulkan_source =

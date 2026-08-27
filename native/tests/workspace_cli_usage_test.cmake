@@ -1523,3 +1523,175 @@ if(truncated_position EQUAL -1)
     "truncated workspace model was not diagnosed at the app boundary: ${truncated_error}")
 endif()
 file(REMOVE "${truncated_model}")
+
+# HDR post-processing is an explicit workspace-only option.  Keep these
+# parser checks before the backend is initialized so malformed options cannot
+# open a window or allocate rendering resources.
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --hdr
+  RESULT_VARIABLE duplicate_hdr_result
+  ERROR_VARIABLE duplicate_hdr_error
+)
+if(NOT duplicate_hdr_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate HDR option returned ${duplicate_hdr_result}: ${duplicate_hdr_error}")
+endif()
+string(FIND "${duplicate_hdr_error}"
+  "duplicate --hdr option" duplicate_hdr_position)
+if(duplicate_hdr_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate HDR option was not diagnosed: ${duplicate_hdr_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --exposure 0.25 --exposure 0.5
+  RESULT_VARIABLE duplicate_exposure_result
+  ERROR_VARIABLE duplicate_exposure_error
+)
+if(NOT duplicate_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "duplicate exposure option returned ${duplicate_exposure_result}: ${duplicate_exposure_error}")
+endif()
+string(FIND "${duplicate_exposure_error}"
+  "duplicate --exposure option" duplicate_exposure_position)
+if(duplicate_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "duplicate exposure option was not diagnosed: ${duplicate_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --exposure
+  RESULT_VARIABLE missing_exposure_result
+  ERROR_VARIABLE missing_exposure_error
+)
+if(NOT missing_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "missing exposure value returned ${missing_exposure_result}: ${missing_exposure_error}")
+endif()
+string(FIND "${missing_exposure_error}"
+  "--exposure requires a value" missing_exposure_position)
+if(missing_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "missing exposure value was not diagnosed: ${missing_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --exposure not-a-number
+  RESULT_VARIABLE malformed_exposure_result
+  ERROR_VARIABLE malformed_exposure_error
+)
+if(NOT malformed_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "malformed exposure value returned ${malformed_exposure_result}: ${malformed_exposure_error}")
+endif()
+string(FIND "${malformed_exposure_error}"
+  "exposure must be a finite number" malformed_exposure_position)
+if(malformed_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "malformed exposure value was not diagnosed: ${malformed_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --exposure nan
+  RESULT_VARIABLE nonfinite_exposure_result
+  ERROR_VARIABLE nonfinite_exposure_error
+)
+if(NOT nonfinite_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "non-finite exposure returned ${nonfinite_exposure_result}: ${nonfinite_exposure_error}")
+endif()
+string(FIND "${nonfinite_exposure_error}"
+  "exposure must be a finite number" nonfinite_exposure_position)
+if(nonfinite_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "non-finite exposure was not diagnosed: ${nonfinite_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --hdr --exposure -1
+  RESULT_VARIABLE negative_exposure_result
+  ERROR_VARIABLE negative_exposure_error
+)
+if(NOT negative_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "negative exposure value returned ${negative_exposure_result}: ${negative_exposure_error}")
+endif()
+string(FIND "${negative_exposure_error}"
+  "exposure must be finite and nonnegative" negative_exposure_position)
+if(negative_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "negative exposure value was not diagnosed: ${negative_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --hdr
+  RESULT_VARIABLE detached_hdr_result
+  ERROR_VARIABLE detached_hdr_error
+)
+if(NOT detached_hdr_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached HDR option returned ${detached_hdr_result}: ${detached_hdr_error}")
+endif()
+string(FIND "${detached_hdr_error}"
+  "post-processing options require a workspace model" detached_hdr_position)
+if(detached_hdr_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached HDR option was not diagnosed: ${detached_hdr_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan --exposure 0.25
+  RESULT_VARIABLE detached_exposure_result
+  ERROR_VARIABLE detached_exposure_error
+)
+if(NOT detached_exposure_result STREQUAL "1")
+  message(FATAL_ERROR
+    "detached exposure option returned ${detached_exposure_result}: ${detached_exposure_error}")
+endif()
+string(FIND "${detached_exposure_error}"
+  "--exposure requires --hdr" detached_exposure_position)
+if(detached_exposure_position EQUAL -1)
+  message(FATAL_ERROR
+    "detached exposure option was not diagnosed: ${detached_exposure_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --model missing-automatic-hdr-workspace.kn5 --hdr
+  RESULT_VARIABLE accepted_automatic_hdr_result
+  OUTPUT_VARIABLE accepted_automatic_hdr_output
+  ERROR_VARIABLE accepted_automatic_hdr_error
+)
+if(NOT accepted_automatic_hdr_result STREQUAL "1")
+  message(FATAL_ERROR
+    "accepted automatic HDR returned ${accepted_automatic_hdr_result}: ${accepted_automatic_hdr_error}")
+endif()
+string(FIND "${accepted_automatic_hdr_error}" "cannot open"
+  accepted_automatic_hdr_position)
+if(accepted_automatic_hdr_position EQUAL -1)
+  message(FATAL_ERROR
+    "accepted automatic HDR did not reach workspace loading: ${accepted_automatic_hdr_output}${accepted_automatic_hdr_error}")
+endif()
+
+execute_process(
+  COMMAND "${APEX_NATIVE_COMMAND}" --window vulkan
+          --model missing-hdr-workspace.kn5 --hdr --exposure 0.25
+  RESULT_VARIABLE accepted_hdr_result
+  OUTPUT_VARIABLE accepted_hdr_output
+  ERROR_VARIABLE accepted_hdr_error
+)
+if(NOT accepted_hdr_result STREQUAL "1")
+  message(FATAL_ERROR
+    "accepted HDR options returned ${accepted_hdr_result}: ${accepted_hdr_error}")
+endif()
+string(FIND "${accepted_hdr_error}" "cannot open" accepted_hdr_position)
+if(accepted_hdr_position EQUAL -1)
+  message(FATAL_ERROR
+    "accepted HDR options did not reach workspace loading: ${accepted_hdr_output}${accepted_hdr_error}")
+endif()
