@@ -689,3 +689,25 @@ if(TARGET render_backend_tests)
     )
   endif()
 endif()
+
+if(APEX_ENABLE_SANITIZERS AND NOT MSVC)
+  # Mesa/lavapipe retains small LLVM worker allocations until process exit.
+  # Keep ASan/UBSan active for the runtime code while excluding those
+  # external-driver allocations from every test that initializes Vulkan.
+  foreach(vulkan_runtime_test IN ITEMS
+      stock_ks_per_pixel_vulkan_runtime_tests
+      hdr_tone_map_tests
+      portable_sky_tests
+      portable_cloud_tests
+      portable_grass_tests
+      fxaa_tests
+      texture_cube_backend_tests
+      directional_shadow_source_runtime_vulkan
+      viewport_frame_border_runtime_vulkan
+      stock_multimap_source_runtime_vulkan)
+    if(TEST ${vulkan_runtime_test})
+      set_property(TEST ${vulkan_runtime_test} APPEND PROPERTY
+        ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+    endif()
+  endforeach()
+endif()

@@ -1998,9 +1998,21 @@ bool contract_backend(apex::render::Backend backend) {
         PresentationTargetDescription presentation_description;
         presentation_description.width = 64U;
         presentation_description.height = 64U;
-        PresentationTargetResult target =
-            presentation_device.device->create_presentation_target(presentation_description);
-        require(target.ok(), "Vulkan headless presentation target creation");
+        PresentationTargetResult target;
+        for (const TextureFormat candidate : {TextureFormat::bgra8_srgb,
+                                              TextureFormat::rgba8_unorm,
+                                              TextureFormat::rgba8_srgb,
+                                              TextureFormat::bgra8_unorm}) {
+            presentation_description.format = candidate;
+            target = presentation_device.device->create_presentation_target(
+                presentation_description);
+            if (target.ok()) break;
+            if (target.diagnostic.code != "vulkan_presentation_format_unsupported")
+                break;
+        }
+        require(target.ok(),
+                "Vulkan headless presentation target creation: " +
+                    target.diagnostic.code);
         PresentationTargetResult duplicate_target =
             presentation_device.device->create_presentation_target(presentation_description);
         require(duplicate_target.status == PresentationTargetStatus::unsupported &&

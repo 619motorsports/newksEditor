@@ -9177,14 +9177,14 @@ public:
         submit.commandBufferCount = 1U;
         submit.pCommandBuffers = &command_buffer_;
         submit.signalSemaphoreCount = 1U;
-        submit.pSignalSemaphores = &render_finished_;
+        submit.pSignalSemaphores = &render_finished_[image_index_];
         result = vkQueueSubmit(context_->queue, 1U, &submit, frame_fence_);
         if (result != VK_SUCCESS) return failure("vkQueueSubmit(presentation)", result);
 
         VkPresentInfoKHR present{};
         present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         present.waitSemaphoreCount = 1U;
-        present.pWaitSemaphores = &render_finished_;
+        present.pWaitSemaphores = &render_finished_[image_index_];
         present.swapchainCount = 1U;
         present.pSwapchains = &swapchain_;
         present.pImageIndices = &image_index_;
@@ -9310,14 +9310,14 @@ public:
         submit.commandBufferCount = 1U;
         submit.pCommandBuffers = &command_buffer_;
         submit.signalSemaphoreCount = 1U;
-        submit.pSignalSemaphores = &render_finished_;
+        submit.pSignalSemaphores = &render_finished_[image_index_];
         result = vkQueueSubmit(context_->queue, 1U, &submit, frame_fence_);
         if (result != VK_SUCCESS) return failure("vkQueueSubmit(presentation texture)", result);
 
         VkPresentInfoKHR present{};
         present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         present.waitSemaphoreCount = 1U;
-        present.pWaitSemaphores = &render_finished_;
+        present.pWaitSemaphores = &render_finished_[image_index_];
         present.swapchainCount = 1U;
         present.pSwapchains = &swapchain_;
         present.pImageIndices = &image_index_;
@@ -9592,8 +9592,11 @@ private:
         VkSemaphoreCreateInfo semaphore_info{};
         semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         result = vkCreateSemaphore(context_->device, &semaphore_info, nullptr, &image_available_);
-        if (result == VK_SUCCESS)
-            result = vkCreateSemaphore(context_->device, &semaphore_info, nullptr, &render_finished_);
+        render_finished_.resize(images_.size(), VK_NULL_HANDLE);
+        for (VkSemaphore& semaphore : render_finished_) {
+            if (result != VK_SUCCESS) break;
+            result = vkCreateSemaphore(context_->device, &semaphore_info, nullptr, &semaphore);
+        }
         VkFenceCreateInfo fence_info{};
         fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -9617,8 +9620,9 @@ private:
             if (command_buffer_ != VK_NULL_HANDLE)
                 vkFreeCommandBuffers(context_->device, context_->command_pool, 1U, &command_buffer_);
             if (frame_fence_ != VK_NULL_HANDLE) vkDestroyFence(context_->device, frame_fence_, nullptr);
-            if (render_finished_ != VK_NULL_HANDLE)
-                vkDestroySemaphore(context_->device, render_finished_, nullptr);
+            for (VkSemaphore semaphore : render_finished_)
+                if (semaphore != VK_NULL_HANDLE)
+                    vkDestroySemaphore(context_->device, semaphore, nullptr);
             if (image_available_ != VK_NULL_HANDLE)
                 vkDestroySemaphore(context_->device, image_available_, nullptr);
             for (VkFramebuffer framebuffer : framebuffers_)
@@ -9630,7 +9634,7 @@ private:
         }
         command_buffer_ = VK_NULL_HANDLE;
         frame_fence_ = VK_NULL_HANDLE;
-        render_finished_ = VK_NULL_HANDLE;
+        render_finished_.clear();
         image_available_ = VK_NULL_HANDLE;
         framebuffers_.clear();
         views_.clear();
@@ -9650,7 +9654,7 @@ private:
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
     VkSemaphore image_available_ = VK_NULL_HANDLE;
-    VkSemaphore render_finished_ = VK_NULL_HANDLE;
+    std::vector<VkSemaphore> render_finished_;
     VkFence frame_fence_ = VK_NULL_HANDLE;
     VkFormat format_ = VK_FORMAT_UNDEFINED;
     VkExtent2D extent_{0U, 0U};
