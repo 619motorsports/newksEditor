@@ -140,13 +140,24 @@ void enforcesShaderProvenanceFormatBoundary() {
                     std::string_view("source_equivalent"),
             "source-equivalent SPIR-V provenance is explicit and accepted");
 
+    PipelineProgram source_equivalent_dxbc = source_equivalent;
+    for (auto& shader : source_equivalent_dxbc.shaders) {
+        shader.format = PipelineShaderFormat::dxbc;
+        shader.bytes = dxbc_container();
+    }
+    const PipelineValidationResult source_dxbc_result =
+        validate_pipeline(source_equivalent_dxbc);
+    require(source_dxbc_result.valid,
+            "source-equivalent provenance accepts maintained DXBC");
+
     PipelineProgram mislabeled_source = source_equivalent;
-    mislabeled_source.shaders[0].format = PipelineShaderFormat::dxbc;
+    mislabeled_source.shaders[0].format =
+        PipelineShaderFormat::stock_container;
     const PipelineValidationResult source_mismatch =
         validate_pipeline(mislabeled_source);
     require(!source_mismatch.valid &&
                 has_code(source_mismatch, "shader_provenance_format_mismatch"),
-            "source-equivalent provenance cannot label DXBC");
+            "source-equivalent provenance cannot label a stock container");
 
     PipelineProgram mislabeled_native = valid_program();
     mislabeled_native.shaders[0].provenance =

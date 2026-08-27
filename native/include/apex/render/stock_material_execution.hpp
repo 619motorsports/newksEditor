@@ -13,8 +13,9 @@ namespace apex::render {
 
 // This component is an explicit handoff from validated KN5 material data to
 // the already-executable static-scene adapter. It accepts caller-supplied
-// SPIR-V, DXBC, or DXIL modules and an explicit immutable Vulkan ksPerPixel
-// source package. Stock-container translation remains staged.
+// SPIR-V, DXBC, or DXIL modules. It also accepts explicit immutable
+// source-equivalent packages for bounded stock families. Stock-container
+// translation remains staged.
 enum class StockMaterialShaderKeyKind : std::uint8_t {
     material_name,
     shader_family,
@@ -52,6 +53,11 @@ enum class BuiltinVulkanStockSourceSelector : std::uint8_t {
     ks_per_pixel,
 };
 
+enum class BuiltinStockMultiMapSourceSelector : std::uint8_t {
+    disabled,
+    normal_detail,
+};
+
 enum class BuiltinD3D12StockNativeSelector : std::uint8_t {
     disabled,
     ks_per_pixel_base,
@@ -86,6 +92,13 @@ struct StockMaterialExecutionRequest {
         BuiltinVulkanStockSourceSelector::disabled;
     StockKsPerPixelNativeSamplerSettings
         builtin_vulkan_source_sampler_settings{};
+    // Opt-in source-equivalent execution for exact static
+    // ksPerPixelMultiMap_NMDetail and ksPerPixelMultiMap_AT_NMDetail packets
+    // on Vulkan or D3D12. This uses the portable 12-binding ABI and does not
+    // enter the recovered native resource path. Caller modules remain
+    // authoritative.
+    BuiltinStockMultiMapSourceSelector builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::disabled;
     // Opt-in installed-DXBC execution for opaque static ksPerPixel and
     // ksPerPixelAT scenes on D3D12. Matching caller modules remain
     // authoritative. Each validated package owner is cloned into one mutable
@@ -125,11 +138,11 @@ struct StockMaterialExecutionResult {
 };
 
 // Build up to two executable pipeline owners per used material. The two
-// variants preserve opaque and transparent node state. The optional built-in
-// owner is restricted to exact static Vulkan ksPerPixel packets; all other
-// paths use explicit PipelineProgram values. Build one resolved 80-byte
-// material record per used material, then synchronously prepare the static
-// scene. Supported shader families are
+// variants preserve opaque and transparent node state. The special retained
+// owner is restricted to exact static Vulkan ksPerPixel packets. The bounded
+// MultiMap source package uses the ordinary portable pipeline path. Build one
+// resolved 80-byte material record per used material, then synchronously
+// prepare the static scene. Supported shader families are
 // ksPerPixel, ksPerPixelAT, ksSkinnedMesh, ksPerPixelNM, ksPerPixelMultiMap,
 // ksPerPixelMultiMap_AT, ksPerPixelMultiMap_NMDetail, and
 // ksPerPixelMultiMap_AT_NMDetail. A bounded dirt-zero stage from

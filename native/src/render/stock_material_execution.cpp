@@ -1,6 +1,7 @@
 #include "apex/render/stock_material_execution.hpp"
 
 #include "apex/render/pipeline.hpp"
+#include "apex/render/stock_multimap_source.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -549,6 +550,31 @@ bool estimate_adapter_copy(const StockMaterialExecutionRequest& request,
             return false;
         }
     }
+    if (request.builtin_multimap_source ==
+        BuiltinStockMultiMapSourceSelector::normal_detail) {
+        const std::uint64_t owner_shader_bytes = std::max(
+            static_cast<std::uint64_t>(stock_multimap_source_shader_bytes(
+                Backend::Vulkan,
+                StockMultiMapSourceVariant::alpha_to_coverage_normal_detail)),
+            static_cast<std::uint64_t>(stock_multimap_source_shader_bytes(
+                Backend::D3D12,
+                StockMultiMapSourceVariant::alpha_to_coverage_normal_detail)));
+        const std::uint64_t copies = peak_pipeline_copy_count + 2U;
+        if (copies != 0U &&
+            owner_shader_bytes >
+                std::numeric_limits<std::uint64_t>::max() / copies) {
+            diagnostic = diag(
+                "stock_material_preparation_limit",
+                "Built-in MultiMap shader copies exceed the preparation limit");
+            return false;
+        }
+        if (!charge(owner_shader_bytes * copies, total, limit)) {
+            diagnostic = diag(
+                "stock_material_preparation_limit",
+                "Built-in MultiMap shader copies exceed the preparation limit");
+            return false;
+        }
+    }
     if (request.builtin_d3d12_native !=
         BuiltinD3D12StockNativeSelector::disabled) {
         if (!charge_count(request.builtin_d3d12_native_programs.size(),
@@ -688,6 +714,14 @@ StockMaterialExecutionResult prepare_stock_material_execution(
             return fail(StaticSceneResourceStatus::invalid_request,
                         "stock_material_builtin_source_selector_invalid",
                         "The built-in Vulkan stock source selector is invalid");
+        if (request.builtin_multimap_source !=
+                BuiltinStockMultiMapSourceSelector::disabled &&
+            request.builtin_multimap_source !=
+                BuiltinStockMultiMapSourceSelector::normal_detail)
+            return fail(
+                StaticSceneResourceStatus::invalid_request,
+                "stock_material_multimap_source_selector_invalid",
+                "The built-in MultiMap source selector is invalid");
         if (request.builtin_vulkan_source !=
                 BuiltinVulkanStockSourceSelector::disabled &&
             request.builtin_d3d12_native !=
@@ -897,6 +931,22 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 const bool use_builtin_source =
                     modules == nullptr && source_candidate &&
                     device.info().backend == Backend::Vulkan;
+                const bool exact_multimap_source_family =
+                    canonical(source.shader) == shader_key &&
+                    (shader_key == "ksperpixelmultimap_nmdetail" ||
+                     shader_key ==
+                         "ksperpixelmultimap_at_nmdetail");
+                const bool multimap_source_candidate =
+                    request.builtin_multimap_source ==
+                        BuiltinStockMultiMapSourceSelector::normal_detail &&
+                    exact_multimap_source_family &&
+                    packet.primitive == DrawPrimitiveKind::static_mesh &&
+                    shader_variant == StockMaterialShaderVariant::standard &&
+                    !request.directional_shadow_receiver &&
+                    !reflection_enabled && !request.wireframe &&
+                    !desired_transparent;
+                const bool use_builtin_multimap_source =
+                    modules == nullptr && multimap_source_candidate;
                 const bool d3d12_native_combined =
                     request.builtin_d3d12_native ==
                     BuiltinD3D12StockNativeSelector::
@@ -971,6 +1021,7 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             ? "Installed D3D12 alpha-to-coverage and combined programs require a four-sample RGBA8, BGRA8, or RGBA16F color target and optional matching depth target"
                             : "The installed D3D12 base program requires a one-sample RGBA8, BGRA8, or RGBA16F color target and optional matching depth target");
                 if (modules == nullptr && !use_builtin_source &&
+                    !use_builtin_multimap_source &&
                     !use_builtin_d3d12_native)
                     return fail(
                         StaticSceneResourceStatus::unsupported,
@@ -1074,6 +1125,25 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                             "The immutable Vulkan ksPerPixel source package is unavailable");
                     pipeline_request.shaders =
                         seed.program->pipeline().shaders;
+                } else if (use_builtin_multimap_source) {
+                    const StockMultiMapSourceVariant variant =
+                        shader_key ==
+                                "ksperpixelmultimap_at_nmdetail"
+                            ? StockMultiMapSourceVariant::
+                                  alpha_to_coverage_normal_detail
+                            : StockMultiMapSourceVariant::normal_detail;
+                    StockMultiMapSourceProgramResult seed =
+                        create_builtin_stock_multimap_source_program(
+                            device.info().backend, variant);
+                    if (!seed.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_multimap_source_seed_" +
+                                std::string(
+                                    stock_multimap_source_status_name(
+                                        seed.status)),
+                            "The immutable MultiMap source-equivalent package is unavailable");
+                    pipeline_request.shaders = seed.program->shaders;
                 } else if (use_builtin_d3d12_native) {
                     const ValidatedStockKsPerPixelNativeProgram& program =
                         *d3d12_native_entry->program;
@@ -1113,6 +1183,32 @@ StockMaterialExecutionResult prepare_stock_material_execution(
                 built.program.depth.compare = PipelineCompareOperation::less;
                 built.program.depth.write_enabled =
                     built.profile.depth_write && !built.profile.transparent;
+                if (use_builtin_multimap_source) {
+                    const StockMultiMapSourceVariant variant =
+                        shader_key ==
+                                "ksperpixelmultimap_at_nmdetail"
+                            ? StockMultiMapSourceVariant::
+                                  alpha_to_coverage_normal_detail
+                            : StockMultiMapSourceVariant::normal_detail;
+                    StockMultiMapSourcePipelineState state;
+                    state.targets = built.program.targets;
+                    state.raster = built.program.raster;
+                    state.blend = built.program.blend;
+                    state.depth = built.program.depth;
+                    StockMultiMapSourceProgramResult source_result =
+                        create_builtin_stock_multimap_source_program(
+                            device.info().backend, variant,
+                            std::move(state));
+                    if (!source_result.ok())
+                        return fail(
+                            StaticSceneResourceStatus::unsupported,
+                            "stock_material_multimap_source_" +
+                                std::string(
+                                    stock_multimap_source_status_name(
+                                        source_result.status)),
+                            "The resolved render state is incompatible with the immutable MultiMap source-equivalent package");
+                    built.program = std::move(*source_result.program);
+                }
                 const PipelineValidationResult final_validation =
                     validate_pipeline(built.program, request.limits.scene.pipeline);
                 if (!final_validation.valid)

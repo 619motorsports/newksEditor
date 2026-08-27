@@ -866,6 +866,112 @@ void test_builtin_vulkan_source_selector() {
             "skinned packets must remain on their explicit portable family path");
 }
 
+void test_builtin_multimap_source_selector() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        Fixture detail = fixture("ksPerPixelMultiMap_NMDetail", backend);
+        auto request = request_for(detail);
+        request.shader_modules = {};
+        request.builtin_multimap_source =
+            BuiltinStockMultiMapSourceSelector::normal_detail;
+        FakeDevice device(backend);
+        const auto result = prepare_stock_material_execution(device, request);
+        if (!result.ok())
+            throw std::runtime_error(
+                "built-in MultiMap NMDetail handoff failed: " +
+                result.diagnostic.code + " " + result.diagnostic.message);
+        require(result.resources->unique_pipeline_count() == 1U &&
+                    !result.resources->prepared_packets().front()
+                         .flags.alpha_to_coverage,
+                "both backends select one ordinary portable NMDetail pipeline");
+
+        Fixture alpha = fixture(
+            "ksPerPixelMultiMap_AT_NMDetail", backend);
+        auto alpha_request = request_for(alpha);
+        alpha_request.shader_modules = {};
+        alpha_request.builtin_multimap_source =
+            BuiltinStockMultiMapSourceSelector::normal_detail;
+        FakeDevice alpha_device(backend);
+        const auto alpha_result = prepare_stock_material_execution(
+            alpha_device, alpha_request);
+        if (!alpha_result.ok())
+            throw std::runtime_error(
+                "built-in MultiMap AT_NMDetail handoff failed: " +
+                alpha_result.diagnostic.code + " " +
+                alpha_result.diagnostic.message);
+        require(alpha_result.resources->unique_pipeline_count() == 1U &&
+                    alpha_result.resources->prepared_packets().front()
+                        .flags.alpha_to_coverage,
+                "both backends retain the AT_NMDetail four-sample state");
+
+        auto one_sample = alpha_request;
+        one_sample.targets.colors.front().samples = 1U;
+        one_sample.targets.depth.samples = 1U;
+        FakeDevice one_sample_device(backend);
+        const auto one_sample_result = prepare_stock_material_execution(
+            one_sample_device, one_sample);
+        require(!one_sample_result.ok() &&
+                    one_sample_device.buffer_calls == 0U,
+                "built-in AT_NMDetail rejects one-sample targets before allocation");
+
+        Fixture explicit_detail = fixture(
+            "ksPerPixelMultiMap_NMDetail", backend);
+        auto explicit_request = request_for(explicit_detail);
+        explicit_request.builtin_multimap_source =
+            BuiltinStockMultiMapSourceSelector::normal_detail;
+        FakeDevice explicit_device(backend);
+        const auto explicit_result = prepare_stock_material_execution(
+            explicit_device, explicit_request);
+        require(explicit_result.ok() &&
+                    explicit_result.resources->unique_pipeline_count() == 1U,
+                "caller MultiMap modules remain authoritative when the fallback is enabled");
+    }
+
+    Fixture base_multimap = fixture("ksPerPixelMultiMap");
+    auto base_request = request_for(base_multimap);
+    base_request.shader_modules = {};
+    base_request.builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::normal_detail;
+    FakeDevice base_device;
+    const auto base_result = prepare_stock_material_execution(
+        base_device, base_request);
+    require(base_result.status == StaticSceneResourceStatus::unsupported &&
+                base_result.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                base_device.buffer_calls == 0U,
+            "the normal-detail fallback does not approximate base MultiMap");
+
+    Fixture reflected = fixture("ksPerPixelMultiMap_NMDetail");
+    auto reflection_request = request_for(reflected);
+    reflection_request.shader_modules = {};
+    reflection_request.builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::normal_detail;
+    reflection_request.multimap_reflection = true;
+    FakeDevice reflection_device;
+    const auto reflection_result = prepare_stock_material_execution(
+        reflection_device, reflection_request);
+    require(reflection_result.status == StaticSceneResourceStatus::unsupported &&
+                reflection_result.diagnostic.code ==
+                    "stock_material_shader_module_missing" &&
+                reflection_device.buffer_calls == 0U,
+            "the bounded fallback rejects the omitted reflection branch");
+
+    Fixture malformed = fixture("ksPerPixelMultiMap_NMDetail");
+    malformed.packets.front().resources.pop_back();
+    auto malformed_request = request_for(malformed);
+    malformed_request.shader_modules = {};
+    malformed_request.builtin_multimap_source =
+        BuiltinStockMultiMapSourceSelector::normal_detail;
+    FakeDevice malformed_device;
+    const auto malformed_result = prepare_stock_material_execution(
+        malformed_device, malformed_request);
+    require(malformed_result.status ==
+                    StaticSceneResourceStatus::invalid_request &&
+                malformed_result.diagnostic.code ==
+                    "stock_material_resources_incomplete" &&
+                malformed_device.buffer_calls == 0U,
+            "the fallback rejects truncated texture-role input before allocation");
+}
+
 } // namespace
 
 int main() {
@@ -876,6 +982,7 @@ int main() {
         test_directional_shadow_receiver_module_opt_in();
         test_multimap_reflection_module_opt_in();
         test_builtin_vulkan_source_selector();
+        test_builtin_multimap_source_selector();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
