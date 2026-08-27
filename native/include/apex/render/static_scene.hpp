@@ -232,6 +232,9 @@ struct StaticSceneFrameDescription {
     // Editor overlays are submitted after all retained scene packets in the
     // same render pass. The caller owns the referenced pipeline and buffer.
     std::span<const OverlayLineDrawRequest> overlay_draws{};
+    // Optional recovered native editor frame. It executes after all other
+    // main-pass draws and is never inferred for cube-capture frames.
+    std::optional<ViewportFrameBorderDrawRequest> viewport_frame_border;
     // An optional portable selected-mesh pass uses the recovered shader and
     // state contract for one visible prepared static packet. This port draws
     // it once after opaque packets and before the view axis and transparent

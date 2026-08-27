@@ -3067,6 +3067,7 @@ IndexedStaticMeshBatchResult StaticSceneResources::draw_and_readback(
     batch.selected_mesh_draws =
         std::span<const SelectedMeshDrawRequest>(selected_draws)
             .first(selected_draw_count);
+    batch.viewport_frame_border = frame.viewport_frame_border;
     if (frame.draw_sky) {
         if (!frame.frame_constants.has_value())
             return {IndexedStaticMeshBatchStatus::invalid_request,

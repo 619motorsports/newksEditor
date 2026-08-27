@@ -5,6 +5,7 @@
 #include "apex/authoring/ai_spline_session.hpp"
 #include "apex/formats/acd.hpp"
 #include "apex/render/view_axis.hpp"
+#include "apex/render/viewport_frame_border.hpp"
 
 #include <algorithm>
 #include <array>
@@ -290,6 +291,24 @@ public:
         draw_counts.push_back(batch.draws.size());
         overlay_counts.push_back(batch.overlay_draws.size());
         selected_mesh_counts.push_back(batch.selected_mesh_draws.size());
+        viewport_frame_presence.push_back(
+            batch.viewport_frame_border.has_value());
+        if (batch.viewport_frame_border.has_value()) {
+            const auto* frame_vertices = dynamic_cast<const FakeBuffer*>(
+                batch.viewport_frame_border->vertex_buffer);
+            std::array<float, 4U> color{};
+            if (frame_vertices != nullptr &&
+                frame_vertices->bytes().size() >=
+                    sizeof(ViewportFrameBorderVertex)) {
+                ViewportFrameBorderVertex vertex;
+                std::memcpy(&vertex, frame_vertices->bytes().data(),
+                            sizeof(vertex));
+                color = vertex.color;
+            }
+            viewport_frame_colors.push_back(color);
+            viewport_frame_depth_compare.push_back(
+                batch.viewport_frame_border->pipeline->depth.compare);
+        }
         for (const auto &overlay : batch.overlay_draws) {
             overlay_matrices.push_back(overlay.matrices);
             overlay_buffers.push_back(overlay.vertex_buffer);
@@ -459,6 +478,9 @@ public:
     std::vector<std::size_t> draw_counts;
     std::vector<std::size_t> overlay_counts;
     std::vector<std::size_t> selected_mesh_counts;
+    std::vector<bool> viewport_frame_presence;
+    std::vector<std::array<float, 4U>> viewport_frame_colors;
+    std::vector<PipelineCompareOperation> viewport_frame_depth_compare;
     std::vector<DrawMatrices> overlay_matrices;
     std::vector<const Buffer *> overlay_buffers;
     std::vector<std::uint32_t> overlay_scene_positions;
@@ -1571,6 +1593,78 @@ void opens_and_draws() {
             "all-hidden viewport frame clears and presents without rebuilding resources");
 }
 
+void prepares_and_switches_recovered_viewport_frame() {
+    for (const Backend backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        auto request = request_for(value);
+        request.packets.selected_node = 1U;
+        request.native_frame_border = true;
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        require(prepared.ok(),
+                "recovered viewport frame prepares on both backends");
+        const auto fixed_buffers = std::count_if(
+            device.created_buffer_descriptions.begin(),
+            device.created_buffer_descriptions.end(),
+            [](const BufferDescription& description) {
+                return description.memory == BufferMemory::device_local &&
+                       description.mutability == BufferMutability::immutable &&
+                       (description.size_bytes ==
+                            viewport_frame_border_vertex_count *
+                                sizeof(ViewportFrameBorderVertex) ||
+                        description.size_bytes ==
+                            viewport_frame_border_index_count *
+                                sizeof(std::uint16_t));
+            });
+        require(fixed_buffers == 3U,
+                "viewport retains two color variants and one fixed index buffer");
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera = valid_shadow_camera(
+            0.0F, backend == Backend::Vulkan ? CameraClipSpace::vulkan
+                                              : CameraClipSpace::d3d12);
+        frame.frame_constants = KsPerPixelFrameConstants{};
+        Diagnostic diagnostic;
+        require(prepared.viewport->drawAndPresent(device, target, frame,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready,
+                "inactive viewport frame draws");
+        frame.native_frame_controls_active = true;
+        require(prepared.viewport->drawAndPresent(device, target, frame,
+                                                  diagnostic) ==
+                    WorkspaceViewportFrameStatus::ready &&
+                    device.viewport_frame_presence ==
+                        std::vector<bool>({true, true}) &&
+                    device.viewport_frame_colors ==
+                        std::vector<std::array<float, 4U>>({
+                            {0.3F, 0.3F, 0.3F, 1.0F},
+                            {0.0F, 0.7F, 0.0F, 1.0F}}) &&
+                    device.viewport_frame_depth_compare ==
+                        std::vector<PipelineCompareOperation>(
+                            2U, PipelineCompareOperation::less),
+                "mouse-active state switches gray to green without rebuilding resources");
+    }
+
+    auto value = fixture();
+    auto missing_selection = request_for(value);
+    missing_selection.native_frame_border = true;
+    FakeDevice device;
+    const auto rejected = apex::app::prepareWorkspaceViewport(
+        device, value.document, missing_selection);
+    require(!rejected.ok() &&
+                rejected.diagnostic.code ==
+                    "workspace_viewport_frame_border_selection_missing",
+            "viewport frame rejects a missing selected node");
+}
+
 void draws_portable_sky_before_main_color_and_requires_constants() {
     auto value = fixture();
     auto request = request_for(value);
@@ -2129,6 +2223,42 @@ void draws_explicit_multimap_reflection_cube_outside_model_textures() {
                     std::vector<const Texture*>{&cube} &&
                 model.textures.size() == 3U,
             "viewport forwards the frame-owned cube while retaining the original KN5 texture table");
+}
+
+void omits_recovered_viewport_frame_from_reflection_faces() {
+    auto value = fixture();
+    configure_multimap_reflection(value);
+    auto request = request_for(value);
+    request.multimap_reflection = true;
+    request.render.include_reflections = true;
+    request.render.explicit_reflection_root = 1U;
+    request.portable_reflection_capture =
+        apex::app::WorkspaceViewportPortableReflectionCaptureOptions{8U};
+    request.packets.selected_node = 1U;
+    request.native_frame_border = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok(),
+            "reflection viewport with recovered frame prepares");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera = valid_shadow_camera();
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    frame.native_frame_controls_active = true;
+    Diagnostic diagnostic;
+    require(prepared.viewport->drawAndPresent(device, target, frame,
+                                              diagnostic) ==
+                WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == texture_cube_face_count + 1U &&
+                device.viewport_frame_presence ==
+                    std::vector<bool>({false, false, false, false, false,
+                                       false, true}) &&
+                device.viewport_frame_colors ==
+                    std::vector<std::array<float, 4U>>(
+                        1U, {0.0F, 0.7F, 0.0F, 1.0F}),
+            "cube faces omit the editor frame and the main view appends it");
 }
 
 void captures_and_publishes_six_portable_reflection_faces_atomically() {
@@ -8030,6 +8160,7 @@ int main() {
         rejects_invalid_solid_color_before_gpu_allocation();
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
+        prepares_and_switches_recovered_viewport_frame();
         draws_portable_sky_before_main_color_and_requires_constants();
         prepares_and_draws_portable_clouds_with_retained_resources();
         captures_portable_clouds_on_all_reflection_faces();
@@ -8038,6 +8169,7 @@ int main() {
         captures_portable_grass_on_all_reflection_faces();
         rejects_malformed_portable_grass_options_atomically();
         draws_explicit_multimap_reflection_cube_outside_model_textures();
+        omits_recovered_viewport_frame_from_reflection_faces();
         captures_and_publishes_six_portable_reflection_faces_atomically();
         rejects_invalid_portable_reflection_capture_options_before_allocation();
         draws_four_sample_viewport_through_retained_resolve();

@@ -338,6 +338,14 @@ std::size_t Window::poll_events(std::span<WindowEvent> events) noexcept {
                     : WindowEventType::focus_lost;
             relevant = true;
             break;
+        case SDL_EVENT_WINDOW_MOUSE_ENTER:
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            if (event.window.windowID != implementation_->id) break;
+            translated.type = event.type == SDL_EVENT_WINDOW_MOUSE_ENTER
+                                  ? WindowEventType::mouse_enter
+                                  : WindowEventType::mouse_leave;
+            relevant = true;
+            break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
             if (event.key.windowID != implementation_->id) break;

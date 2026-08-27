@@ -5,6 +5,7 @@
 #include "apex/render/lighting.hpp"
 #include "apex/render/selected_mesh.hpp"
 #include "apex/render/view_axis.hpp"
+#include "apex/render/viewport_frame_border.hpp"
 #include "apex/workspace/workspace_scene.hpp"
 
 #include <algorithm>
@@ -2474,6 +2475,15 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     frame.overlay_draws =
         std::span<const render::OverlayLineDrawRequest>(overlay_draws)
             .first(overlay_count);
+    if (frame_border_.has_value()) {
+        const auto& border = *frame_border_;
+        frame.viewport_frame_border = render::ViewportFrameBorderDrawRequest{
+            &border.pipeline,
+            request.native_frame_controls_active
+                ? border.active_vertices.get()
+                : border.inactive_vertices.get(),
+            border.indices.get(), border.matrices};
+    }
 
     render::Diagnostic shadow_diagnostic;
     if (directional_shadows_.has_value()) {
@@ -2656,6 +2666,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         capture_frame.selected_mesh_color_buffer = nullptr;
         capture_frame.scene_finished_overlay_draws = {};
         capture_frame.view_axis_draws = {};
+        capture_frame.viewport_frame_border.reset();
 
         for (std::size_t face = 0U; face < cameras->size(); ++face) {
             capture_frame.camera = (*cameras)[face];
@@ -4038,6 +4049,85 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             selected_mesh_color_buffer = std::move(color_buffer.buffer);
         }
 
+        std::optional<WorkspaceViewport::FrameBorderResources> frame_border;
+        if (request.native_frame_border) {
+            if (request.packets.selected_node == apex::scene::invalid_node_id) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = diagnostic(
+                    "workspace_viewport_frame_border_selection_missing",
+                    "The recovered viewport frame requires a selected node");
+                return result;
+            }
+            render::PipelineRenderTargets targets;
+            targets.colors = {{*color_format, request.color_samples}};
+            targets.has_depth = true;
+            targets.depth = {
+                render::PipelineRenderTargetFormat::depth32_float,
+                request.color_samples};
+            auto program = render::create_viewport_frame_border_program(
+                device.info().backend, std::move(targets));
+            if (!program.ok()) {
+                result.status =
+                    program.status == render::ViewportFrameBorderStatus::invalid_backend
+                        ? WorkspaceViewportStatus::unsupported
+                        : WorkspaceViewportStatus::invalid;
+                result.diagnostic = {
+                    "workspace_viewport_frame_border_program_invalid",
+                    std::string("The recovered viewport frame program is invalid: ") +
+                        render::viewport_frame_border_status_name(program.status)};
+                return result;
+            }
+            const auto active = render::build_viewport_frame_border(
+                request.presentation.width, request.presentation.height, true,
+                device.info().backend);
+            const auto inactive = render::build_viewport_frame_border(
+                request.presentation.width, request.presentation.height, false,
+                device.info().backend);
+            if (!active.ok() || !inactive.ok()) {
+                result.status = WorkspaceViewportStatus::invalid;
+                result.diagnostic = !active.ok() ? active.diagnostic
+                                                 : inactive.diagnostic;
+                return result;
+            }
+            const auto create_geometry_buffer =
+                [&](std::span<const std::byte> bytes,
+                    render::BufferUsage usage,
+                    std::unique_ptr<render::Buffer>& output) {
+                    render::BufferDescription description;
+                    description.size_bytes = bytes.size();
+                    description.usage = usage;
+                    description.memory = render::BufferMemory::device_local;
+                    description.mutability = render::BufferMutability::immutable;
+                    auto created = device.create_buffer(description, bytes);
+                    if (!created.ok()) {
+                        result.status =
+                            created.status == render::BufferStatus::unsupported
+                                ? WorkspaceViewportStatus::unsupported
+                            : created.status == render::BufferStatus::allocation_failed
+                                ? WorkspaceViewportStatus::allocation_failed
+                                : WorkspaceViewportStatus::invalid;
+                        result.diagnostic = std::move(created.diagnostic);
+                        return false;
+                    }
+                    output = std::move(created.buffer);
+                    return true;
+                };
+            WorkspaceViewport::FrameBorderResources resources;
+            resources.pipeline = std::move(*program.program);
+            resources.matrices = active.matrices;
+            if (!create_geometry_buffer(
+                    std::as_bytes(std::span(active.vertices)),
+                    render::BufferUsage::vertex, resources.active_vertices) ||
+                !create_geometry_buffer(
+                    std::as_bytes(std::span(inactive.vertices)),
+                    render::BufferUsage::vertex, resources.inactive_vertices) ||
+                !create_geometry_buffer(
+                    std::as_bytes(std::span(active.indices)),
+                    render::BufferUsage::index, resources.indices))
+                return result;
+            frame_border = std::move(resources);
+        }
+
         std::optional<render::PipelineProgram> authoring_overlay_pipeline;
         std::array<WorkspaceViewport::AiSplinePassResources,
                    workspace_ai_spline_pass_count>
@@ -4466,6 +4556,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             std::move(skeleton_overlay),
             std::move(reflection_capture),
             std::move(frame_catalog)));
+        result.viewport->frame_border_ = std::move(frame_border);
         result.status = WorkspaceViewportStatus::ready;
         return result;
     } catch (const workspace::WorkspaceError& error) {

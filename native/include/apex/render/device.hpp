@@ -1016,6 +1016,15 @@ struct SelectedMeshDrawRequest {
 
 inline constexpr std::size_t max_selected_mesh_draws = 1U;
 
+// A recovered editor viewport frame is one fixed indexed quad list. Backends
+// append it after every scene, selected-mesh, and line draw in the main pass.
+struct ViewportFrameBorderDrawRequest {
+    const PipelineProgram* pipeline = nullptr;
+    const Buffer* vertex_buffer = nullptr;
+    const Buffer* index_buffer = nullptr;
+    DrawMatrices matrices{};
+};
+
 enum class IndexedStaticMeshDrawStatus {
     ready,
     invalid_request,
@@ -1154,6 +1163,9 @@ struct IndexedStaticMeshBatchDescription {
     // Selected draws merge into the indexed scene sequence by scene_position.
     // A selected draw executes before line draws at the same position.
     std::span<const SelectedMeshDrawRequest> selected_mesh_draws{};
+    // Optional native editor frame. It always executes last and before an
+    // optional MSAA resolve. Cube-capture callers must leave it empty.
+    std::optional<ViewportFrameBorderDrawRequest> viewport_frame_border;
     // Optional fullscreen background. Backends draw it after attachment
     // load/clear and before every scene, selected-mesh, and overlay draw.
     std::optional<PortableSkyParameters> sky;
@@ -1819,6 +1831,10 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] IndexedStaticMeshBatchStatus validate_selected_mesh_draw_request(
     const Texture& texture, const SelectedMeshDrawRequest& request,
+    Diagnostic& diagnostic);
+
+[[nodiscard]] IndexedStaticMeshBatchStatus validate_viewport_frame_border_draw_request(
+    const Texture& texture, const ViewportFrameBorderDrawRequest& request,
     Diagnostic& diagnostic);
 
 // Preflight an ordered batch without changing any caller-owned request. The

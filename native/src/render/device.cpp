@@ -3,6 +3,7 @@
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/stock_ks_per_pixel_vulkan.hpp"
 #include "apex/render/stock_ks_per_pixel_vulkan_abi.hpp"
+#include "apex/render/viewport_frame_border.hpp"
 #include "backend_internal.hpp"
 #include "dxbc_reader.hpp"
 
@@ -4190,6 +4191,94 @@ IndexedStaticMeshBatchStatus validate_selected_mesh_draw_request(
     return IndexedStaticMeshBatchStatus::ready;
 }
 
+IndexedStaticMeshBatchStatus validate_viewport_frame_border_draw_request(
+    const Texture& texture, const ViewportFrameBorderDrawRequest& request,
+    Diagnostic& diagnostic) {
+    if (request.pipeline == nullptr || request.vertex_buffer == nullptr ||
+        request.index_buffer == nullptr) {
+        diagnostic = {"viewport_frame_border_handle_missing",
+                      "The viewport frame requires a pipeline and both geometry buffers"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const ViewportFrameBorderStatus program_status =
+        validate_viewport_frame_border_program(*request.pipeline,
+                                               texture.backend());
+    if (program_status != ViewportFrameBorderStatus::ready) {
+        diagnostic = {"viewport_frame_border_program_invalid",
+                      std::string("The viewport frame program failed its exact contract: ") +
+                          viewport_frame_border_status_name(program_status)};
+        return program_status == ViewportFrameBorderStatus::invalid_backend
+                   ? IndexedStaticMeshBatchStatus::unsupported
+                   : IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    const TextureDescription& target = texture.info().description;
+    const auto target_format = [&] {
+        switch (target.format) {
+        case TextureFormat::rgba16_sfloat:
+            return PipelineRenderTargetFormat::rgba16_float;
+        case TextureFormat::rgba8_unorm:
+            return PipelineRenderTargetFormat::rgba8_unorm;
+        case TextureFormat::rgba8_srgb:
+            return PipelineRenderTargetFormat::rgba8_srgb;
+        case TextureFormat::bgra8_unorm:
+            return PipelineRenderTargetFormat::bgra8_unorm;
+        case TextureFormat::bgra8_srgb:
+            return PipelineRenderTargetFormat::bgra8_srgb;
+        default:
+            return PipelineRenderTargetFormat::unknown;
+        }
+    }();
+    if (request.pipeline->targets.colors.size() != 1U ||
+        request.pipeline->targets.colors[0].format != target_format ||
+        request.pipeline->targets.colors[0].samples != target.samples) {
+        diagnostic = {"viewport_frame_border_target_mismatch",
+                      "The viewport frame pipeline must match the batch color target"};
+        return target_format == PipelineRenderTargetFormat::unknown
+                   ? IndexedStaticMeshBatchStatus::unsupported
+                   : IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (request.vertex_buffer->backend() != texture.backend() ||
+        request.index_buffer->backend() != texture.backend()) {
+        diagnostic = {"viewport_frame_border_backend_mismatch",
+                      "Viewport frame buffers and target must use the same backend"};
+        return IndexedStaticMeshBatchStatus::unsupported;
+    }
+    const BufferDescription& vertex = request.vertex_buffer->info().description;
+    const BufferDescription& index = request.index_buffer->info().description;
+    if (vertex.usage != BufferUsage::vertex ||
+        vertex.memory != BufferMemory::device_local ||
+        vertex.mutability != BufferMutability::immutable ||
+        vertex.size_bytes != viewport_frame_border_vertex_count *
+                                 sizeof(ViewportFrameBorderVertex)) {
+        diagnostic = {"viewport_frame_border_vertex_buffer_invalid",
+                      "The viewport frame requires its fixed immutable device-local vertex buffer"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    if (index.usage != BufferUsage::index ||
+        index.memory != BufferMemory::device_local ||
+        index.mutability != BufferMutability::immutable ||
+        index.size_bytes != viewport_frame_border_index_count *
+                                sizeof(std::uint16_t)) {
+        diagnostic = {"viewport_frame_border_index_buffer_invalid",
+                      "The viewport frame requires its fixed immutable device-local index buffer"};
+        return IndexedStaticMeshBatchStatus::invalid_request;
+    }
+    for (const float value : request.matrices.world)
+        if (!std::isfinite(value)) {
+            diagnostic = {"viewport_frame_border_matrix_non_finite",
+                          "Viewport frame matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    for (const float value : request.matrices.view_projection)
+        if (!std::isfinite(value)) {
+            diagnostic = {"viewport_frame_border_matrix_non_finite",
+                          "Viewport frame matrices must contain only finite values"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    diagnostic = {};
+    return IndexedStaticMeshBatchStatus::ready;
+}
+
 IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
     const Texture& texture, const IndexedStaticMeshBatchDescription& description,
     Diagnostic& diagnostic) {
@@ -4423,6 +4512,26 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
                   texture.info().description.samples))) {
             diagnostic = {"overlay_line_pipeline_depth_target_mismatch",
                           "Overlay line depth target metadata must match the batch render pass"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+    }
+    if (description.viewport_frame_border.has_value()) {
+        if (target.shape == TextureShape::texture_cube) {
+            diagnostic = {"viewport_frame_border_cube_target_invalid",
+                          "The editor viewport frame cannot render into a cube target"};
+            return IndexedStaticMeshBatchStatus::invalid_request;
+        }
+        Diagnostic frame_diagnostic;
+        const IndexedStaticMeshBatchStatus frame_status =
+            validate_viewport_frame_border_draw_request(
+                texture, *description.viewport_frame_border, frame_diagnostic);
+        if (frame_status != IndexedStaticMeshBatchStatus::ready) {
+            diagnostic = std::move(frame_diagnostic);
+            return frame_status;
+        }
+        if (description.depth_attachment == nullptr) {
+            diagnostic = {"viewport_frame_border_depth_attachment_missing",
+                          "The editor viewport frame requires the batch depth attachment"};
             return IndexedStaticMeshBatchStatus::invalid_request;
         }
     }

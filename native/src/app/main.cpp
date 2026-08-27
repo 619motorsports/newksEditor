@@ -2449,6 +2449,9 @@ int run_window(int argc, char** argv) {
         request.render.isolated_node = loaded_workspace.selection.selected_node;
         request.render.show_hidden = loaded_workspace.selection.show_hidden;
         request.packets.selected_node = loaded_workspace.selection.selected_node;
+        request.native_frame_border =
+            loaded_workspace.selection.selected_node !=
+            apex::scene::invalid_node_id;
         request.packets.wireframe = loaded_workspace.selection.wireframe;
         request.wireframe = loaded_workspace.selection.wireframe;
         request.grid_visible = workspace_options.gridVisible;
@@ -2705,6 +2708,7 @@ int run_window(int argc, char** argv) {
     bool reported_shadow_diagnostic = false;
     bool reported_ai_spline_manual_diagnostic = false;
     bool window_has_keyboard_focus = true;
+    bool scene_controls_active = false;
     apex::app::PresentationRecreationController recreation;
     auto pick_ai_spline_point =
         [&](const apex::platform::WindowEvent& event) {
@@ -2940,6 +2944,12 @@ int run_window(int argc, char** argv) {
                     apex::app::WorkspaceViewportCameraGesture::wheel,
                     events[index].x_relative, events[index].y_relative});
                 break;
+            case apex::platform::WindowEventType::mouse_enter:
+                scene_controls_active = true;
+                break;
+            case apex::platform::WindowEventType::mouse_leave:
+                scene_controls_active = false;
+                break;
             default:
                 break;
             }
@@ -2980,6 +2990,8 @@ int run_window(int argc, char** argv) {
             }
             apex::app::WorkspaceViewportFrameRequest frame_request;
             frame_request.camera = *camera.frame;
+            frame_request.native_frame_controls_active =
+                scene_controls_active;
             frame_request.frame_constants = workspace_lighting.frame_constants;
             if (viewport->preparation().resources
                     ->requires_stock_vulkan_source_frame()) {

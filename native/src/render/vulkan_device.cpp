@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/lighting.hpp"
+#include "apex/render/viewport_frame_border.hpp"
 #include "half_float.hpp"
 
 #include <algorithm>
@@ -6362,7 +6363,8 @@ public:
         std::vector<VulkanIndexedBatchDraw> draws;
         draws.reserve(description.draws.size() +
                       description.selected_mesh_draws.size() +
-                      description.overlay_draws.size());
+                      description.overlay_draws.size() +
+                      (description.viewport_frame_border.has_value() ? 1U : 0U));
         const auto append_scene_draw = [&](const IndexedStaticMeshDrawRequest& request) {
             auto* vertices = dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
             auto* indices = dynamic_cast<const VulkanBuffer*>(request.index_buffer);
@@ -6519,6 +6521,36 @@ public:
                 description, append_scene_draw, append_selected_draw,
                 append_overlay_draw))
             return false;
+        if (description.viewport_frame_border.has_value()) {
+            const ViewportFrameBorderDrawRequest& request =
+                *description.viewport_frame_border;
+            auto* vertices =
+                dynamic_cast<const VulkanBuffer*>(request.vertex_buffer);
+            auto* indices =
+                dynamic_cast<const VulkanBuffer*>(request.index_buffer);
+            if (vertices == nullptr || indices == nullptr ||
+                request.pipeline == nullptr) {
+                diagnostic = {"viewport_frame_border_resource_invalid",
+                              "The Vulkan viewport frame contains an unknown or incomplete resource"};
+                return false;
+            }
+            if (vertices->context() != context_ || indices->context() != context_) {
+                diagnostic = {"viewport_frame_border_context_mismatch",
+                              "Viewport frame buffers must belong to this Vulkan device"};
+                return false;
+            }
+            VulkanIndexedBatchDraw draw;
+            draw.program = request.pipeline;
+            draw.vertices = vertices;
+            draw.indices = indices;
+            draw.index_count = static_cast<std::uint32_t>(
+                viewport_frame_border_index_count);
+            draw.matrices = request.matrices;
+            // The batch uses this phase bit only to insert grass before the
+            // first transparent-phase draw. The border pipeline stays opaque.
+            draw.transparent = true;
+            draws.push_back(draw);
+        }
         std::optional<PortableSkyShaderConstants> sky_constants;
         if (description.sky.has_value()) {
             sky_constants.emplace();

@@ -297,6 +297,9 @@ struct WorkspaceViewportPrepareRequest {
     // Prepare and show the recovered one-meter world-origin view axis. The
     // native default is false. A true value requires the overlay pipeline.
     bool view_axis_visible = false;
+    // Prepare the exact recovered mouse-active editor frame. The native shell
+    // enables it only while a selected node makes the scene renderable.
+    bool native_frame_border = false;
     // Keep this explicit receiver-module selector for existing callers. A
     // true value requires directional_shadows so the viewport cannot prepare
     // a receiver that has no maps or caster schedule.
@@ -412,6 +415,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the elapsed selection time for deterministic playback/tests.
     // When absent, the viewport uses time since its preparation completed.
     std::optional<std::uint32_t> selected_mesh_elapsed_ms;
+    // Mirrors Form1.controlsActive, which is driven by scene-panel mouse
+    // enter and leave events. It is not keyboard or operating-system focus.
+    bool native_frame_controls_active = false;
 };
 
 enum class WorkspaceViewportAiSplineUpdateStatus : std::uint8_t {
@@ -620,6 +626,14 @@ private:
             position_sources;
     };
 
+    struct FrameBorderResources {
+        render::PipelineProgram pipeline;
+        std::unique_ptr<render::Buffer> active_vertices;
+        std::unique_ptr<render::Buffer> inactive_vertices;
+        std::unique_ptr<render::Buffer> indices;
+        render::DrawMatrices matrices{};
+    };
+
     [[nodiscard]] WorkspaceViewportAiSplineUpdateResult
     replaceAiSplineOverlaysBorrowed(render::Device& device,
                                     const AiSplineUpdateRequest& request,
@@ -693,6 +707,7 @@ private:
     std::optional<PortableCloudResources> portable_clouds_;
     std::optional<PortableGrassResources> portable_grass_;
     std::optional<SkeletonOverlayResources> skeleton_overlay_;
+    std::optional<FrameBorderResources> frame_border_;
     std::optional<PortableReflectionCaptureResources> reflection_capture_;
     std::optional<FrameCatalog> frame_catalog_;
 

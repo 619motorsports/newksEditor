@@ -1,6 +1,7 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
 #include "apex/render/lighting.hpp"
+#include "apex/render/viewport_frame_border.hpp"
 #include "d3d12_stock_ks_per_pixel.hpp"
 #include "d3d12_stock_ks_per_pixel_batch.hpp"
 #include "d3d12_stock_ks_per_pixel_status.hpp"
@@ -10799,6 +10800,7 @@ public:
         }
         const bool native_only = batch.selected_mesh_draws.empty() &&
                                   batch.overlay_draws.empty() &&
+                                  !batch.viewport_frame_border.has_value() &&
                                   !batch.sky.has_value() &&
                                   !batch.clouds.has_value() &&
                                   !batch.grass.has_value() &&
@@ -10959,7 +10961,8 @@ public:
         }
         std::vector<D3D12IndexedBatchDraw> draws;
         draws.reserve(batch.draws.size() + batch.selected_mesh_draws.size() +
-                      batch.overlay_draws.size());
+                      batch.overlay_draws.size() +
+                      (batch.viewport_frame_border.has_value() ? 1U : 0U));
         IndexedStaticMeshBatchStatus assembly_status =
             IndexedStaticMeshBatchStatus::ready;
         const auto append_indexed_draw =
@@ -11232,6 +11235,22 @@ public:
                 batch, append_scene_draw, append_selected_draw,
                 append_overlay_draw))
             return {assembly_status, std::move(diagnostic), {}};
+        if (batch.viewport_frame_border.has_value()) {
+            const ViewportFrameBorderDrawRequest& request =
+                *batch.viewport_frame_border;
+            DrawPacket packet;
+            packet.vertex_count = static_cast<std::uint32_t>(
+                viewport_frame_border_vertex_count);
+            packet.index_count = static_cast<std::uint32_t>(
+                viewport_frame_border_index_count);
+            // Preserve border-last order when grass has no transparent scene
+            // packet to establish its insertion point. The pipeline is opaque.
+            packet.flags.transparent = true;
+            if (!append_indexed_draw(request.vertex_buffer, request.index_buffer,
+                                     packet, *request.pipeline,
+                                     request.matrices, nullptr, nullptr))
+                return {assembly_status, std::move(diagnostic), {}};
+        }
         std::vector<std::byte> output;
         if (!d3d_texture->draw_indexed_static_mesh_batch(
                 batch, draws, d3d_depth, resolve_target, output, diagnostic))

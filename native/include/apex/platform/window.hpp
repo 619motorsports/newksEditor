@@ -48,6 +48,8 @@ enum class WindowEventType : std::uint8_t {
     mouse_button_up,
     mouse_motion,
     mouse_wheel,
+    mouse_enter,
+    mouse_leave,
 };
 
 enum class WindowMouseButton : std::uint8_t {
