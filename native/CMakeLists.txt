@@ -12,10 +12,6 @@ target_include_directories(apex_native INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-if(WIN32)
-  target_compile_definitions(apex_native INTERFACE NOMINMAX)
-endif()
-
 if(MSVC)
   target_compile_options(apex_native INTERFACE /W4 /permissive- /EHsc)
   if(APEX_WARNINGS_AS_ERRORS)
@@ -522,6 +518,7 @@ apex_add_native_test(platform_window_tests.cpp platform_window_tests ApexEditor:
 if(TARGET render_backend_tests AND WIN32)
   # The Windows execution test compiles its small HLSL fixture at runtime so
   # CI exercises real D3D12 shader bytecode instead of a shaped container.
+  target_compile_definitions(render_backend_tests PRIVATE NOMINMAX)
   target_link_libraries(render_backend_tests PRIVATE d3dcompiler)
 endif()
 
