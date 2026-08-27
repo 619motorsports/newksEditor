@@ -647,9 +647,12 @@ HdrToneMapStatus validate_hdr_tone_map_parameters(
         !std::isfinite(parameters.gamma) || parameters.gamma <= 0.0F ||
         !std::isfinite(parameters.saturation) || parameters.saturation < 0.0F ||
         !std::isfinite(parameters.curve_scale) || parameters.curve_scale < 0.0F ||
-        !std::isfinite(parameters.curve_shoulder)) {
+        !std::isfinite(parameters.curve_shoulder) ||
+        !std::isfinite(parameters.dither_scale) ||
+        parameters.dither_scale < 0.0F) {
         diagnostic = {"hdr_tone_map_parameters_invalid",
-                      "HDR tone-map parameters must be finite with nonnegative gain values and positive gamma"};
+                      "HDR tone-map parameters must be finite. Gain and dither "
+                      "values must be nonnegative, and gamma must be positive"};
         return HdrToneMapStatus::invalid_request;
     }
     diagnostic = {};

@@ -241,6 +241,30 @@ It multiplies the result by `255.999893` and truncates it to one byte.
 Each texel repeats its value in all four channels. This byte table comes from
 decompiled arithmetic. A runtime upload capture can show the driver interpretation.
 
+## Recovered dither sampling
+
+`DrawRectGPU_TonemapHDR` binds the dither texture at `t3`. Pixel program 2095
+samples it through `s3` with the fourth pixel-shader texture coordinate.
+
+Sampler mode `0xd` selects point filtering and wrap addressing for U and V.
+The W address mode is clamp, but this setting does not affect the 2D texture.
+
+`DrawRectGPU_GetVerticesAndTexCoords` sends the supplied coordinate endpoints
+to the rectangle vertices. It does not add a half-texel offset.
+
+The dither coordinates cover one texture period per four output pixels. This
+gives an integer pixel lookup modulo four when the offset and span signs are
+fixed.
+
+Yebis also maintains four dither-coordinate seeds. The first two can offset
+the sample phase. The other two can reverse each coordinate span.
+
+The portable shaders use the recovered table, scale, placement, and four-pixel
+period. They currently use a fixed phase and positive spans.
+
+This procedural lookup is a labeled approximation of the native sampled
+texture path. It does not claim frame-by-frame pixel identity.
+
 The scene and temporary tone-map targets use RGBA16F by default. The schedule
 is scene render, MSAA resolve, Yebis effects, final RGBA8 UNORM tone-map, then
 FXAA when enabled. The screen target format remains unresolved.
@@ -265,16 +289,23 @@ software WebGL. The initial frame hash was `405c7cc1dc38cc9d`.
 The comparison frame hash was `81830fb2a5c97af9`. Both captures reported
 WebGL error zero, and the browser report contained no exceptions.
 
+The fixed-phase 4×4 dither update used the same production scene and controls.
+Its initial frame hash was `b0782090f3b83e5e`.
+
+The sun-height 10 comparison hash was `09177c61d521e938`. Both captures
+reported WebGL error zero, and the browser report contained no exceptions.
+
 ## Evidence boundary
 
 This evidence proves the resource handoff, function order, default variant,
 resource bindings, and active constant fields. Some curve semantics remain
 unknown.
 
-The C++ port must keep the first implementation labeled as an approximation.
-The current curve-only pass omits native dither and automatic exposure.
+The C++ port must keep the current implementation labeled as an approximation.
+The current pass includes fixed-phase dither but omits automatic exposure.
 The default glare composite scale is zero, so the missing glare texture does
 not affect the proven default pixel path.
 
-An exact claim still requires vector packing confirmation and controlled pixel
-checks. A production rendering change also requires a production WebGL check.
+An exact claim still requires vector packing confirmation and native dither
+phase sequencing. A production rendering change also requires a production
+WebGL check.

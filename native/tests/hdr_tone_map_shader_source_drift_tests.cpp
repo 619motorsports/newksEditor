@@ -38,19 +38,19 @@ constexpr RecordedIdentity vertex_identity{
     916U,
     "32c3014d1403a79fe237cb72b6fe3dac91a6adf9538e09c96e099f7602fca64b"};
 constexpr RecordedIdentity fragment_identity{
-    "src/render/shaders/hdr_tone_map.frag", 1623U,
-    "1a42d6b107768e6026679d42062eb60ba3af05a4ade51e6f264b41366aff10da",
-    2412U,
-    "336941fc90b3ec872b070f7106e90a52046aa9e23e54f535c9e79b3bf1b3b572"};
+    "src/render/shaders/hdr_tone_map.frag", 1999U,
+    "c40f6f88b76793626c091e7e6ad83fdcb92031e02e055cf577d8e1040c406e65",
+    3380U,
+    "4447479c47f68fe8beda413e7760804550b7ec4e1a1226db1d3f40a876923a52"};
 constexpr RecordedIdentity d3d12_identity{
-    "src/render/shaders/d3d12_hdr_tone_map.hlsl", 2035U,
-    "d5dade476e1947f728a11cd186f9fd3a7fdfb91fb83c81cd7aa026a3fd52bd53",
+    "src/render/shaders/d3d12_hdr_tone_map.hlsl", 2380U,
+    "51ee9e4d791536b298eeeccc3daf4e450f706fa048d1a54d36237c9826b3ac37",
     0U, ""};
 
 constexpr std::string_view d3d12_vertex_sha256 =
     "1226553b9f78efddaa9f9ab82cdb50b158893d78582e88d0a47c1a6e7660cb75";
 constexpr std::string_view d3d12_pixel_sha256 =
-    "a40e59a2b5060f656276b929daa21e96dcbb52b3fa0a83866817b87d1619ea38";
+    "21896499e82b658a1f7a3b5b89c5a77c15c1f2eae1353f2bfbf9c7e4466e4436";
 
 void require(const bool condition, const std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -173,7 +173,7 @@ void verify_source_and_artifact_identity() {
     verify_dxbc(byte_span(d3d12_hdr_tone_map_vertex_dxbc), d3d12_vertex_sha256,
                 884U, "generated HDR tone-map vertex DXBC container is invalid");
     verify_dxbc(byte_span(d3d12_hdr_tone_map_pixel_dxbc), d3d12_pixel_sha256,
-                2936U, "generated HDR tone-map pixel DXBC container is invalid");
+                3732U, "generated HDR tone-map pixel DXBC container is invalid");
 }
 
 } // namespace

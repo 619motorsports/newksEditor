@@ -1,7 +1,7 @@
 #version 450
 
-// Source-evidenced curve approximation. The selected Yebis default also uses
-// glare and dither inputs, which this first native pass does not implement.
+// Source-evidenced Yebis curve approximation and fixed-phase 4x4 RGBA8 dither.
+// Glare remains a separate pass.
 
 layout(set = 0, binding = 0) uniform sampler2D hdr_source;
 
@@ -12,10 +12,17 @@ layout(push_constant) uniform ToneMapParameters {
     float curve_scale;
     float curve_shoulder;
     uint srgb_destination;
+    float dither_scale;
 } parameters;
 
 layout(location = 0) in vec2 texture_coordinates;
 layout(location = 0) out vec4 display_color;
+
+const uint dither_rgba8[16] = uint[](
+    7U, 135U, 39U, 167U,
+    199U, 71U, 231U, 103U,
+    55U, 183U, 23U, 151U,
+    247U, 119U, 215U, 87U);
 
 vec3 decode_srgb(vec3 encoded) {
     bvec3 low = lessThanEqual(encoded, vec3(0.04045));
@@ -36,6 +43,11 @@ void main() {
     vec3 curve = clamp((1.0 - decay) * shoulder * shoulder, 0.0, 1.0);
     vec3 encoded = pow(min(vec3(1.0), curve + vec3(1.0 / 4194304.0)),
                        vec3(1.0 / parameters.gamma_value));
+    uvec2 pixel = uvec2(gl_FragCoord.xy);
+    uint dither_index = (pixel.y & 3U) * 4U + (pixel.x & 3U);
+    float dither = (float(dither_rgba8[dither_index]) / 255.0 - 0.5) *
+                   parameters.dither_scale;
+    encoded += vec3(dither);
     vec3 output_rgb = parameters.srgb_destination != 0U
                           ? decode_srgb(encoded)
                           : encoded;

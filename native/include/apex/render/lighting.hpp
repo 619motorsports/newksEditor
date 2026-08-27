@@ -86,6 +86,14 @@ inline constexpr float ks_editor_tonemap_curve_scale = 2.6581413745880127F;
 inline constexpr float ks_editor_tonemap_curve_shoulder = 0.6653175950050354F;
 inline constexpr float ks_editor_tonemap_input_floor = 1.0F / 16384.0F;
 inline constexpr float ks_editor_tonemap_output_epsilon = 1.0F / 4194304.0F;
+inline constexpr float ks_editor_dither_scale = 1.0F / 255.0F;
+inline constexpr float ks_editor_dither_offset = -0.5F / 255.0F;
+inline constexpr std::array<std::uint8_t, 16> ks_editor_dither_bayer = {
+    0U, 8U, 2U, 10U, 12U, 4U, 14U, 6U,
+    3U, 11U, 1U, 9U, 15U, 7U, 13U, 5U};
+inline constexpr std::array<std::uint8_t, 16> ks_editor_dither_unorm8 = {
+    7U, 135U, 39U, 167U, 199U, 71U, 231U, 103U,
+    55U, 183U, 23U, 151U, 247U, 119U, 215U, 87U};
 inline constexpr float ks_editor_glare_threshold = 5.0F;
 inline constexpr float ks_editor_glare_luminance = 1.6F;
 inline constexpr float ks_editor_glare_composite_base = 0.035F;
@@ -103,6 +111,14 @@ inline constexpr std::array<float, 4> ks_editor_bloom_dispersion = {
     float saturation = ks_editor_exposure_saturation,
     float curve_scale = ks_editor_tonemap_curve_scale,
     float curve_shoulder = ks_editor_tonemap_curve_shoulder) noexcept;
+[[nodiscard]] constexpr float ksEditorDitherOffset(
+    std::uint32_t pixel_x, std::uint32_t pixel_y,
+    float scale = ks_editor_dither_scale) noexcept {
+    const std::size_t index = static_cast<std::size_t>(pixel_y & 3U) * 4U +
+                              static_cast<std::size_t>(pixel_x & 3U);
+    return (static_cast<float>(ks_editor_dither_unorm8[index]) / 255.0F -
+            0.5F) * scale;
+}
 [[nodiscard]] LightingVec3 ksEditorGlareBrightPass(
     LightingVec3 rgb, float exposure = 1.0F, float threshold = ks_editor_glare_threshold,
     float remap = 1.0F) noexcept;

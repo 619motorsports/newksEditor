@@ -31,6 +31,12 @@ export const KS_EDITOR_GLARE = Object.freeze({
   ditherScale: 1 / 255,
   ditherOffset: -0.5 / 255
 });
+export const KS_EDITOR_DITHER = Object.freeze({
+  width: 4,
+  height: 4,
+  bayer: Object.freeze([0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]),
+  unorm8: Object.freeze([7, 135, 39, 167, 199, 71, 231, 103, 55, 183, 23, 151, 247, 119, 215, 87])
+});
 export const CSP_LIGHT_FADE_AT_DEFAULT = 200;
 export const CSP_LIGHT_FADE_SMOOTH_DEFAULT = 80;
 export const CSP_SPOT_DEGREES_TO_RADIANS = 0.017453294;
@@ -56,6 +62,12 @@ export function ksEditorYebisToneMap(rgb, exposure = 1, { gamma = KS_EDITOR_EXPO
     const curve = Math.max(0, Math.min(1, (1 - decay) * shoulder * shoulder));
     return Math.pow(Math.min(1, curve + KS_EDITOR_TONEMAP.outputEpsilon), exponent);
   });
+}
+
+export function ksEditorDitherOffset(pixelX, pixelY, scale = KS_EDITOR_GLARE.ditherScale) {
+  const x = Math.trunc(Number(pixelX) || 0) & 3, y = Math.trunc(Number(pixelY) || 0) & 3;
+  const strength = Math.max(0, Number(scale) || 0);
+  return strength === 0 ? 0 : (KS_EDITOR_DITHER.unorm8[y * 4 + x] / 255 - 0.5) * strength;
 }
 
 export function ksEditorGlareBrightPass(rgb, exposure = 1, threshold = KS_EDITOR_GLARE.threshold, remap = KS_EDITOR_GLARE.brightPassRemap) {

@@ -241,6 +241,11 @@ void rejects_parameters_backend_and_aliasing() {
     require(validate(source, destination, parameters) ==
                 HdrToneMapStatus::invalid_request,
             "nonfinite curve shoulder is rejected");
+    parameters = {};
+    parameters.dither_scale = -1.0F;
+    require(validate(source, destination, parameters) ==
+                HdrToneMapStatus::invalid_request,
+            "negative dither scale is rejected");
 
     require(validate(source, destination, {}, Backend::Vulkan, Backend::D3D12) ==
                 HdrToneMapStatus::unsupported,
@@ -371,6 +376,85 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
     require(created.device->tone_map_hdr_texture(
                 *resolved_hdr.texture, *display.texture).ok(),
             "backend repeats resolved HDR tone mapping with tracked states");
+
+    TextureDescription dither_source = source_description();
+    dither_source.width = 4U;
+    dither_source.height = 4U;
+    constexpr std::uint16_t dither_source_value = 0x331dU;
+    std::array<std::uint16_t, 64U> dither_pixels{};
+    for (std::size_t index = 0U; index < dither_pixels.size(); index += 4U) {
+        dither_pixels[index] = dither_source_value;
+        dither_pixels[index + 1U] = dither_source_value;
+        dither_pixels[index + 2U] = dither_source_value;
+        dither_pixels[index + 3U] = 0x3c00U;
+    }
+    TextureUploadPlan dither_upload;
+    dither_upload.subresources.push_back(
+        {0U, 0U, 4U, 4U, 4U * 4U * sizeof(std::uint16_t),
+         std::as_bytes(std::span(dither_pixels))});
+    TextureResult dither_hdr =
+        created.device->create_texture(dither_source, dither_upload);
+    require(dither_hdr.ok(), "backend creates uniform HDR dither fixture");
+
+    TextureDescription dither_output = destination_description();
+    dither_output.width = 4U;
+    dither_output.height = 4U;
+    dither_output.usage = TextureUsage::sampled | TextureUsage::color_attachment |
+                          TextureUsage::transfer_source;
+    dither_output.access_policy = TextureAccessPolicy::render_then_sample;
+    TextureResult dither_display = created.device->create_texture(dither_output);
+    require(dither_display.ok(), "backend creates dither display target");
+    result = created.device->tone_map_hdr_texture(
+        *dither_hdr.texture, *dither_display.texture);
+    require(result.ok(), "backend executes recovered fixed-phase dither");
+
+    IndexedStaticMeshBatchDescription readback;
+    readback.load_color = true;
+    readback.capture_rgba8 = true;
+    const IndexedStaticMeshBatchResult captured =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *dither_display.texture, readback);
+    require(captured.ok(), "backend reads the retained dither target");
+    constexpr std::array<std::uint8_t, 16U> expected_luma = {
+        60U, 61U, 60U, 61U, 61U, 60U, 61U, 60U,
+        60U, 61U, 60U, 61U, 61U, 60U, 61U, 60U};
+    require(captured.rgba8.size() == expected_luma.size() * 4U,
+            "dither readback has one RGBA8 pixel per source pixel");
+    for (std::size_t index = 0U; index < expected_luma.size(); ++index) {
+        const std::uint8_t expected = expected_luma[index];
+        const std::size_t offset = index * 4U;
+        require(std::to_integer<std::uint8_t>(captured.rgba8[offset]) == expected &&
+                    std::to_integer<std::uint8_t>(
+                        captured.rgba8[offset + 1U]) == expected &&
+                    std::to_integer<std::uint8_t>(
+                        captured.rgba8[offset + 2U]) == expected &&
+                    std::to_integer<std::uint8_t>(captured.rgba8[offset + 3U]) == 255U,
+                "backend matches the recovered 4x4 dither pattern");
+    }
+
+    HdrToneMapParameters undithered_parameters;
+    undithered_parameters.dither_scale = 0.0F;
+    result = created.device->tone_map_hdr_texture(
+        *dither_hdr.texture, *dither_display.texture, undithered_parameters);
+    require(result.ok(), "backend disables dither through its public parameter");
+    const IndexedStaticMeshBatchResult undithered =
+        created.device->draw_indexed_static_mesh_batch_and_readback(
+            *dither_display.texture, readback);
+    require(undithered.ok() && undithered.rgba8.size() == captured.rgba8.size(),
+            "backend reads the undithered target");
+    const std::uint8_t uniform =
+        std::to_integer<std::uint8_t>(undithered.rgba8[0U]);
+    for (std::size_t index = 0U; index < expected_luma.size(); ++index) {
+        const std::size_t offset = index * 4U;
+        require(std::to_integer<std::uint8_t>(undithered.rgba8[offset]) == uniform &&
+                    std::to_integer<std::uint8_t>(
+                        undithered.rgba8[offset + 1U]) == uniform &&
+                    std::to_integer<std::uint8_t>(
+                        undithered.rgba8[offset + 2U]) == uniform &&
+                    std::to_integer<std::uint8_t>(
+                        undithered.rgba8[offset + 3U]) == 255U,
+                "undithered tone mapping remains spatially uniform");
+    }
     return true;
 }
 

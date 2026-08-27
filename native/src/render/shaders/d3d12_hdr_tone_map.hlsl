@@ -1,5 +1,5 @@
-// Source-evidenced curve approximation. The selected Yebis default also uses
-// glare and dither inputs, which this first native pass does not implement.
+// Source-evidenced Yebis curve approximation and fixed-phase 4x4 RGBA8 dither.
+// Glare remains a separate pass.
 
 Texture2D<float4> hdr_source : register(t0);
 SamplerState point_sampler : register(s0);
@@ -11,6 +11,14 @@ cbuffer ToneMapParameters : register(b0) {
     float curve_scale;
     float curve_shoulder;
     uint srgb_destination;
+    float dither_scale;
+};
+
+static const float dither_rgba8[16] = {
+    7.0F, 135.0F, 39.0F, 167.0F,
+    199.0F, 71.0F, 231.0F, 103.0F,
+    55.0F, 183.0F, 23.0F, 151.0F,
+    247.0F, 119.0F, 215.0F, 87.0F
 };
 
 struct VertexOutput {
@@ -52,6 +60,9 @@ float4 pixel_main(VertexOutput input) : SV_Target0 {
     float3 curve = saturate((1.0F - decay) * shoulder * shoulder);
     float3 encoded = pow(min(1.0F, curve + 1.0F / 4194304.0F),
                          1.0F / gamma_value);
+    uint2 pixel = uint2(input.position.xy);
+    uint dither_index = (pixel.y & 3U) * 4U + (pixel.x & 3U);
+    encoded += (dither_rgba8[dither_index] / 255.0F - 0.5F) * dither_scale;
     return float4(srgb_destination != 0U ? decode_srgb(encoded) : encoded,
                   source.a);
 }

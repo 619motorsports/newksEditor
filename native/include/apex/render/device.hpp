@@ -480,15 +480,16 @@ struct TextureUpdateResult {
 };
 
 // A bounded fullscreen conversion from a linear RGBA16F scene texture into
-// an owned RGBA8 or BGRA8 display texture. This source-evidenced curve remains
-// an approximation of the selected Yebis shader. Bloom, dither, and automatic
-// exposure remain separate passes.
+// an owned RGBA8 or BGRA8 display texture. The pass approximates the selected
+// Yebis curve and uses its recovered fixed-phase 4x4 dither table. Bloom and
+// automatic exposure remain separate passes.
 struct HdrToneMapParameters {
     float exposure = 1.0F;
     float gamma = 1.2F;
     float saturation = 0.95F;
     float curve_scale = 2.6581413745880127F;
     float curve_shoulder = 0.6653175950050354F;
+    float dither_scale = 1.0F / 255.0F;
 };
 
 enum class HdrToneMapStatus : std::uint8_t {

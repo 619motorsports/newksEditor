@@ -5434,6 +5434,7 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
         float curve_scale;
         float curve_shoulder;
         std::uint32_t srgb_destination;
+        float dither_scale;
     } push_constants{parameters.exposure,
                      parameters.gamma,
                      parameters.saturation,
@@ -5442,8 +5443,9 @@ bool tone_map_vulkan_texture(VulkanTexture& source, VulkanTexture& destination,
                      (destination.info().description.format == TextureFormat::rgba8_srgb ||
                       destination.info().description.format == TextureFormat::bgra8_srgb)
                          ? 1U
-                         : 0U};
-    static_assert(sizeof(PushConstants) == 24U);
+                         : 0U,
+                     parameters.dither_scale};
+    static_assert(sizeof(PushConstants) == 28U);
 
     VkShaderModule vertex_shader = VK_NULL_HANDLE;
     VkShaderModule fragment_shader = VK_NULL_HANDLE;

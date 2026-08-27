@@ -1376,7 +1376,7 @@ d3d12_texture_srv_description(const TextureDescription& description,
             D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         constants_parameter.Constants.ShaderRegister = 0U;
         constants_parameter.Constants.RegisterSpace = 0U;
-        constants_parameter.Constants.Num32BitValues = 6U;
+        constants_parameter.Constants.Num32BitValues = 7U;
         constants_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_STATIC_SAMPLER_DESC sampler{};
@@ -1638,7 +1638,7 @@ d3d12_texture_srv_description(const TextureDescription& description,
     list->RSSetScissorRects(1U, &scissor);
     list->SetGraphicsRootDescriptorTable(
         0U, srv_heap->GetGPUDescriptorHandleForHeapStart());
-    std::array<std::uint32_t, 6U> constants{};
+    std::array<std::uint32_t, 7U> constants{};
     const auto set_float = [&](std::size_t index, float value) {
         static_assert(sizeof(float) == sizeof(std::uint32_t));
         std::memcpy(&constants[index], &value, sizeof(value));
@@ -1652,6 +1652,7 @@ d3d12_texture_srv_description(const TextureDescription& description,
                             destination_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
                         ? 1U
                         : 0U;
+    set_float(6U, parameters.dither_scale);
     list->SetGraphicsRoot32BitConstants(
         1U, static_cast<UINT>(constants.size()), constants.data(), 0U);
     list->DrawInstanced(3U, 1U, 0U, 0U);

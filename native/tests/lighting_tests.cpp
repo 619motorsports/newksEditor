@@ -99,6 +99,33 @@ void weatherAndExposure() {
     const auto mapped = ksEditorYebisToneMap({1.0F, 2.0F, 4.0F});
     require(finite(mapped) && mapped[0] >= 0.0F && mapped[0] <= 1.0F,
             "finite display curve");
+    constexpr std::array<std::uint8_t, 16> expected_bayer = {
+        0U, 8U, 2U, 10U, 12U, 4U, 14U, 6U,
+        3U, 11U, 1U, 9U, 15U, 7U, 13U, 5U};
+    constexpr std::array<std::uint8_t, 16> expected_dither = {
+        7U, 135U, 39U, 167U, 199U, 71U, 231U, 103U,
+        55U, 183U, 23U, 151U, 247U, 119U, 215U, 87U};
+    require(ks_editor_dither_bayer == expected_bayer &&
+                ks_editor_dither_unorm8 == expected_dither,
+            "recovered 4x4 Yebis dither table");
+    for (std::size_t index = 0; index < expected_bayer.size(); ++index) {
+        const float encoded =
+            (static_cast<float>(expected_bayer[index]) * 0.0625F + 0.03125F) *
+            255.999893F;
+        require(static_cast<std::uint8_t>(encoded) == expected_dither[index],
+                "Yebis dither byte truncation");
+    }
+    for (std::uint32_t y = 0U; y < 4U; ++y) {
+        for (std::uint32_t x = 0U; x < 4U; ++x) {
+            require(ksEditorDitherOffset(x, y) ==
+                        ksEditorDitherOffset(x + 4U, y + 4U),
+                    "Yebis dither repeats every four pixels");
+        }
+    }
+    require(ksEditorDitherOffset(0U, 0U, 0.0F) == 0.0F &&
+                ks_editor_dither_scale == 1.0F / 255.0F &&
+                ks_editor_dither_offset == -0.5F / 255.0F,
+            "Yebis dither scale and disabled offset");
     const auto glare = ksEditorGlareBrightPass({4.0F, 6.0F, 10.0F});
     require(glare[0] == 0.0F && glare[1] == 1.0F && glare[2] == 5.0F,
             "bright pass threshold");
