@@ -6597,6 +6597,13 @@ float4 main(float3 color : COLOR) : SV_Target { return float4(color, 1.0); }
     require(ai_spline_visible.ok() &&
                 count_magenta(ai_spline_visible.rgba8) > 8U,
             "normal-depth raw AI spline pixels pass clear depth");
+    ai_spline_batch.depth_clear_value = 0.5F;
+    const auto ai_spline_equal_depth =
+        device.device->draw_indexed_static_mesh_batch_and_readback(
+            *triangle_texture.texture, ai_spline_batch);
+    require(ai_spline_equal_depth.ok() &&
+                count_magenta(ai_spline_equal_depth.rgba8) > 8U,
+            "LESS_EQUAL raw AI spline pixels pass equal clear depth");
     ai_spline_batch.depth_clear_value = 0.0F;
     const auto ai_spline_occluded =
         device.device->draw_indexed_static_mesh_batch_and_readback(

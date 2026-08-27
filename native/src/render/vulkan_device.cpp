@@ -1988,6 +1988,23 @@ VkBlendOp vk_pipeline_blend_operation(PipelineBlendOperation operation) noexcept
     return VK_BLEND_OP_ADD;
 }
 
+[[nodiscard]] VkCompareOp vk_pipeline_compare(
+    PipelineCompareOperation compare) noexcept {
+    switch (compare) {
+    case PipelineCompareOperation::never: return VK_COMPARE_OP_NEVER;
+    case PipelineCompareOperation::less: return VK_COMPARE_OP_LESS;
+    case PipelineCompareOperation::equal: return VK_COMPARE_OP_EQUAL;
+    case PipelineCompareOperation::less_or_equal:
+        return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case PipelineCompareOperation::greater: return VK_COMPARE_OP_GREATER;
+    case PipelineCompareOperation::not_equal: return VK_COMPARE_OP_NOT_EQUAL;
+    case PipelineCompareOperation::greater_or_equal:
+        return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    case PipelineCompareOperation::always: return VK_COMPARE_OP_ALWAYS;
+    }
+    return VK_COMPARE_OP_ALWAYS;
+}
+
 VkShaderStageFlagBits vk_pipeline_stage(PipelineShaderStage stage) {
     return stage == PipelineShaderStage::vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
 }
@@ -2608,7 +2625,7 @@ bool create_batch_pipeline(const std::shared_ptr<VulkanContext>& context,
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth_stencil.depthTestEnable = has_depth && program.depth.test_enabled ? VK_TRUE : VK_FALSE;
     depth_stencil.depthWriteEnable = has_depth && program.depth.write_enabled ? VK_TRUE : VK_FALSE;
-    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depth_stencil.depthCompareOp = vk_pipeline_compare(program.depth.compare);
     VkGraphicsPipelineCreateInfo pipeline_info{};
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
@@ -3694,7 +3711,7 @@ bool draw_graphics_and_readback(const std::shared_ptr<VulkanContext>& context,
         depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depth_stencil.depthTestEnable = depth_attachment != nullptr && program.depth.test_enabled ? VK_TRUE : VK_FALSE;
         depth_stencil.depthWriteEnable = depth_attachment != nullptr && program.depth.write_enabled ? VK_TRUE : VK_FALSE;
-        depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depth_stencil.depthCompareOp = vk_pipeline_compare(program.depth.compare);
         VkGraphicsPipelineCreateInfo pipeline_info{};
         pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
