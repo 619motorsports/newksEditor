@@ -673,6 +673,8 @@ void validatesExplicitCubeTextureContracts() {
     require(validate_texture_description(cube, uploads, diagnostic) ==
                 TextureStatus::ready &&
                 texture_physical_array_layers(cube) == 6U &&
+                texture_default_sample_view_kind(cube) ==
+                    TextureSampleViewKind::texture_cube &&
                 texture_upload_physical_array_layer(
                     cube, uploads.subresources.back()) == 5U,
             "an explicit six-face cube maps to six physical layers");
@@ -680,8 +682,17 @@ void validatesExplicitCubeTextureContracts() {
     TextureDescription ordinary_array = cube;
     ordinary_array.shape = TextureShape::texture_2d;
     ordinary_array.array_layers = 6U;
-    require(texture_physical_array_layers(ordinary_array) == 6U,
+    require(texture_physical_array_layers(ordinary_array) == 6U &&
+                texture_default_sample_view_kind(ordinary_array) ==
+                    TextureSampleViewKind::texture_2d_array,
             "a six-layer 2D array is not inferred to be a cube");
+
+    TextureDescription cube_array = cube;
+    cube_array.array_layers = 2U;
+    require(texture_physical_array_layers(cube_array) == 12U &&
+                texture_default_sample_view_kind(cube_array) ==
+                    TextureSampleViewKind::texture_cube_array,
+            "a logical cube array selects a cube-array sampling view");
 
     TextureUploadPlan missing_face = uploads;
     missing_face.subresources.front().cube_face = CubeFace::none;

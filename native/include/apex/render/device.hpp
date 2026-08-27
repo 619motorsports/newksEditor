@@ -265,6 +265,13 @@ enum class TextureShape : std::uint8_t {
     texture_cube,
 };
 
+enum class TextureSampleViewKind : std::uint8_t {
+    texture_2d,
+    texture_2d_array,
+    texture_cube,
+    texture_cube_array,
+};
+
 enum class CubeFace : std::uint8_t {
     positive_x = 0,
     negative_x = 1,
@@ -313,6 +320,15 @@ texture_physical_array_layers(const TextureDescription& description) noexcept {
     return description.shape == TextureShape::texture_cube
                ? static_cast<std::uint64_t>(description.array_layers) * texture_cube_face_count
                : description.array_layers;
+}
+
+[[nodiscard]] constexpr TextureSampleViewKind
+texture_default_sample_view_kind(const TextureDescription& description) noexcept {
+    if (description.shape == TextureShape::texture_cube)
+        return description.array_layers == 1U ? TextureSampleViewKind::texture_cube
+                                              : TextureSampleViewKind::texture_cube_array;
+    return description.array_layers == 1U ? TextureSampleViewKind::texture_2d
+                                          : TextureSampleViewKind::texture_2d_array;
 }
 
 [[nodiscard]] constexpr std::uint64_t

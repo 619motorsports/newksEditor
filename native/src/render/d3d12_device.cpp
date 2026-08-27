@@ -833,6 +833,47 @@ private:
     }
 }
 
+[[nodiscard]] D3D12_SHADER_RESOURCE_VIEW_DESC
+d3d12_texture_srv_description(const TextureDescription& description,
+                              const DXGI_FORMAT format) noexcept {
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = format;
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    switch (texture_default_sample_view_kind(description)) {
+    case TextureSampleViewKind::texture_2d:
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Texture2D.MostDetailedMip = 0U;
+        view.Texture2D.MipLevels = description.mip_levels;
+        view.Texture2D.PlaneSlice = 0U;
+        view.Texture2D.ResourceMinLODClamp = 0.0F;
+        break;
+    case TextureSampleViewKind::texture_2d_array:
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        view.Texture2DArray.MostDetailedMip = 0U;
+        view.Texture2DArray.MipLevels = description.mip_levels;
+        view.Texture2DArray.FirstArraySlice = 0U;
+        view.Texture2DArray.ArraySize = description.array_layers;
+        view.Texture2DArray.PlaneSlice = 0U;
+        view.Texture2DArray.ResourceMinLODClamp = 0.0F;
+        break;
+    case TextureSampleViewKind::texture_cube:
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        view.TextureCube.MostDetailedMip = 0U;
+        view.TextureCube.MipLevels = description.mip_levels;
+        view.TextureCube.ResourceMinLODClamp = 0.0F;
+        break;
+    case TextureSampleViewKind::texture_cube_array:
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        view.TextureCubeArray.MostDetailedMip = 0U;
+        view.TextureCubeArray.MipLevels = description.mip_levels;
+        view.TextureCubeArray.First2DArrayFace = 0U;
+        view.TextureCubeArray.NumCubes = description.array_layers;
+        view.TextureCubeArray.ResourceMinLODClamp = 0.0F;
+        break;
+    }
+    return view;
+}
+
 [[nodiscard]] bool is_d3d12_supported_block_format(TextureFormat format) noexcept {
     return format == TextureFormat::bc1_unorm || format == TextureFormat::bc1_srgb ||
            format == TextureFormat::bc2_unorm || format == TextureFormat::bc2_srgb ||
@@ -3992,14 +4033,8 @@ bool execute_d3d12_depth_only_indexed_static_mesh_batch(
             D3D12_CPU_DESCRIPTOR_HANDLE cpu =
                 alpha_srv_heap->GetCPUDescriptorHandleForHeapStart();
             cpu.ptr += static_cast<SIZE_T>(descriptor_index) * descriptor_size;
-            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format = format;
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MostDetailedMip = 0U;
-            srv.Texture2D.MipLevels = texture_description.mip_levels;
-            srv.Texture2D.PlaneSlice = 0U;
-            srv.Texture2D.ResourceMinLODClamp = 0.0F;
+            const D3D12_SHADER_RESOURCE_VIEW_DESC srv =
+                d3d12_texture_srv_description(texture_description, format);
             context->device->CreateShaderResourceView(
                 d3d12_texture_resource(*draw.alpha_texture), &srv, cpu);
             D3D12_GPU_DESCRIPTOR_HANDLE gpu =
@@ -5411,14 +5446,8 @@ bool prepare_d3d12_material_binding(
         return false;
     }
     gpu.ptr += srv_offset;
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = format;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MostDetailedMip = 0U;
-    srv.Texture2D.MipLevels = texture_description.mip_levels;
-    srv.Texture2D.PlaneSlice = 0U;
-    srv.Texture2D.ResourceMinLODClamp = 0.0F;
+    const D3D12_SHADER_RESOURCE_VIEW_DESC srv =
+        d3d12_texture_srv_description(texture_description, format);
     context->device->CreateShaderResourceView(texture->resource(), &srv, cpu);
     output.srv_heap = srv_heap;
     output.srv_gpu = gpu;
@@ -5438,15 +5467,9 @@ bool prepare_d3d12_material_binding(
             return false;
         }
         normal_gpu.ptr += normal_srv_offset;
-        D3D12_SHADER_RESOURCE_VIEW_DESC normal_srv{};
         const TextureDescription& normal_description = normal_texture->info().description;
-        normal_srv.Format = normal_format;
-        normal_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        normal_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        normal_srv.Texture2D.MostDetailedMip = 0U;
-        normal_srv.Texture2D.MipLevels = normal_description.mip_levels;
-        normal_srv.Texture2D.PlaneSlice = 0U;
-        normal_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        const D3D12_SHADER_RESOURCE_VIEW_DESC normal_srv =
+            d3d12_texture_srv_description(normal_description, normal_format);
         context->device->CreateShaderResourceView(normal_texture->resource(), &normal_srv, normal_cpu);
         output.normal_srv_gpu = normal_gpu;
         output.normal_sampler_gpu = normal_sampler->gpu_descriptor();
@@ -5467,15 +5490,9 @@ bool prepare_d3d12_material_binding(
             return false;
         }
         maps_gpu.ptr += maps_srv_offset;
-        D3D12_SHADER_RESOURCE_VIEW_DESC maps_srv{};
         const TextureDescription& maps_description = maps_texture->info().description;
-        maps_srv.Format = maps_format;
-        maps_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        maps_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        maps_srv.Texture2D.MostDetailedMip = 0U;
-        maps_srv.Texture2D.MipLevels = maps_description.mip_levels;
-        maps_srv.Texture2D.PlaneSlice = 0U;
-        maps_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        const D3D12_SHADER_RESOURCE_VIEW_DESC maps_srv =
+            d3d12_texture_srv_description(maps_description, maps_format);
         context->device->CreateShaderResourceView(maps_texture->resource(), &maps_srv, maps_cpu);
         output.maps_srv_gpu = maps_gpu;
         output.maps_sampler_gpu = maps_sampler->gpu_descriptor();
@@ -5496,15 +5513,9 @@ bool prepare_d3d12_material_binding(
             return false;
         }
         detail_gpu.ptr += detail_srv_offset;
-        D3D12_SHADER_RESOURCE_VIEW_DESC detail_srv{};
         const TextureDescription& detail_description = detail_texture->info().description;
-        detail_srv.Format = detail_format;
-        detail_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        detail_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        detail_srv.Texture2D.MostDetailedMip = 0U;
-        detail_srv.Texture2D.MipLevels = detail_description.mip_levels;
-        detail_srv.Texture2D.PlaneSlice = 0U;
-        detail_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        const D3D12_SHADER_RESOURCE_VIEW_DESC detail_srv =
+            d3d12_texture_srv_description(detail_description, detail_format);
         context->device->CreateShaderResourceView(detail_texture->resource(), &detail_srv, detail_cpu);
         output.detail_srv_gpu = detail_gpu;
         output.detail_sampler_gpu = detail_sampler->gpu_descriptor();
@@ -5526,15 +5537,10 @@ bool prepare_d3d12_material_binding(
             return false;
         }
         normal_detail_gpu.ptr += normal_detail_srv_offset;
-        D3D12_SHADER_RESOURCE_VIEW_DESC normal_detail_srv{};
         const TextureDescription& normal_detail_description = normal_detail_texture->info().description;
-        normal_detail_srv.Format = normal_detail_format;
-        normal_detail_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        normal_detail_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        normal_detail_srv.Texture2D.MostDetailedMip = 0U;
-        normal_detail_srv.Texture2D.MipLevels = normal_detail_description.mip_levels;
-        normal_detail_srv.Texture2D.PlaneSlice = 0U;
-        normal_detail_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+        const D3D12_SHADER_RESOURCE_VIEW_DESC normal_detail_srv =
+            d3d12_texture_srv_description(normal_detail_description,
+                                          normal_detail_format);
         context->device->CreateShaderResourceView(normal_detail_texture->resource(), &normal_detail_srv,
                                                   normal_detail_cpu);
         output.normal_detail_srv_gpu = normal_detail_gpu;
@@ -5563,14 +5569,9 @@ bool prepare_d3d12_material_binding(
                 return false;
             }
             source_gpu.ptr += offset;
-            D3D12_SHADER_RESOURCE_VIEW_DESC source_srv{};
-            source_srv.Format = source_format;
-            source_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            source_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            source_srv.Texture2D.MostDetailedMip = 0U;
-            source_srv.Texture2D.MipLevels = source_texture.info().description.mip_levels;
-            source_srv.Texture2D.PlaneSlice = 0U;
-            source_srv.Texture2D.ResourceMinLODClamp = 0.0F;
+            const D3D12_SHADER_RESOURCE_VIEW_DESC source_srv =
+                d3d12_texture_srv_description(source_texture.info().description,
+                                              source_format);
             context->device->CreateShaderResourceView(source_texture.resource(), &source_srv,
                                                       source_cpu);
             output_gpu = source_gpu;

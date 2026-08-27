@@ -1055,12 +1055,11 @@ bool create_raw_image(const std::shared_ptr<VulkanContext>& context,
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = raw.image;
-    if (description.shape == TextureShape::texture_cube) {
-        view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_CUBE
-                                                            : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-    } else {
-        view_info.viewType = description.array_layers == 1U ? VK_IMAGE_VIEW_TYPE_2D
-                                                            : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    switch (texture_default_sample_view_kind(description)) {
+    case TextureSampleViewKind::texture_2d: view_info.viewType = VK_IMAGE_VIEW_TYPE_2D; break;
+    case TextureSampleViewKind::texture_2d_array: view_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
+    case TextureSampleViewKind::texture_cube: view_info.viewType = VK_IMAGE_VIEW_TYPE_CUBE; break;
+    case TextureSampleViewKind::texture_cube_array: view_info.viewType = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY; break;
     }
     view_info.format = image_info.format;
     view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
