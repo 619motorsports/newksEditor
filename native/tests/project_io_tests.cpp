@@ -90,7 +90,7 @@ void roundTripsModeledFields() {
             "node and workspace reload");
     require(loaded.project->meshes.at("BODY").transparent == true &&
                 loaded.project->meshes.at("BODY").castShadows == false &&
-                loaded.project->meshes.at("BODY").layer == 2 &&
+                loaded.project->meshes.at("BODY").layer == 2U &&
                 loaded.project->meshes.at("BODY").lodIn == 12.5F,
             "mesh reload");
     require(loaded.project->geometry.at("0").reverse_winding &&
@@ -103,7 +103,7 @@ void roundTripsModeledFields() {
     require(loaded.project->damage.at("VISUAL_OBJECT_0").minSpeed == 25.0F, "damage reload");
     require(loaded.project->colliderAsset->name == "COLLIDER/collider.kn5" &&
                 loaded.project->colliderAsset->sha256 == std::string(64, 'b') &&
-                loaded.project->colliderAsset->kn5Version == 7 &&
+                loaded.project->colliderAsset->kn5Version == 7U &&
                 loaded.project->damageAsset->name == "data/damage.ini" &&
                 loaded.project->bottomColliderAsset->name == "data/colliders.ini",
             "secondary identities reload canonically");
@@ -210,7 +210,7 @@ void reportsUnsupportedFieldsAndStaleSource() {
     const std::string json = "{\"format\":\"apex-editor-project\",\"version\":1,\"asset\":{\"name\":\"car.kn5\",\"size\":42,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"meshEdits\":{\"BODY\":{\"layer\":2}},\"skinEdits\":{\"red\":{\"skinname\":\"Rosso\"}}}";
     const auto result = apex::authoring::parseProject(json, identity("other.kn5"));
     require(result.project.has_value(), "unsupported fields still preserve modeled project");
-    require(result.project->meshes.at("BODY").layer == 2,
+    require(result.project->meshes.at("BODY").layer == 2U,
             "mesh field is modeled");
     require(result.diagnostics.size() >= 2, "unsupported and stale diagnostics");
 }
