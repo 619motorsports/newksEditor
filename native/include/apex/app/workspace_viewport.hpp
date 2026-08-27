@@ -222,6 +222,10 @@ struct WorkspaceViewportPrepareRequest {
     // true value requires directional_shadows so the viewport cannot prepare
     // a receiver that has no maps or caster schedule.
     bool directional_shadow_receiver = false;
+    // Select the portable reflection-capable module variants for the four
+    // bounded MultiMap families. Each frame must then supply the renderer-
+    // owned cube and sampler through WorkspaceViewportFrameRequest.
+    bool multimap_reflection = false;
     std::optional<WorkspaceViewportDirectionalShadowOptions> directional_shadows;
     render::StockSceneExecutionLimits limits{};
     workspace::WorkspaceSceneLimits workspace_scene_limits{};
@@ -285,6 +289,9 @@ struct WorkspaceViewportFrameRequest {
     std::span<const std::uint32_t> shadow_packet_order{};
     bool apply_skinning = false;
     std::optional<render::KsPerPixelFrameConstants> frame_constants;
+    // Frame-owned renderer cube. It is deliberately separate from KN5
+    // texture authority and required exactly when reflection was prepared.
+    render::IndexedSampledTextureBinding multimap_reflection_cube{};
     // Required exactly when preparation selected at least one immutable
     // Vulkan source program. Portable constants are never reinterpreted as
     // this recovered native ABI.

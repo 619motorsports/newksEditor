@@ -277,6 +277,42 @@ void test_directional_shadow_receiver_reaches_material_handoff() {
             "stock-scene receiver selection must reach the material handoff");
 }
 
+void test_multimap_reflection_reaches_material_handoff() {
+    Fixture fixture_value = fixture();
+    auto& material = fixture_value.model.materials.front();
+    material.shader = "ksPerPixelMultiMap";
+    material.properties = {
+        {"fresnelC", 0.02F, {}, {}, {}},
+        {"fresnelEXP", 5.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.25F, {}, {}, {}},
+        {"isAdditive", 2.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "diffuse"},
+        {"txNormal", 1U, "normal"},
+        {"txMaps", 2U, "maps"},
+    };
+    fixture_value.model.textures.push_back(
+        {true, "normal", 4U, {}, std::nullopt});
+    fixture_value.model.textures.push_back(
+        {true, "maps", 4U, {}, std::nullopt});
+    fixture_value.scene.materials.front().shader = material.shader;
+    fixture_value.module_set.key = material.shader;
+    fixture_value.module_set.multimap_reflection = true;
+
+    FakeDevice device;
+    auto request = request_for(fixture_value);
+    request.multimap_reflection = true;
+    const auto result = prepare_stock_scene_execution(device, request);
+    require(result.ok() &&
+                result.resources->requires_multimap_reflection_cube() &&
+                result.resources
+                        ->owned_multimap_reflection_constant_count() == 1U,
+            "stock-scene reflection selection reaches the material and retained static-scene handoff");
+}
+
 void test_alpha_shadow_constants_reach_static_scene_handoff() {
     Fixture fixture_value = fixture();
     auto& material = fixture_value.model.materials.front();
@@ -791,6 +827,7 @@ int main() {
         test_builtin_vulkan_source_selector_reaches_material_handoff();
         test_d3d12_native_selector_reaches_material_handoff();
         test_directional_shadow_receiver_reaches_material_handoff();
+        test_multimap_reflection_reaches_material_handoff();
         test_alpha_shadow_constants_reach_static_scene_handoff();
         test_resolved_subtree_filter_and_isolation_reach_facade();
         test_csp_node_state_reaches_per_packet_pipelines();

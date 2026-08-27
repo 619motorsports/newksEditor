@@ -13,9 +13,10 @@
 namespace apex::render {
 
 // This is the bounded main-color scene boundary. It deliberately does not
-// execute most frame-plan effects such as reflections, sky, CSP lights, or
-// post-processing. A caller can opt into the bounded retained directional-
-// shadow receiver contract. Per-node CSP mesh state is supported. Callers must
+// execute most frame-plan effects such as dynamic reflection capture, sky,
+// CSP lights, or post-processing. A caller can opt into the bounded retained
+// directional-shadow receiver contract or supply the separate portable
+// MultiMap reflection cube contract. Per-node CSP mesh state is supported. Callers must
 // resolve external resources into owned model payloads before this boundary.
 // Static Vulkan ksPerPixel packets can explicitly select the immutable
 // source-equivalent package when no caller module set matches.
@@ -60,6 +61,9 @@ struct StockSceneExecutionRequest {
     // Selects receiver-capable stock shader modules and prepares the scene-
     // owned bindings used by StaticSceneFrameDescription.
     bool directional_shadow_receiver = false;
+    // Select reflection-capable modules for the four bounded MultiMap
+    // families. The cubemap itself remains a frame-owned renderer resource.
+    bool multimap_reflection = false;
     StaticSceneTextureAuthority texture_authority =
         StaticSceneTextureAuthority::caller_tables;
     StockSceneExecutionLimits limits{};

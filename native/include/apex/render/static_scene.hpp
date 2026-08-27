@@ -270,6 +270,9 @@ public:
         noexcept {
         return owned_multimap_reflection_constants_.size();
     }
+    [[nodiscard]] bool requires_multimap_reflection_cube() const noexcept {
+        return !owned_multimap_reflection_constants_.empty();
+    }
     [[nodiscard]] std::size_t owned_stock_shadow_constant_count() const noexcept {
         return owned_stock_shadow_constants_.size();
     }

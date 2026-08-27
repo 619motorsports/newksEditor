@@ -680,6 +680,7 @@ StockSceneExecutionResult prepare_stock_scene_execution(
         material_request.wireframe = request.wireframe;
         material_request.directional_shadow_receiver =
             request.directional_shadow_receiver;
+        material_request.multimap_reflection = request.multimap_reflection;
         material_request.texture_authority = request.texture_authority;
         material_request.limits = request.limits.material;
         StockMaterialExecutionResult material_result =

@@ -244,6 +244,9 @@ public:
         if (!batch.draws.empty()) {
             receiver_maps.push_back(
                 batch.draws.front().directional_shadow_binding.maps);
+            reflection_textures.push_back(
+                batch.draws.front()
+                    .multimap_reflection_binding.cube.texture);
         }
         for (const auto &draw : batch.draws) {
             if (draw.stock_ks_per_pixel_vulkan_source != nullptr)
@@ -357,6 +360,7 @@ public:
     std::vector<std::array<const DepthAttachment *,
                            indexed_directional_shadow_cascade_count>>
         receiver_maps;
+    std::vector<const Texture *> reflection_textures;
     std::vector<TextureDescription> created_texture_descriptions;
     std::vector<std::vector<std::byte>> created_texture_bytes;
     std::vector<Texture *> created_textures;
@@ -1316,6 +1320,75 @@ void opens_and_draws() {
                 device.draw_calls == 2U && device.present_calls == 2U &&
                 device.draw_counts == std::vector<std::size_t>({1U, 0U}),
             "all-hidden viewport frame clears and presents without rebuilding resources");
+}
+
+void draws_explicit_multimap_reflection_cube_outside_model_textures() {
+    auto value = fixture();
+    auto& model = value.document.assembly.model;
+    auto& material = model.materials.front();
+    material.shader = "ksPerPixelMultiMap";
+    material.properties = {
+        {"fresnelC", 0.02F, {}, {}, {}},
+        {"fresnelEXP", 5.0F, {}, {}, {}},
+        {"fresnelMaxLevel", 0.25F, {}, {}, {}},
+        {"isAdditive", 2.0F, {}, {}, {}},
+        {"nmObjectSpace", 0.0F, {}, {}, {}},
+        {"useDetail", 0.0F, {}, {}, {}},
+    };
+    material.resources = {
+        {"txDiffuse", 0U, "diffuse.dds"},
+        {"txNormal", 1U, "normal.dds"},
+        {"txMaps", 2U, "maps.dds"},
+    };
+    auto normal = model.textures.front();
+    normal.name = "normal.dds";
+    auto maps = model.textures.front();
+    maps.name = "maps.dds";
+    model.textures.push_back(std::move(normal));
+    model.textures.push_back(std::move(maps));
+    value.document.scene.snapshot.materials.front().shader = material.shader;
+    value.module_set.key = material.shader;
+    value.module_set.multimap_reflection = true;
+
+    auto request = request_for(value);
+    request.multimap_reflection = true;
+    FakeDevice device;
+    auto prepared = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(prepared.ok() &&
+                prepared.viewport->preparation().resources
+                    ->requires_multimap_reflection_cube() &&
+                model.textures.size() == 3U,
+            "viewport preparation forwards the explicit MultiMap reflection contract without adding a model texture");
+
+    FakeTarget target(request.presentation);
+    WorkspaceViewportFrameRequest frame;
+    frame.camera.clip_space = CameraClipSpace::vulkan;
+    frame.frame_constants = KsPerPixelFrameConstants{};
+    Diagnostic diagnostic;
+    const auto missing = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(missing == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "static_scene_multimap_reflection_cube_missing" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "viewport reflection frames reject a missing cube before draw and present");
+
+    const TextureDescription cube_description{
+        16U, 16U, 1U, 1U, TextureFormat::rgba8_unorm,
+        TextureUsage::sampled, TextureMemory::device_local,
+        TextureMutability::immutable, 1U, TextureShape::texture_cube};
+    FakeTexture cube(cube_description, Backend::Vulkan);
+    FakeSampler sampler(SamplerDescription{}, Backend::Vulkan);
+    frame.multimap_reflection_cube = {&cube, &sampler};
+    const auto drawn = prepared.viewport->drawAndPresent(
+        device, target, frame, diagnostic);
+    require(drawn == WorkspaceViewportFrameStatus::ready &&
+                device.draw_calls == 1U && device.present_calls == 1U &&
+                device.reflection_textures ==
+                    std::vector<const Texture*>{&cube} &&
+                model.textures.size() == 3U,
+            "viewport forwards the frame-owned cube while retaining the original KN5 texture table");
 }
 
 void draws_four_sample_viewport_through_retained_resolve() {
@@ -5945,6 +6018,7 @@ int main() {
         rejects_invalid_solid_color_before_gpu_allocation();
         rejects_invalid_external_textures_before_gpu_allocation();
         opens_and_draws();
+        draws_explicit_multimap_reflection_cube_outside_model_textures();
         draws_four_sample_viewport_through_retained_resolve();
         draws_selected_axis_inside_the_scene_batch();
         draws_and_toggles_recovered_world_view_axis();

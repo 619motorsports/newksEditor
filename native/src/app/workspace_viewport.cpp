@@ -1711,6 +1711,7 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     frame.color_packet_order = color_packet_order;
     frame.apply_skinning = request.apply_skinning;
     frame.frame_constants = request.frame_constants;
+    frame.multimap_reflection_cube = request.multimap_reflection_cube;
     if (request.selected_mesh_elapsed_ms.has_value() &&
         !selected_mesh_pipeline_.has_value()) {
         output_diagnostic =
@@ -2376,6 +2377,7 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             PipelineRenderTargetFormat::depth32_float, request.color_samples};
         scene_request.wireframe = request.wireframe;
         scene_request.directional_shadow_receiver = request.directional_shadow_receiver;
+        scene_request.multimap_reflection = request.multimap_reflection;
         scene_request.texture_authority =
             render::StaticSceneTextureAuthority::owned_model_payloads;
         scene_request.limits = request.limits;
