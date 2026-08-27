@@ -34,6 +34,16 @@ void require(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+std::uint32_t full_mip_count(std::uint32_t width, std::uint32_t height) {
+    std::uint32_t dimension = std::max(width, height);
+    std::uint32_t levels = 1U;
+    while (dimension > 1U) {
+        dimension >>= 1U;
+        ++levels;
+    }
+    return levels;
+}
+
 void appendU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
     bytes.push_back(static_cast<std::uint8_t>(value));
     bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
@@ -198,6 +208,17 @@ public:
             return {TextureStatus::upload_failed,
                     {"fake_mip_failed", "injected mip failure"}};
         return {TextureStatus::ready, {}};
+    }
+
+    HdrLuminanceResult measure_hdr_luminance(Texture &texture) override {
+        ++luminance_calls;
+        events.push_back("measure_exposure");
+        luminance_sources.push_back(&texture);
+        if (fail_luminance)
+            return {HdrLuminanceStatus::execution_failed,
+                    {"fake_luminance_failed", "injected luminance failure"},
+                    0.0F};
+        return {HdrLuminanceStatus::ready, {}, measured_luminance};
     }
 
     DepthAttachmentResult create_depth_attachment(
@@ -371,10 +392,13 @@ public:
     std::size_t sampler_calls = 0U;
     std::size_t draw_calls = 0U;
     std::size_t mip_calls = 0U;
+    std::size_t luminance_calls = 0U;
     std::size_t depth_batch_calls = 0U;
     std::size_t present_calls = 0U;
     std::size_t tone_map_calls = 0U;
     HdrToneMapStatus tone_map_status = HdrToneMapStatus::ready;
+    bool fail_luminance = false;
+    float measured_luminance = 0.16F;
     std::vector<std::size_t> draw_counts;
     std::vector<std::size_t> overlay_counts;
     std::vector<std::size_t> selected_mesh_counts;
@@ -414,6 +438,7 @@ public:
     std::vector<HdrToneMapParameters> tone_map_parameters;
     std::vector<Texture *> draw_targets;
     std::vector<Texture *> mip_targets;
+    std::vector<Texture *> luminance_sources;
     std::vector<TextureTargetSubresource> target_subresources;
     std::vector<std::optional<CameraFrame>> draw_camera_frames;
     std::shared_ptr<std::size_t> live_buffer_count =
@@ -1764,7 +1789,12 @@ void draws_opt_in_hdr_viewport_before_presentation() {
                                     TextureMutability::mutable_data &&
                                 description.shape ==
                                     TextureShape::texture_2d &&
-                                description.mip_levels == 1U &&
+                                description.mip_levels ==
+                                    (color_samples == 1U
+                                         ? full_mip_count(
+                                               request.presentation.width,
+                                               request.presentation.height)
+                                         : 1U) &&
                                 description.array_layers == 1U &&
                                 description.usage ==
                                     (color_samples == 1U
@@ -1787,7 +1817,9 @@ void draws_opt_in_hdr_viewport_before_presentation() {
                                     TextureMutability::mutable_data &&
                                 description.shape ==
                                     TextureShape::texture_2d &&
-                                description.mip_levels == 1U &&
+                                description.mip_levels ==
+                                    full_mip_count(request.presentation.width,
+                                                   request.presentation.height) &&
                                 description.array_layers == 1U &&
                                 description.usage ==
                                     (TextureUsage::sampled |
@@ -1848,6 +1880,7 @@ void draws_opt_in_hdr_viewport_before_presentation() {
                         device.events ==
                             std::vector<std::string>(
                                 {"color", "tone_map", "present"}) &&
+                        device.luminance_calls == 0U &&
                         device.draw_targets ==
                             std::vector<Texture*>({scene_target}) &&
                         device.resolve_targets ==
@@ -1903,10 +1936,103 @@ void draws_opt_in_hdr_viewport_before_presentation() {
     }
 }
 
+void draws_automatic_exposure_before_tone_map() {
+    for (const auto backend : {Backend::Vulkan, Backend::D3D12}) {
+        auto value = fixture();
+        if (backend == Backend::D3D12) {
+            for (auto& module : value.modules) {
+                module.format = PipelineShaderFormat::dxbc;
+                module.bytes = dxbc_shader_bytes();
+            }
+        }
+        auto request = request_for(value);
+        request.hdr_tone_map = HdrToneMapParameters{};
+        request.hdr_tone_map->exposure = 0.75F;
+        request.hdr_exposure_mode = HdrExposureMode::automatic;
+        request.color_samples = 4U;
+        FakeDevice device(backend);
+        auto prepared = apex::app::prepareWorkspaceViewport(
+            device, value.document, request);
+        if (!prepared.ok())
+            throw std::runtime_error("automatic HDR preparation: " +
+                                     prepared.diagnostic.code);
+
+        Texture* hdr_source = nullptr;
+        for (std::size_t index = 0U;
+             index < device.created_texture_descriptions.size(); ++index) {
+            const auto& description = device.created_texture_descriptions[index];
+            if (description.format == TextureFormat::rgba16_sfloat &&
+                description.samples == 1U) {
+                hdr_source = device.created_textures[index];
+                require(
+                    description.mip_levels ==
+                        full_mip_count(request.presentation.width,
+                                       request.presentation.height),
+                    "automatic exposure source owns the complete mip chain");
+            }
+        }
+        require(hdr_source != nullptr, "automatic exposure has an HDR source");
+
+        FakeTarget target(request.presentation, backend);
+        WorkspaceViewportFrameRequest frame;
+        frame.camera.clip_space = backend == Backend::Vulkan
+                                      ? CameraClipSpace::vulkan
+                                      : CameraClipSpace::d3d12;
+        frame.frame_constants = KsPerPixelFrameConstants{};
+        Diagnostic diagnostic;
+        const auto status = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(status == WorkspaceViewportFrameStatus::ready &&
+                    device.events == std::vector<std::string>(
+                        {"color", "measure_exposure", "tone_map", "present"}) &&
+                    device.luminance_calls == 1U &&
+                    device.luminance_sources == std::vector<Texture*>({hdr_source}) &&
+                    device.tone_map_parameters.size() == 1U &&
+                    std::abs(device.tone_map_parameters.front().exposure - 0.5F) <
+                        1e-6F,
+                "automatic exposure measures the resolved scene before tone mapping");
+
+        device.events.clear();
+        device.fail_luminance = true;
+        const auto failed = prepared.viewport->drawAndPresent(
+            device, target, frame, diagnostic);
+        require(failed == WorkspaceViewportFrameStatus::execution_failed &&
+                    diagnostic.code == "fake_luminance_failed" &&
+                    device.events == std::vector<std::string>(
+                        {"color", "measure_exposure"}) &&
+                    device.tone_map_calls == 1U && device.present_calls == 1U,
+                "automatic exposure failure prevents tone mapping and presentation");
+    }
+}
+
 void rejects_invalid_viewport_hdr_requests() {
     auto value = fixture();
     auto request = request_for(value);
     FakeDevice device;
+    request.hdr_exposure_mode = HdrExposureMode::automatic;
+    auto automatic_without_hdr = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!automatic_without_hdr.ok() &&
+                automatic_without_hdr.status ==
+                    apex::app::WorkspaceViewportStatus::invalid &&
+                automatic_without_hdr.diagnostic.code ==
+                    "workspace_viewport_hdr_exposure_requires_hdr" &&
+                device.texture_calls == 0U,
+            "automatic exposure requires HDR before allocation");
+
+    request = request_for(value);
+    request.hdr_exposure_mode = static_cast<HdrExposureMode>(0xffU);
+    auto invalid_exposure_mode = apex::app::prepareWorkspaceViewport(
+        device, value.document, request);
+    require(!invalid_exposure_mode.ok() &&
+                invalid_exposure_mode.status ==
+                    apex::app::WorkspaceViewportStatus::invalid &&
+                invalid_exposure_mode.diagnostic.code ==
+                    "workspace_viewport_hdr_exposure_mode_invalid" &&
+                device.texture_calls == 0U,
+            "unknown exposure mode is rejected before allocation");
+
+    request = request_for(value);
     auto prepared = apex::app::prepareWorkspaceViewport(
         device, value.document, request);
     require(prepared.ok(), "LDR viewport preparation succeeds");
@@ -1924,6 +2050,22 @@ void rejects_invalid_viewport_hdr_requests() {
                 device.draw_calls == 0U && device.tone_map_calls == 0U &&
                 device.present_calls == 0U,
             "LDR viewport rejects a frame HDR override before drawing");
+
+    frame.hdr_tone_map.reset();
+    frame.hdr_exposure_mode = static_cast<HdrExposureMode>(0xffU);
+    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code ==
+                    "workspace_viewport_hdr_exposure_mode_invalid" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "unknown frame exposure mode is rejected before drawing");
+
+    frame.hdr_exposure_mode = HdrExposureMode::automatic;
+    status = prepared.viewport->drawAndPresent(device, target, frame, diagnostic);
+    require(status == WorkspaceViewportFrameStatus::invalid &&
+                diagnostic.code == "workspace_viewport_hdr_exposure_requires_hdr" &&
+                device.draw_calls == 0U && device.present_calls == 0U,
+            "LDR viewport rejects a frame automatic-exposure override before drawing");
 
     request = request_for(value);
     request.hdr_tone_map = HdrToneMapParameters{};
@@ -6604,6 +6746,7 @@ int main() {
         rejects_invalid_portable_reflection_capture_options_before_allocation();
         draws_four_sample_viewport_through_retained_resolve();
         draws_opt_in_hdr_viewport_before_presentation();
+        draws_automatic_exposure_before_tone_map();
         rejects_invalid_viewport_hdr_requests();
         draws_builtin_vulkan_source_through_hdr_tone_map();
         draws_selected_axis_inside_the_scene_batch();

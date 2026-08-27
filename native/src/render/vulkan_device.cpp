@@ -1,5 +1,6 @@
 #include "backend_internal.hpp"
 #include "apex/render/draw_packet.hpp"
+#include "half_float.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1952,6 +1953,179 @@ bool clear_texture_and_readback(const std::shared_ptr<VulkanContext>& context,
         for (std::size_t index = 0; index < output.size(); index += 4U)
             std::swap(output[index], output[index + 2U]);
     }
+    return true;
+}
+
+bool read_hdr_luminance(const std::shared_ptr<VulkanContext>& context,
+                        VkImage image,
+                        const TextureDescription& description,
+                        VkImageLayout& current_layout,
+                        float& luminance,
+                        Diagnostic& diagnostic) {
+    luminance = 0.0F;
+    constexpr std::size_t readback_size = sizeof(std::uint16_t) * 4U;
+    BufferDescription staging_description;
+    staging_description.size_bytes = readback_size;
+    staging_description.usage = BufferUsage::transfer_destination;
+    staging_description.memory = BufferMemory::host_visible;
+    RawVulkanBuffer staging;
+    if (!create_raw_buffer(context, staging_description,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           BufferMemory::host_visible, staging, diagnostic)) {
+        diagnostic.code = "vulkan_hdr_luminance_readback_failed";
+        return false;
+    }
+
+    std::lock_guard command_guard(context->command_mutex);
+    VkCommandBufferAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = context->command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1U;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkResult result = vkAllocateCommandBuffers(context->device, &allocation,
+                                               &command);
+    bool submitted = false;
+    bool completed = false;
+    if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(command, &begin);
+    }
+    if (result == VK_SUCCESS) {
+        const VkImageLayout final_layout = texture_final_layout(
+            description.usage, description.access_policy);
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = current_layout;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = description.mip_levels - 1U;
+        barrier.subresourceRange.levelCount = 1U;
+        barrier.subresourceRange.baseArrayLayer = 0U;
+        barrier.subresourceRange.layerCount = 1U;
+        barrier.srcAccessMask = current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                    ? 0U
+                                    : VK_ACCESS_MEMORY_READ_BIT |
+                                          VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(
+            command,
+            current_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U,
+            &barrier);
+
+        VkBufferImageCopy copy{};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.mipLevel = description.mip_levels - 1U;
+        copy.imageSubresource.baseArrayLayer = 0U;
+        copy.imageSubresource.layerCount = 1U;
+        copy.imageExtent = {1U, 1U, 1U};
+        vkCmdCopyImageToBuffer(command, image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               staging.buffer, 1U, &copy);
+
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = final_layout;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                    ? VK_ACCESS_SHADER_READ_BIT
+                                    : VK_ACCESS_MEMORY_READ_BIT |
+                                          VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            final_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+        result = vkEndCommandBuffer(command);
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1U;
+        submit.pCommandBuffers = &command;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        result = vkCreateFence(context->device, &fence_info, nullptr, &fence);
+        if (result == VK_SUCCESS) {
+            result = vkQueueSubmit(context->queue, 1U, &submit, fence);
+            submitted = result == VK_SUCCESS;
+            if (result == VK_SUCCESS) {
+                result = vkWaitForFences(context->device, 1U, &fence,
+                                         VK_TRUE, UINT64_MAX);
+                completed = result == VK_SUCCESS;
+            }
+        }
+    }
+    if (submitted && !completed) {
+        const VkResult drain = vkDeviceWaitIdle(context->device);
+        if (drain == VK_SUCCESS) {
+            current_layout = texture_final_layout(
+                description.usage, description.access_policy);
+            completed = true;
+        } else {
+            current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            result = drain;
+        }
+    } else if (completed) {
+        current_layout = texture_final_layout(
+            description.usage, description.access_policy);
+    }
+    if (fence != VK_NULL_HANDLE)
+        vkDestroyFence(context->device, fence, nullptr);
+    if (command != VK_NULL_HANDLE)
+        vkFreeCommandBuffers(context->device, context->command_pool, 1U,
+                             &command);
+    if (result != VK_SUCCESS || !completed) {
+        diagnostic = vk_error("Vulkan HDR luminance readback", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_hdr_luminance_readback_failed";
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(context->device, staging.memory, 0U, VK_WHOLE_SIZE,
+                         0U, &mapped);
+    if (result == VK_SUCCESS &&
+        (staging.properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0U) {
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = staging.memory;
+        range.offset = 0U;
+        range.size = VK_WHOLE_SIZE;
+        result = vkInvalidateMappedMemoryRanges(context->device, 1U, &range);
+    }
+    std::array<std::uint16_t, 4U> channels{};
+    if (result == VK_SUCCESS)
+        std::memcpy(channels.data(), mapped, readback_size);
+    if (mapped != nullptr)
+        vkUnmapMemory(context->device, staging.memory);
+    if (result != VK_SUCCESS) {
+        diagnostic = vk_error("vkMapMemory(HDR luminance readback)", result);
+        diagnostic.code = result == VK_ERROR_DEVICE_LOST
+                              ? "vulkan_device_lost"
+                              : "vulkan_hdr_luminance_readback_failed";
+        return false;
+    }
+    const float red = detail::half_to_float(channels[0U]);
+    const float green = detail::half_to_float(channels[1U]);
+    const float blue = detail::half_to_float(channels[2U]);
+    luminance = red * 0.2126F + green * 0.7152F + blue * 0.0722F;
+    // Keep this behavior aligned with ksEditorAutoExposure and the WebGL
+    // path: invalid GPU values are treated as zero, which then selects the
+    // configured maximum exposure instead of propagating NaN into tone map
+    // constants.
+    if (!std::isfinite(luminance)) luminance = 0.0F;
+    diagnostic = {};
     return true;
 }
 
@@ -3996,6 +4170,7 @@ bool draw_indexed_batch_and_readback(
     VkImageLayout* retained_resolve_layout,
     bool* retained_resolve_initialized,
     VkImageLayout retained_resolve_final_layout,
+    std::uint32_t retained_resolve_mip_levels,
     bool capture_rgba8,
     std::vector<std::byte>& output,
     Diagnostic& diagnostic) {
@@ -4010,6 +4185,32 @@ bool draw_indexed_batch_and_readback(
         texture_target_physical_array_layer(description, target_subresource));
     VkImageView target_view = image.view;
     ScopedVulkanImageView target_face_view;
+    ScopedVulkanImageView target_mip_view;
+    const auto create_mip_zero_attachment_view =
+        [&](VkImage source_image, std::uint32_t array_layer,
+            ScopedVulkanImageView& owned_view, const char* operation) -> bool {
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = source_image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = vk_texture_format(description.format);
+        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view_info.subresourceRange.baseMipLevel = 0U;
+        view_info.subresourceRange.levelCount = 1U;
+        view_info.subresourceRange.baseArrayLayer = array_layer;
+        view_info.subresourceRange.layerCount = 1U;
+        const VkResult view_result = vkCreateImageView(
+            context->device, &view_info, nullptr, &owned_view.view);
+        if (view_result != VK_SUCCESS) {
+            diagnostic = vk_error(operation, view_result);
+            diagnostic.code = view_result == VK_ERROR_DEVICE_LOST
+                                  ? "vulkan_device_lost"
+                                  : "vulkan_draw_execution_failed";
+            return false;
+        }
+        owned_view.device = context->device;
+        return true;
+    };
     if (description.shape == TextureShape::texture_cube) {
         VkImageViewCreateInfo view_info{};
         view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -4032,6 +4233,12 @@ bool draw_indexed_batch_and_readback(
         }
         target_face_view.device = context->device;
         target_view = target_face_view.view;
+    } else if (description.mip_levels > 1U) {
+        if (!create_mip_zero_attachment_view(
+                image.image, target_physical_layer, target_mip_view,
+                "vkCreateImageView(indexed mip-zero target)"))
+            return false;
+        target_view = target_mip_view.view;
     }
     if (depth_attachment != nullptr) {
         if (depth_attachment->context().get() != context.get()) {
@@ -4081,6 +4288,7 @@ bool draw_indexed_batch_and_readback(
         return false;
     }
     RawVulkanImage resolve_image;
+    ScopedVulkanImageView resolve_mip_view;
     RawVulkanImage* resolved_image = retained_resolve_image;
     if (description.samples != 1U && resolved_image == nullptr) {
         TextureDescription resolve_description = description;
@@ -4092,6 +4300,12 @@ bool draw_indexed_batch_and_readback(
         }
         resolved_image = &resolve_image;
     }
+    if (description.samples != 1U && retained_resolve_image != nullptr &&
+        retained_resolve_mip_levels > 1U &&
+        !create_mip_zero_attachment_view(
+            resolved_image->image, 0U, resolve_mip_view,
+            "vkCreateImageView(indexed mip-zero resolve)"))
+        return false;
 
     bool has_sampled_binding = false;
     bool has_material_binding = false;
@@ -4239,7 +4453,9 @@ bool draw_indexed_batch_and_readback(
     framebuffer_attachments[0] = target_view;
     if (depth_attachment != nullptr) framebuffer_attachments[1] = depth_attachment->view();
     if (description.samples != 1U)
-        framebuffer_attachments[resolve_attachment_index] = resolved_image->view;
+        framebuffer_attachments[resolve_attachment_index] =
+            resolve_mip_view.view != VK_NULL_HANDLE ? resolve_mip_view.view
+                                                    : resolved_image->view;
     VkFramebufferCreateInfo framebuffer_info{};
     framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     framebuffer_info.renderPass = render_pass;
@@ -4403,6 +4619,10 @@ bool draw_indexed_batch_and_readback(
                 0U, nullptr, 1U, &barrier);
         }
         if (description.samples != 1U) {
+            const std::uint32_t resolve_mip_levels =
+                retained_resolve_image != nullptr
+                    ? std::max(1U, retained_resolve_mip_levels)
+                    : 1U;
             VkImageMemoryBarrier resolve_barrier{};
             resolve_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             resolve_barrier.oldLayout = retained_resolve_layout != nullptr
@@ -4413,7 +4633,7 @@ bool draw_indexed_batch_and_readback(
             resolve_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             resolve_barrier.image = resolved_image->image;
             resolve_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            resolve_barrier.subresourceRange.levelCount = 1U;
+            resolve_barrier.subresourceRange.levelCount = resolve_mip_levels;
             resolve_barrier.subresourceRange.layerCount = 1U;
             resolve_barrier.srcAccessMask = resolve_barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED
                                                 ? 0U
@@ -4471,6 +4691,39 @@ bool draw_indexed_batch_and_readback(
             }
         }
         vkCmdEndRenderPass(command);
+        if (description.samples != 1U && retained_resolve_image != nullptr &&
+            retained_resolve_mip_levels > 1U &&
+            retained_resolve_final_layout !=
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            VkImageMemoryBarrier resolve_mip_barrier{};
+            resolve_mip_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            resolve_mip_barrier.oldLayout =
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            resolve_mip_barrier.newLayout = retained_resolve_final_layout;
+            resolve_mip_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolve_mip_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolve_mip_barrier.image = resolved_image->image;
+            resolve_mip_barrier.subresourceRange.aspectMask =
+                VK_IMAGE_ASPECT_COLOR_BIT;
+            resolve_mip_barrier.subresourceRange.baseMipLevel = 1U;
+            resolve_mip_barrier.subresourceRange.levelCount =
+                retained_resolve_mip_levels - 1U;
+            resolve_mip_barrier.subresourceRange.layerCount = 1U;
+            resolve_mip_barrier.srcAccessMask =
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            resolve_mip_barrier.dstAccessMask =
+                retained_resolve_final_layout ==
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_ACCESS_SHADER_READ_BIT
+                    : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                retained_resolve_final_layout ==
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                0U, 0U, nullptr, 0U, nullptr, 1U, &resolve_mip_barrier);
+        }
         for (std::size_t index = 0U;
              index < sampled_shadow_attachments.size(); ++index) {
             const VkImageLayout original =
@@ -5040,6 +5293,7 @@ public:
     VkImageView view() const noexcept { return raw_.view; }
     VkImageLayout layout() const noexcept { return layout_; }
     const VkImageLayout* layout_ptr() const noexcept { return &layout_; }
+    VkImageLayout* mutable_layout_ptr() noexcept { return &layout_; }
     bool initialized() const noexcept { return initialized_; }
     void mark_initialized() noexcept {
         initialized_ = true;
@@ -5170,7 +5424,7 @@ public:
                 draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true, output,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
                 diagnostic);
             initialized_ = initialized_ || drawn;
             if (drawn && !base_mip_initialized_.empty())
@@ -5193,7 +5447,7 @@ public:
                 draws, depth_attachment, request.load_color,
                 request.clear_depth, request.depth_clear_value, request.clear_color, layout_,
                 nullptr, nullptr, nullptr,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true, output,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1U, true, output,
                 diagnostic);
             initialized_ = initialized_ || drawn;
             if (drawn && !base_mip_initialized_.empty())
@@ -5389,6 +5643,9 @@ public:
                       resolve_target->info().description.usage,
                       resolve_target->info().description.access_policy)
                 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_target != nullptr
+                ? resolve_target->info().description.mip_levels
+                : 1U,
             description.capture_rgba8, output, diagnostic);
         initialized_ = initialized_ || drawn;
         if (drawn) {
@@ -7592,6 +7849,50 @@ public:
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed,
                                          std::move(diagnostic)};
+    }
+
+    HdrLuminanceResult measure_hdr_luminance(Texture& source) override {
+        Diagnostic diagnostic;
+        const HdrLuminanceStatus validation =
+            validate_hdr_luminance_request(source, diagnostic);
+        if (validation != HdrLuminanceStatus::ready)
+            return {validation, std::move(diagnostic), 0.0F};
+        if (source.backend() != Backend::Vulkan)
+            return {HdrLuminanceStatus::unsupported,
+                    {"hdr_luminance_backend_mismatch",
+                     "HDR luminance measurement requires a Vulkan texture"},
+                    0.0F};
+        auto* vulkan_source = dynamic_cast<VulkanTexture*>(&source);
+        if (vulkan_source == nullptr)
+            return {HdrLuminanceStatus::unsupported,
+                    {"hdr_luminance_texture_type_unsupported",
+                     "The Vulkan device received an unknown HDR luminance texture handle"},
+                    0.0F};
+        if (vulkan_source->context().get() != context_.get())
+            return {HdrLuminanceStatus::unsupported,
+                    {"hdr_luminance_context_mismatch",
+                     "HDR luminance textures must belong to this Vulkan device"},
+                    0.0F};
+        if (!vulkan_source->initialized() ||
+            !vulkan_source->base_mip_initialized())
+            return {HdrLuminanceStatus::invalid_request,
+                    {"hdr_luminance_source_uninitialized",
+                     "HDR luminance measurement requires initialized mip-zero data"},
+                    0.0F};
+
+        if (vulkan_source->info().description.mip_levels > 1U &&
+            !vulkan_source->generate_mips(diagnostic))
+            return {HdrLuminanceStatus::execution_failed, std::move(diagnostic),
+                    0.0F};
+
+        float luminance = 0.0F;
+        if (!read_hdr_luminance(context_, vulkan_source->image(),
+                                vulkan_source->info().description,
+                                *vulkan_source->mutable_layout_ptr(), luminance,
+                                diagnostic))
+            return {HdrLuminanceStatus::execution_failed, std::move(diagnostic),
+                    0.0F};
+        return {HdrLuminanceStatus::ready, {}, luminance};
     }
 
     HdrToneMapResult tone_map_hdr_texture(

@@ -479,6 +479,32 @@ struct TextureUpdateResult {
     [[nodiscard]] bool ok() const noexcept { return status == TextureStatus::ready; }
 };
 
+// Automatic mode selects the portable, immediate final-mip policy. It does
+// not claim parity with the recovered Yebis temporal adaptation state.
+enum class HdrExposureMode : std::uint8_t {
+    manual,
+    automatic,
+};
+
+enum class HdrLuminanceStatus : std::uint8_t {
+    ready,
+    invalid_request,
+    unsupported,
+    execution_failed,
+};
+
+// A bounded synchronous measurement of the final 1x1 RGBA16F mip. Backends
+// generate the full chain before readback and return Rec.709 RGB luminance.
+struct HdrLuminanceResult {
+    HdrLuminanceStatus status = HdrLuminanceStatus::unsupported;
+    Diagnostic diagnostic;
+    float luminance = 0.0F;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == HdrLuminanceStatus::ready;
+    }
+};
+
 // A bounded fullscreen conversion from a linear RGBA16F scene texture into
 // an owned RGBA8 or BGRA8 display texture. The pass approximates the selected
 // Yebis curve and uses its recovered fixed-phase 4x4 dither table. Bloom and
@@ -1600,6 +1626,9 @@ inline constexpr std::size_t max_shader_module_bytes = 16U * 1024U * 1024U;
 [[nodiscard]] HdrToneMapStatus validate_hdr_tone_map_parameters(
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic);
 
+[[nodiscard]] HdrLuminanceStatus validate_hdr_luminance_request(
+    const Texture& source, Diagnostic& diagnostic);
+
 [[nodiscard]] DepthAttachmentStatus validate_depth_attachment_description(
     const DepthAttachmentDescription& description,
     Diagnostic& diagnostic);
@@ -1784,6 +1813,19 @@ public:
                  "This backend has not enabled HDR tone mapping"}};
     }
 
+    [[nodiscard]] virtual HdrLuminanceResult measure_hdr_luminance(
+        Texture& source) {
+        Diagnostic diagnostic;
+        const HdrLuminanceStatus validation =
+            validate_hdr_luminance_request(source, diagnostic);
+        if (validation != HdrLuminanceStatus::ready)
+            return {validation, std::move(diagnostic), 0.0F};
+        return {HdrLuminanceStatus::unsupported,
+                {"hdr_luminance_unsupported",
+                 "This backend has not enabled HDR luminance measurement"},
+                0.0F};
+    }
+
     // Backends opt into persistent D32 attachments independently. Keeping a
     // default implementation preserves discovery-only and fake devices.
     [[nodiscard]] virtual DepthAttachmentResult create_depth_attachment(
@@ -1958,6 +2000,8 @@ struct DeviceResult {
     PresentationFrameStatus status) noexcept;
 [[nodiscard]] const char* hdr_tone_map_status_name(
     HdrToneMapStatus status) noexcept;
+[[nodiscard]] const char* hdr_luminance_status_name(
+    HdrLuminanceStatus status) noexcept;
 
 [[nodiscard]] AdapterResult enumerate_adapters(Backend backend,
                                                 const DeviceOptions& options = {});

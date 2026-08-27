@@ -67,6 +67,20 @@ bool valid_render_sample_count(std::uint32_t samples) noexcept {
     return samples == 1U || samples == 4U;
 }
 
+bool valid_texture_mip_count(const TextureDescription& description) noexcept {
+    if (description.width == 0U || description.height == 0U ||
+        description.mip_levels == 0U)
+        return false;
+    std::uint32_t largest_dimension =
+        std::max(description.width, description.height);
+    std::uint32_t full_chain_levels = 1U;
+    while (largest_dimension > 1U) {
+        largest_dimension >>= 1U;
+        ++full_chain_levels;
+    }
+    return description.mip_levels <= full_chain_levels;
+}
+
 bool checked_texture_size_multiply(std::uint64_t left, std::uint64_t right,
                                    std::uint64_t& output) noexcept {
     if (right != 0U && left > std::numeric_limits<std::uint64_t>::max() / right) return false;
@@ -659,6 +673,83 @@ HdrToneMapStatus validate_hdr_tone_map_parameters(
     return HdrToneMapStatus::ready;
 }
 
+HdrLuminanceStatus validate_hdr_luminance_request(
+    const Texture& source, Diagnostic& diagnostic) {
+    const TextureDescription& description = source.info().description;
+    if (description.width == 0U || description.height == 0U) {
+        diagnostic = {"hdr_luminance_dimensions_invalid",
+                      "HDR luminance measurement dimensions must be non-zero"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    if (description.width > max_texture_dimension ||
+        description.height > max_texture_dimension) {
+        diagnostic = {"hdr_luminance_dimension_limit",
+                      "HDR luminance measurement dimensions exceed the backend-neutral safety limit"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    if (description.format != TextureFormat::rgba16_sfloat) {
+        diagnostic = {"hdr_luminance_source_format_unsupported",
+                      "HDR luminance measurement requires an RGBA16F source texture"};
+        return HdrLuminanceStatus::unsupported;
+    }
+    if (description.shape != TextureShape::texture_2d ||
+        description.array_layers != 1U || description.samples != 1U) {
+        diagnostic = {"hdr_luminance_source_shape_invalid",
+                      "HDR luminance measurement requires a one-layer, single-sample 2D source"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    if (description.mip_levels == 0U) {
+        diagnostic = {"hdr_luminance_mip_chain_invalid",
+                      "HDR luminance measurement requires a non-empty mip chain"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    std::uint32_t largest_dimension =
+        std::max(description.width, description.height);
+    std::uint32_t full_chain_levels = 1U;
+    while (largest_dimension > 1U) {
+        largest_dimension >>= 1U;
+        ++full_chain_levels;
+    }
+    if (description.mip_levels != full_chain_levels) {
+        diagnostic = {"hdr_luminance_mip_chain_invalid",
+                      "HDR luminance measurement requires the exact full mip chain ending at 1x1"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    constexpr std::uint32_t required_usage =
+        static_cast<std::uint32_t>(TextureUsage::sampled) |
+        static_cast<std::uint32_t>(TextureUsage::color_attachment) |
+        static_cast<std::uint32_t>(TextureUsage::transfer_source);
+    if (static_cast<std::uint32_t>(description.usage) != required_usage) {
+        diagnostic = {"hdr_luminance_source_usage_invalid",
+                      "HDR luminance measurement requires sampled, color-attachment, and transfer-source usage"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    if (description.mutability != TextureMutability::mutable_data) {
+        diagnostic = {"hdr_luminance_source_mutability_invalid",
+                      "HDR luminance measurement requires a mutable source texture"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    if (description.access_policy != TextureAccessPolicy::render_then_sample) {
+        diagnostic = {"hdr_luminance_source_access_policy_invalid",
+                      "HDR luminance measurement requires render-then-sample source access"};
+        return HdrLuminanceStatus::invalid_request;
+    }
+    Diagnostic description_diagnostic;
+    const TextureStatus description_status =
+        validate_texture_description(description, {}, description_diagnostic);
+    if (description_status != TextureStatus::ready) {
+        diagnostic = {description_diagnostic.code.empty()
+                          ? "hdr_luminance_source_invalid"
+                          : description_diagnostic.code,
+                      description_diagnostic.message};
+        return description_status == TextureStatus::unsupported
+                   ? HdrLuminanceStatus::unsupported
+                   : HdrLuminanceStatus::invalid_request;
+    }
+    diagnostic = {};
+    return HdrLuminanceStatus::ready;
+}
+
 HdrToneMapStatus validate_hdr_tone_map_request(
     const Texture& source, const Texture& destination,
     const HdrToneMapParameters& parameters, Diagnostic& diagnostic) {
@@ -695,17 +786,22 @@ HdrToneMapStatus validate_hdr_tone_map_request(
                       "HDR tone mapping requires an RGBA8 or BGRA8 destination texture"};
         return HdrToneMapStatus::unsupported;
     }
-    const auto valid_single_image = [](const TextureDescription& description) {
+    const auto valid_source_image = [&](const TextureDescription& description) {
+        return description.shape == TextureShape::texture_2d &&
+               description.array_layers == 1U &&
+               valid_texture_mip_count(description) && description.samples == 1U;
+    };
+    const auto valid_destination_image = [](const TextureDescription& description) {
         return description.shape == TextureShape::texture_2d &&
                description.array_layers == 1U &&
                description.mip_levels == 1U && description.samples == 1U;
     };
-    if (!valid_single_image(input)) {
+    if (!valid_source_image(input)) {
         diagnostic = {"hdr_tone_map_source_shape_invalid",
-                      "HDR tone mapping requires a one-layer, one-mip, single-sample 2D source"};
+                      "HDR tone mapping requires a one-layer, valid-mip-chain, single-sample 2D source"};
         return HdrToneMapStatus::invalid_request;
     }
-    if (!valid_single_image(output)) {
+    if (!valid_destination_image(output)) {
         diagnostic = {"hdr_tone_map_destination_shape_invalid",
                       "HDR tone mapping requires a one-layer, one-mip, single-sample 2D destination"};
         return HdrToneMapStatus::invalid_request;
@@ -1312,9 +1408,15 @@ IndexedStaticMeshDrawStatus validate_indexed_color_target(
     }
     const bool valid_shape = target.shape == TextureShape::texture_2d ||
                              (allow_cube_target && target.shape == TextureShape::texture_cube);
+    const bool allow_single_sample_hdr_mips =
+        allow_float_target && target.format == TextureFormat::rgba16_sfloat &&
+        target.samples == 1U && target.shape == TextureShape::texture_2d;
     const bool valid_subresource_count = target.shape == TextureShape::texture_cube
                                              ? target.mip_levels != 0U && target.array_layers != 0U
-                                             : target.mip_levels == 1U && target.array_layers == 1U;
+                                             : target.array_layers == 1U &&
+                                                   (allow_single_sample_hdr_mips
+                                                        ? valid_texture_mip_count(target)
+                                                        : target.mip_levels == 1U);
     if (target.width == 0U || target.height == 0U || !valid_subresource_count || !valid_shape) {
         diagnostic = {"indexed_static_mesh_target_invalid",
                       "Indexed static-mesh target dimensions or subresource count are invalid"};
@@ -3755,8 +3857,14 @@ IndexedStaticMeshBatchStatus validate_indexed_static_mesh_batch_description(
         const auto resolve_usage = static_cast<std::uint32_t>(resolved.usage);
         const auto color_usage = static_cast<std::uint32_t>(TextureUsage::color_attachment);
         const auto source_usage = static_cast<std::uint32_t>(TextureUsage::transfer_source);
+        const bool allow_hdr_resolve_mips =
+            !description.capture_rgba8 &&
+            target.format == TextureFormat::rgba16_sfloat &&
+            resolved.format == TextureFormat::rgba16_sfloat;
         if (resolved.width != target.width || resolved.height != target.height ||
-            resolved.format != target.format || resolved.mip_levels != 1U ||
+            resolved.format != target.format ||
+            (allow_hdr_resolve_mips ? !valid_texture_mip_count(resolved)
+                                    : resolved.mip_levels != 1U) ||
             resolved.array_layers != 1U || resolved.samples != 1U ||
             resolved.shape != TextureShape::texture_2d) {
             diagnostic = {"indexed_static_mesh_batch_resolve_description_mismatch",
@@ -5149,6 +5257,20 @@ const char* hdr_tone_map_status_name(HdrToneMapStatus status) noexcept {
     case HdrToneMapStatus::unsupported:
         return "unsupported";
     case HdrToneMapStatus::execution_failed:
+        return "execution_failed";
+    }
+    return "unknown";
+}
+
+const char* hdr_luminance_status_name(HdrLuminanceStatus status) noexcept {
+    switch (status) {
+    case HdrLuminanceStatus::ready:
+        return "ready";
+    case HdrLuminanceStatus::invalid_request:
+        return "invalid_request";
+    case HdrLuminanceStatus::unsupported:
+        return "unsupported";
+    case HdrLuminanceStatus::execution_failed:
         return "execution_failed";
     }
     return "unknown";

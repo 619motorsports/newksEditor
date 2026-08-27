@@ -28,6 +28,17 @@ constexpr float radians_to_degrees = 57.2957795130823208768F;
 constexpr float degrees_to_radians =
     0.0174532925199432957692F;
 
+[[nodiscard]] constexpr std::uint32_t fullMipCount(
+    std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t dimension = std::max(width, height);
+    std::uint32_t levels = 1U;
+    while (dimension > 1U) {
+        dimension >>= 1U;
+        ++levels;
+    }
+    return levels;
+}
+
 constexpr std::array<render::CubeFace, render::texture_cube_face_count>
     stock_capture_target_faces = {
         render::CubeFace::negative_x, render::CubeFace::positive_x,
@@ -60,6 +71,16 @@ constexpr std::array<render::CubeFace, render::texture_cube_face_count>
 expectedClipSpace(render::Backend backend) noexcept {
     return backend == render::Backend::Vulkan ? render::CameraClipSpace::vulkan
                                               : render::CameraClipSpace::d3d12;
+}
+
+[[nodiscard]] bool validHdrExposureMode(
+    render::HdrExposureMode mode) noexcept {
+    switch (mode) {
+    case render::HdrExposureMode::manual:
+    case render::HdrExposureMode::automatic:
+        return true;
+    }
+    return false;
 }
 
 [[nodiscard]] std::optional<std::array<render::CameraFrame,
@@ -544,6 +565,21 @@ preparationStatus(render::StaticSceneResourceStatus status) noexcept {
     case render::HdrToneMapStatus::unsupported:
         return WorkspaceViewportFrameStatus::unsupported;
     case render::HdrToneMapStatus::execution_failed:
+        return WorkspaceViewportFrameStatus::execution_failed;
+    }
+    return WorkspaceViewportFrameStatus::execution_failed;
+}
+
+[[nodiscard]] WorkspaceViewportFrameStatus luminanceStatus(
+    render::HdrLuminanceStatus status) noexcept {
+    switch (status) {
+    case render::HdrLuminanceStatus::ready:
+        return WorkspaceViewportFrameStatus::ready;
+    case render::HdrLuminanceStatus::invalid_request:
+        return WorkspaceViewportFrameStatus::invalid;
+    case render::HdrLuminanceStatus::unsupported:
+        return WorkspaceViewportFrameStatus::unsupported;
+    case render::HdrLuminanceStatus::execution_failed:
         return WorkspaceViewportFrameStatus::execution_failed;
     }
     return WorkspaceViewportFrameStatus::execution_failed;
@@ -1043,6 +1079,7 @@ WorkspaceViewport::WorkspaceViewport(
     std::unique_ptr<render::Texture> resolved_color,
     std::unique_ptr<render::Texture> tone_mapped_color,
     std::optional<render::HdrToneMapParameters> hdr_tone_map,
+    render::HdrExposureMode hdr_exposure_mode,
     std::unique_ptr<render::DepthAttachment> depth,
     std::unique_ptr<render::StockSceneExecutionResult> execution,
     std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -1064,6 +1101,7 @@ WorkspaceViewport::WorkspaceViewport(
       color_(std::move(color)), resolved_color_(std::move(resolved_color)),
       tone_mapped_color_(std::move(tone_mapped_color)),
       hdr_tone_map_(std::move(hdr_tone_map)),
+      hdr_exposure_mode_(hdr_exposure_mode),
       depth_(std::move(depth)), execution_(std::move(execution)),
       authoring_overlay_pipeline_(std::move(authoring_overlay_pipeline)),
       ai_spline_passes_(std::move(ai_spline_passes)),
@@ -1387,6 +1425,21 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
         output_diagnostic = diagnostic(
             "workspace_viewport_hdr_tone_map_unprepared",
             "An LDR viewport cannot use frame HDR tone-map parameters");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    const render::HdrExposureMode effective_hdr_exposure_mode =
+        request.hdr_exposure_mode.value_or(hdr_exposure_mode_);
+    if (!validHdrExposureMode(effective_hdr_exposure_mode)) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_exposure_mode_invalid",
+            "The HDR exposure mode is not recognized");
+        return WorkspaceViewportFrameStatus::invalid;
+    }
+    if (effective_hdr_exposure_mode == render::HdrExposureMode::automatic &&
+        !hdr_tone_map_.has_value()) {
+        output_diagnostic = diagnostic(
+            "workspace_viewport_hdr_exposure_requires_hdr",
+            "Automatic exposure requires a prepared HDR scene target");
         return WorkspaceViewportFrameStatus::invalid;
     }
     const render::HdrToneMapParameters* effective_hdr_tone_map =
@@ -2190,8 +2243,20 @@ WorkspaceViewport::drawAndPresent(render::Device &device,
     render::Texture* presentation_color =
         resolved_color_ != nullptr ? resolved_color_.get() : color_.get();
     if (effective_hdr_tone_map != nullptr) {
+        render::HdrToneMapParameters tone_map_parameters =
+            *effective_hdr_tone_map;
+        if (effective_hdr_exposure_mode == render::HdrExposureMode::automatic) {
+            const auto measurement =
+                device.measure_hdr_luminance(*presentation_color);
+            if (!measurement.ok()) {
+                output_diagnostic = measurement.diagnostic;
+                return luminanceStatus(measurement.status);
+            }
+            tone_map_parameters.exposure =
+                render::ksEditorAutoExposure(measurement.luminance);
+        }
         const auto tone_mapped = device.tone_map_hdr_texture(
-            *presentation_color, *tone_mapped_color_, *effective_hdr_tone_map);
+            *presentation_color, *tone_mapped_color_, tone_map_parameters);
         if (!tone_mapped.ok()) {
             output_diagnostic = tone_mapped.diagnostic;
             return toneMapStatus(tone_mapped.status);
@@ -2220,6 +2285,21 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             result.diagnostic = diagnostic(
                 "workspace_viewport_multisample_unsupported",
                 "workspace presentation supports one-sample or four-sample color rendering");
+            return result;
+        }
+        if (!validHdrExposureMode(request.hdr_exposure_mode)) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_exposure_mode_invalid",
+                "The HDR exposure mode is not recognized");
+            return result;
+        }
+        if (request.hdr_exposure_mode == render::HdrExposureMode::automatic &&
+            !request.hdr_tone_map.has_value()) {
+            result.status = WorkspaceViewportStatus::invalid;
+            result.diagnostic = diagnostic(
+                "workspace_viewport_hdr_exposure_requires_hdr",
+                "Automatic exposure requires HDR tone mapping");
             return result;
         }
         const bool builtin_vulkan_source =
@@ -2558,6 +2638,9 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
         }
         color_description.mutability = render::TextureMutability::mutable_data;
         color_description.samples = request.color_samples;
+        if (request.hdr_tone_map.has_value() && request.color_samples == 1U)
+            color_description.mip_levels = fullMipCount(
+                color_description.width, color_description.height);
         auto color = device.create_texture(color_description);
         if (!color.ok()) {
             result.status = color.status == render::TextureStatus::allocation_failed
@@ -2572,6 +2655,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             render::TextureDescription resolve_description = color_description;
             resolve_description.samples = 1U;
             if (request.hdr_tone_map.has_value()) {
+                resolve_description.mip_levels = fullMipCount(
+                    resolve_description.width, resolve_description.height);
                 resolve_description.usage =
                     render::TextureUsage::sampled |
                     render::TextureUsage::color_attachment |
@@ -3475,7 +3560,8 @@ WorkspaceViewportPrepareResult prepareWorkspaceViewport(
             &device, device.info().backend, request.presentation,
             std::move(color.texture),
             std::move(resolved_color), std::move(tone_mapped_color),
-            request.hdr_tone_map, std::move(depth.attachment),
+            request.hdr_tone_map, request.hdr_exposure_mode,
+            std::move(depth.attachment),
             std::move(execution),
             std::move(authoring_overlay_pipeline),
             std::move(ai_spline_passes),

@@ -146,8 +146,12 @@ void rejects_shape_and_dimension_requests() {
             "array HDR source is rejected");
     source = source_description();
     source.mip_levels = 2U;
+    require(validate(source, destination) == HdrToneMapStatus::ready,
+            "valid mipped HDR source is accepted");
+    source = source_description();
+    source.mip_levels = 6U;
     require(validate(source, destination) == HdrToneMapStatus::invalid_request,
-            "mipped HDR source is rejected");
+            "HDR source mip chain beyond dimensions is rejected");
     source = source_description();
     source.samples = 4U;
     require(validate(source, destination) == HdrToneMapStatus::invalid_request,
@@ -317,6 +321,55 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
     TextureResult display = created.device->create_texture(output);
     require(display.ok(), "backend creates HDR tone-map display target");
 
+    TextureDescription luminance_source = source;
+    luminance_source.width = 4U;
+    luminance_source.height = 2U;
+    luminance_source.mip_levels = 3U;
+    luminance_source.usage = TextureUsage::sampled |
+                             TextureUsage::color_attachment |
+                             TextureUsage::transfer_source;
+    luminance_source.mutability = TextureMutability::mutable_data;
+    luminance_source.access_policy = TextureAccessPolicy::render_then_sample;
+    std::array<std::uint16_t, 32U> luminance_pixels{};
+    for (std::size_t pixel = 0U; pixel < 8U; ++pixel) {
+        const std::uint16_t value = pixel < 4U ? 0x0000U : 0x4000U;
+        luminance_pixels[pixel * 4U] = value;
+        luminance_pixels[pixel * 4U + 1U] = value;
+        luminance_pixels[pixel * 4U + 2U] = value;
+        luminance_pixels[pixel * 4U + 3U] =
+            pixel % 2U == 0U ? 0x0000U : 0x7bffU;
+    }
+    TextureUploadPlan luminance_upload;
+    luminance_upload.subresources.push_back(
+        {0U, 0U, 4U, 2U, 4U * 4U * sizeof(std::uint16_t),
+         std::as_bytes(std::span(luminance_pixels))});
+    TextureResult luminance_hdr =
+        created.device->create_texture(luminance_source, luminance_upload);
+    require(luminance_hdr.ok(),
+            "backend creates initialized HDR luminance source");
+    HdrLuminanceResult measured =
+        created.device->measure_hdr_luminance(*luminance_hdr.texture);
+    if (!measured.ok())
+        throw std::runtime_error("backend HDR luminance failed: " +
+                                 measured.diagnostic.code + ": " +
+                                 measured.diagnostic.message);
+    require(std::abs(measured.luminance - 1.0F) < 0.002F,
+            "backend averages HDR RGB while ignoring alpha");
+
+    TextureDescription luminance_output = output;
+    luminance_output.width = luminance_source.width;
+    luminance_output.height = luminance_source.height;
+    TextureResult luminance_display =
+        created.device->create_texture(luminance_output);
+    require(luminance_display.ok(),
+            "backend creates luminance tone-map destination");
+    require(created.device->tone_map_hdr_texture(
+                *luminance_hdr.texture, *luminance_display.texture).ok(),
+            "backend tone maps after HDR luminance readback");
+    measured = created.device->measure_hdr_luminance(*luminance_hdr.texture);
+    require(measured.ok() && std::abs(measured.luminance - 1.0F) < 0.002F,
+            "backend repeats HDR luminance measurement with tracked states");
+
     HdrToneMapResult result = created.device->tone_map_hdr_texture(
         *hdr.texture, *display.texture);
     if (!result.ok())
@@ -347,6 +400,7 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
             "backend creates four-sample RGBA16F scene target");
 
     TextureDescription resolved_source = source;
+    resolved_source.mip_levels = 2U;
     resolved_source.usage = TextureUsage::sampled |
                             TextureUsage::color_attachment |
                             TextureUsage::transfer_source;
@@ -367,6 +421,15 @@ bool executes_backend(const Backend backend, const DeviceOptions& options) {
         throw std::runtime_error("backend HDR resolve failed: " +
                                  resolved.diagnostic.code + ": " +
                                  resolved.diagnostic.message);
+    measured = created.device->measure_hdr_luminance(*resolved_hdr.texture);
+    if (!measured.ok())
+        throw std::runtime_error("resolved HDR luminance failed: " +
+                                 measured.diagnostic.code + ": " +
+                                 measured.diagnostic.message);
+    constexpr float resolved_luminance =
+        4.0F * 0.2126F + 2.0F * 0.7152F + 1.0F * 0.0722F;
+    require(std::abs(measured.luminance - resolved_luminance) < 0.004F,
+            "backend measures the retained RGBA16F resolve target");
     result = created.device->tone_map_hdr_texture(
         *resolved_hdr.texture, *display.texture);
     if (!result.ok())

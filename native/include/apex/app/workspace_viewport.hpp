@@ -143,6 +143,9 @@ struct WorkspaceViewportPrepareRequest {
     // Presence enables the portable HDR scene target and the source-evidenced
     // tone-map approximation. The default LDR path remains unchanged.
     std::optional<render::HdrToneMapParameters> hdr_tone_map;
+    // Automatic exposure measures the resolved HDR scene synchronously before
+    // tone mapping. It is intentionally opt-in and has no temporal history.
+    render::HdrExposureMode hdr_exposure_mode = render::HdrExposureMode::manual;
     // A presentation target is single-sample. Four-sample scenes resolve to
     // an owned single-sample texture before presentation.
     std::uint32_t color_samples = 1U;
@@ -287,6 +290,9 @@ struct WorkspaceViewportFrameRequest {
     // Override the prepared tone-map values for this frame. An LDR viewport
     // rejects this value because it has no HDR scene target.
     std::optional<render::HdrToneMapParameters> hdr_tone_map;
+    // Override the prepared exposure mode for this frame. Automatic exposure
+    // requires a prepared HDR scene and performs one synchronous measurement.
+    std::optional<render::HdrExposureMode> hdr_exposure_mode;
     bool load_color = false;
     std::array<float, 4> clear_color = {0.0F, 0.0F, 0.0F, 1.0F};
     bool clear_depth = true;
@@ -517,6 +523,7 @@ private:
         std::unique_ptr<render::Texture> resolved_color,
         std::unique_ptr<render::Texture> tone_mapped_color,
         std::optional<render::HdrToneMapParameters> hdr_tone_map,
+        render::HdrExposureMode hdr_exposure_mode,
         std::unique_ptr<render::DepthAttachment> depth,
         std::unique_ptr<render::StockSceneExecutionResult> execution,
         std::optional<render::PipelineProgram> authoring_overlay_pipeline,
@@ -544,6 +551,7 @@ private:
     std::unique_ptr<render::Texture> resolved_color_;
     std::unique_ptr<render::Texture> tone_mapped_color_;
     std::optional<render::HdrToneMapParameters> hdr_tone_map_;
+    render::HdrExposureMode hdr_exposure_mode_ = render::HdrExposureMode::manual;
     std::unique_ptr<render::DepthAttachment> depth_;
     std::unique_ptr<render::StockSceneExecutionResult> execution_;
     std::optional<render::PipelineProgram> authoring_overlay_pipeline_;

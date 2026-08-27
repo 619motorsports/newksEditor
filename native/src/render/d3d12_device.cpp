@@ -3,6 +3,7 @@
 #include "d3d12_stock_ks_per_pixel.hpp"
 #include "d3d12_stock_ks_per_pixel_batch.hpp"
 #include "d3d12_stock_ks_per_pixel_status.hpp"
+#include "half_float.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2211,6 +2212,197 @@ bool clear_texture_readback(const std::shared_ptr<D3D12Context>& context,
         for (std::size_t index = 0; index < output.size(); index += 4U)
             std::swap(output[index], output[index + 2U]);
     }
+    return true;
+}
+
+[[nodiscard]] bool read_d3d12_hdr_luminance(
+    const std::shared_ptr<D3D12Context>& context,
+    ID3D12Resource* source,
+    const TextureDescription& description,
+    D3D12_RESOURCE_STATES& source_state,
+    float& luminance,
+    Diagnostic& diagnostic) {
+    luminance = 0.0F;
+    if (context == nullptr || context->device == nullptr || context->queue == nullptr ||
+        source == nullptr) {
+        diagnostic = {"d3d12_hdr_luminance_uninitialized",
+                      "D3D12 HDR luminance measurement requires an initialized device and texture"};
+        return false;
+    }
+    if (description.format != TextureFormat::rgba16_sfloat ||
+        description.shape != TextureShape::texture_2d || description.samples != 1U ||
+        description.array_layers != 1U || description.mip_levels == 0U) {
+        diagnostic = {"hdr_luminance_request_invalid",
+                      "HDR luminance measurement requires a single-sample, one-layer RGBA16F mip chain"};
+        return false;
+    }
+    const std::uint32_t last_mip = description.mip_levels - 1U;
+    const std::uint32_t last_width = std::max(1U, description.width >> last_mip);
+    const std::uint32_t last_height = std::max(1U, description.height >> last_mip);
+    if (last_width != 1U || last_height != 1U) {
+        diagnostic = {"hdr_luminance_mip_chain_incomplete",
+                      "HDR luminance measurement requires a final one-by-one mip level"};
+        return false;
+    }
+
+    const UINT subresource = last_mip;
+    const D3D12_RESOURCE_DESC resource_description = source->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT row_count = 0U;
+    UINT64 row_size = 0U;
+    UINT64 readback_size = 0U;
+    context->device->GetCopyableFootprints(
+        &resource_description, subresource, 1U, 0U, &footprint, &row_count,
+        &row_size, &readback_size);
+    constexpr UINT64 row_bytes = 4U * sizeof(std::uint16_t);
+    constexpr UINT64 max_size_t = static_cast<UINT64>(std::numeric_limits<std::size_t>::max());
+    if (row_count == 0U || row_size < row_bytes || footprint.Footprint.RowPitch < row_bytes ||
+        footprint.Offset > max_size_t || readback_size == 0U ||
+        readback_size > max_size_t ||
+        readback_size > max_texture_readback_bytes) {
+        diagnostic = {"hdr_luminance_readback_footprint_invalid",
+                      "D3D12 HDR luminance readback footprint exceeds the bounded output"};
+        return false;
+    }
+    if (footprint.Offset > readback_size ||
+        row_bytes > readback_size - footprint.Offset) {
+        diagnostic = {"hdr_luminance_readback_footprint_invalid",
+                      "D3D12 HDR luminance readback row exceeds the bounded footprint"};
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_description{};
+    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_description.Width = readback_size;
+    buffer_description.Height = 1U;
+    buffer_description.DepthOrArraySize = 1U;
+    buffer_description.MipLevels = 1U;
+    buffer_description.SampleDesc.Count = 1U;
+    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    HRESULT result = context->device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &buffer_description,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommittedResource(HDR luminance readback)", result);
+        diagnostic.code = "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+
+    std::lock_guard command_guard(context->command_mutex);
+    ComPtr<ID3D12CommandAllocator> allocator;
+    result = context->device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandAllocator(HDR luminance readback)", result);
+        diagnostic.code = "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    result = context->device->CreateCommandList(
+        0U, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+        IID_PPV_ARGS(&list));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateCommandList(HDR luminance readback)", result);
+        diagnostic.code = "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    const D3D12_RESOURCE_STATES restore_state = source_state;
+    if (source_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = source;
+        barrier.Transition.StateBefore = source_state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        // The D3D12 texture wrapper tracks one state for the whole image, so
+        // transition all mips before copying the terminal subresource.
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    D3D12_TEXTURE_COPY_LOCATION source_location{};
+    source_location.pResource = source;
+    source_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source_location.SubresourceIndex = subresource;
+    D3D12_TEXTURE_COPY_LOCATION target_location{};
+    target_location.pResource = readback.Get();
+    target_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target_location.PlacedFootprint = footprint;
+    list->CopyTextureRegion(&target_location, 0U, 0U, 0U, &source_location, nullptr);
+    if (restore_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = source;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = restore_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1U, &barrier);
+    }
+    result = list->Close();
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12GraphicsCommandList::Close(HDR luminance readback)", result);
+        diagnostic.code = "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    result = context->device->CreateFence(0U, D3D12_FENCE_FLAG_NONE,
+                                          IID_PPV_ARGS(&fence));
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Device::CreateFence(HDR luminance readback)", result);
+        diagnostic.code = "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event == nullptr) {
+        diagnostic = {"d3d12_hdr_luminance_readback_failed",
+                      "CreateEventW failed while waiting for a D3D12 HDR luminance readback"};
+        return false;
+    }
+    ID3D12CommandList* command_lists[] = {list.Get()};
+    context->queue->ExecuteCommandLists(1U, command_lists);
+    constexpr UINT64 fence_value = 1U;
+    result = context->queue->Signal(fence.Get(), fence_value);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value)
+        result = fence->SetEventOnCompletion(fence_value, event);
+    if (SUCCEEDED(result) && fence->GetCompletedValue() < fence_value &&
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+        result = E_FAIL;
+    CloseHandle(event);
+    if (FAILED(result)) {
+        const bool drained = context->wait_idle();
+        source_state = drained ? restore_state : D3D12_RESOURCE_STATE_COMMON;
+        diagnostic = hresult_error("D3D12 HDR luminance readback fence", result);
+        diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                              ? "d3d12_device_removed"
+                              : "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    source_state = restore_state;
+
+    void* mapped = nullptr;
+    D3D12_RANGE read_range{footprint.Offset,
+                           footprint.Offset + static_cast<SIZE_T>(row_bytes)};
+    result = readback->Map(0U, &read_range, &mapped);
+    if (FAILED(result)) {
+        diagnostic = hresult_error("ID3D12Resource::Map(HDR luminance readback)", result);
+        diagnostic.code = (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
+                              ? "d3d12_device_removed"
+                              : "d3d12_hdr_luminance_readback_failed";
+        return false;
+    }
+    const auto* bytes = static_cast<const std::byte*>(mapped) + footprint.Offset;
+    std::uint16_t channels[3U]{};
+    for (std::size_t channel = 0U; channel < 3U; ++channel)
+        std::memcpy(&channels[channel], bytes + channel * sizeof(std::uint16_t),
+                    sizeof(std::uint16_t));
+    readback->Unmap(0U, nullptr);
+    const float red = detail::half_to_float(channels[0U]);
+    const float green = detail::half_to_float(channels[1U]);
+    const float blue = detail::half_to_float(channels[2U]);
+    luminance = red * 0.2126F + green * 0.7152F + blue * 0.0722F;
+    if (!std::isfinite(luminance)) luminance = 0.0F;
+    diagnostic = {};
     return true;
 }
 
@@ -7897,6 +8089,75 @@ public:
                    ? TextureUpdateResult{TextureStatus::ready, {}}
                    : TextureUpdateResult{TextureStatus::upload_failed,
                                          std::move(diagnostic)};
+    }
+
+    HdrLuminanceResult measure_hdr_luminance(Texture& texture) override {
+        HdrLuminanceResult output;
+        Diagnostic diagnostic;
+        const HdrLuminanceStatus validation =
+            validate_hdr_luminance_request(texture, diagnostic);
+        if (validation != HdrLuminanceStatus::ready) {
+            output.status = validation;
+            output.diagnostic = std::move(diagnostic);
+            return output;
+        }
+        if (texture.backend() != Backend::D3D12) {
+            output.status = HdrLuminanceStatus::unsupported;
+            output.diagnostic = {
+                "hdr_luminance_backend_mismatch",
+                "D3D12 HDR luminance measurement requires a D3D12 texture"};
+            return output;
+        }
+        auto* d3d_texture = dynamic_cast<D3D12Texture*>(&texture);
+        if (d3d_texture == nullptr) {
+            output.status = HdrLuminanceStatus::unsupported;
+            output.diagnostic = {
+                "hdr_luminance_texture_type_unsupported",
+                "The D3D12 device received an unknown HDR luminance texture handle"};
+            return output;
+        }
+        if (d3d_texture->context() != context_.get()) {
+            output.status = HdrLuminanceStatus::unsupported;
+            output.diagnostic = {
+                "hdr_luminance_context_mismatch",
+                "HDR luminance texture belongs to another D3D12 device"};
+            return output;
+        }
+        if (!d3d_texture->initialized() ||
+            !d3d_texture->base_mip_initialized()) {
+            output.status = HdrLuminanceStatus::invalid_request;
+            output.diagnostic = {
+                "hdr_luminance_source_uninitialized",
+                "HDR luminance measurement requires an initialized source texture"};
+            return output;
+        }
+        if (!validate_d3d12_texture_format_support(
+                context_, dxgi_texture_format(texture.info().description.format),
+                texture.info().description.mip_levels, diagnostic,
+                texture.info().description.usage)) {
+            output.status = HdrLuminanceStatus::unsupported;
+            output.diagnostic = std::move(diagnostic);
+            return output;
+        }
+        // The reduction pass is deliberately shared with reflection capture:
+        // it provides the same linear RGBA16F filtering and restores the
+        // texture's tracked shader-readable state before the copy below.
+        if (texture.info().description.mip_levels > 1U &&
+            !d3d_texture->generate_mips(diagnostic)) {
+            output.status = HdrLuminanceStatus::execution_failed;
+            output.diagnostic = std::move(diagnostic);
+            return output;
+        }
+        if (!read_d3d12_hdr_luminance(
+                context_, d3d_texture->resource(), texture.info().description,
+                *d3d_texture->state_pointer(), output.luminance, diagnostic)) {
+            output.status = HdrLuminanceStatus::execution_failed;
+            output.diagnostic = std::move(diagnostic);
+            return output;
+        }
+        output.status = HdrLuminanceStatus::ready;
+        output.diagnostic = {};
+        return output;
     }
 
     HdrToneMapResult tone_map_hdr_texture(
